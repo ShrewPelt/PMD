@@ -177,11 +177,7 @@ let chatActive = false;
 let socket = null;
 let myId = null;
 const otherPlayers = {};
-let bubbleGfx;
-let bubbleTxt;
-let bubblePortrait;
-let bubbleVisible = false;
-let bubbleTimer = null;
+const bubbles = {};
 
 let inventoryOpen = false;
 let playerHp = 40;
@@ -248,16 +244,6 @@ function create() {
   this.cameras.main.setBounds(0, 0, MAP[0].length * TILE, MAP.length * TILE);
   this.cameras.main.startFollow(player, true, 0.12, 0.12);
 
-  bubbleGfx = this.add.graphics();
-  bubbleGfx.setDepth(500);
-  bubbleTxt = this.add.text(0, 0, "", { fontSize: "13px", color: "#222233", fontFamily: "sans-serif", wordWrap: { width: 200 } });
-  bubbleTxt.setDepth(501);
-  bubblePortrait = this.add.image(0, 0, "__DEFAULT");
-  bubblePortrait.setDepth(501);
-  bubblePortrait.setDisplaySize(48, 48);
-  bubblePortrait.setVisible(false);
-  hideBubble();
-
   readout = this.add.text(12, 12, "", { fontSize: "13px", color: "#ffffff", fontFamily: "monospace" });
   readout.setScrollFactor(0);
   readout.setDepth(1000);
@@ -305,8 +291,10 @@ function create() {
 }
 
 function update() {
-  if (bubbleVisible) {
-    positionBubble();
+  for (const key in bubbles) {
+    if (bubbles[key].visible) {
+      positionBubbleObj(bubbles[key]);
+    }
   }
 }
 
@@ -523,65 +511,90 @@ function parseMessage(raw) {
   return { text: text, emotion: emotion };
 }
 
+function makeBubble(scene) {
+  const gfx = scene.add.graphics();
+  gfx.setDepth(500);
+  const txt = scene.add.text(0, 0, "", { fontSize: "13px", color: "#222233", fontFamily: "sans-serif", wordWrap: { width: 200 } });
+  txt.setDepth(501);
+  const portrait = scene.add.image(0, 0, "__DEFAULT");
+  portrait.setDepth(501);
+  portrait.setDisplaySize(48, 48);
+  portrait.setVisible(false);
+  return { gfx: gfx, txt: txt, portrait: portrait, target: null, timer: null, visible: false };
+}
+
 function showBubble(raw) {
+  showBubbleFor(sceneRef, "me", player, DEX, raw);
+  sendChat(raw);
+}
+
+function showBubbleFor(scene, key, target, dex, raw) {
   const parsed = parseMessage(raw);
-  bubbleTxt.setText(parsed.text);
-  bubbleVisible = true;
+  let b = bubbles[key];
+  if (!b) {
+    b = makeBubble(scene);
+    bubbles[key] = b;
+  }
+  b.target = target;
+  b.visible = true;
+  b.txt.setText(parsed.text);
 
-  const key = "portrait_" + DEX + "_" + parsed.emotion;
-  if (sceneRef.textures.exists(key)) {
-    bubblePortrait.setTexture(key);
-    bubblePortrait.setDisplaySize(48, 48);
-    bubblePortrait.setVisible(true);
-    positionBubble();
+  const texKey = "portrait_" + dex + "_" + parsed.emotion;
+  if (scene.textures.exists(texKey)) {
+    b.portrait.setTexture(texKey);
+    b.portrait.setDisplaySize(48, 48);
+    b.portrait.setVisible(true);
   } else {
-    const url = "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/portrait/" + DEX + "/" + parsed.emotion + ".png";
-    sceneRef.load.image(key, url);
-    sceneRef.load.once("complete", () => {
-      if (sceneRef.textures.exists(key)) {
-        bubblePortrait.setTexture(key);
-        bubblePortrait.setDisplaySize(48, 48);
-        bubblePortrait.setVisible(true);
-      } else {
-        bubblePortrait.setVisible(false);
+    const url = "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/portrait/" + dex + "/" + parsed.emotion + ".png";
+    scene.load.image(texKey, url);
+    scene.load.once("complete", () => {
+      if (scene.textures.exists(texKey)) {
+        b.portrait.setTexture(texKey);
+        b.portrait.setDisplaySize(48, 48);
+        b.portrait.setVisible(true);
       }
-      positionBubble();
+      positionBubbleObj(b);
     });
-    sceneRef.load.start();
+    scene.load.start();
   }
 
-  positionBubble();
+  positionBubbleObj(b);
 
-  if (bubbleTimer) {
-    bubbleTimer.remove();
-  }
-  bubbleTimer = sceneRef.time.delayedCall(5000, () => hideBubble());
+  if (b.timer) b.timer.remove();
+  b.timer = scene.time.delayedCall(5000, () => hideBubbleObj(b));
 }
 
-function positionBubble() {
+function positionBubbleObj(b) {
+  if (!b.visible || !b.target) return;
   const pad = 7;
-  const boxW = bubbleTxt.width + pad * 2;
-  const boxH = bubbleTxt.height + pad * 2;
-  const boxX = player.x - boxW / 2;
-  const boxY = player.y - 74 - boxH;
+  const boxW = b.txt.width + pad * 2;
+  const boxH = b.txt.height + pad * 2;
+  const boxX = b.target.x - boxW / 2;
+  const boxY = b.target.y - 74 - boxH;
 
-  bubbleGfx.clear();
-  bubbleGfx.fillStyle(0xffffff, 0.95);
-  bubbleGfx.fillRoundedRect(boxX, boxY, boxW, boxH, 6);
-  bubbleGfx.fillTriangle(player.x - 6, boxY + boxH, player.x + 6, boxY + boxH, player.x, boxY + boxH + 8);
+  b.gfx.clear();
+  b.gfx.fillStyle(0xffffff, 0.95);
+  b.gfx.fillRoundedRect(boxX, boxY, boxW, boxH, 6);
+  b.gfx.fillTriangle(b.target.x - 6, boxY + boxH, b.target.x + 6, boxY + boxH, b.target.x, boxY + boxH + 8);
 
-  bubbleTxt.setPosition(boxX + pad, boxY + pad);
+  b.txt.setPosition(boxX + pad, boxY + pad);
 
-  if (bubblePortrait.visible) {
-    bubblePortrait.setPosition(boxX - 28, boxY + boxH / 2);
+  if (b.portrait.visible) {
+    b.portrait.setPosition(boxX - 28, boxY + boxH / 2);
   }
 }
 
-function hideBubble() {
-  bubbleVisible = false;
-  bubbleGfx.clear();
-  bubbleTxt.setText("");
-  bubblePortrait.setVisible(false);
+function hideBubbleObj(b) {
+  b.visible = false;
+  b.gfx.clear();
+  b.txt.setText("");
+  b.portrait.setVisible(false);
+}
+
+function sendChat(raw) {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: "chat", text: raw }));
+  }
 }
 
 function emotionForHp(ratio) {
@@ -734,6 +747,11 @@ function connectMultiplayer(scene) {
       }
     } else if (data.type === "move") {
       updateOtherPlayer(scene, data);
+    } else if (data.type === "chat") {
+      const sprite = otherPlayers[data.id];
+      if (sprite) {
+        showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text);
+      }
     } else if (data.type === "leave") {
       removeOtherPlayer(data.id);
     }
@@ -780,6 +798,14 @@ function removeOtherPlayer(id) {
   if (sprite) {
     sprite.destroy();
     delete otherPlayers[id];
+  }
+  const b = bubbles["p" + id];
+  if (b) {
+    if (b.timer) b.timer.remove();
+    b.gfx.destroy();
+    b.txt.destroy();
+    b.portrait.destroy();
+    delete bubbles["p" + id];
   }
 }
 

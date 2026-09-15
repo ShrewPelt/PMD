@@ -59,6 +59,12 @@ wss.on("connection", (socket) => {
       p.direction = data.direction;
       broadcast({ type: "move", id: id, col: p.col, row: p.row, direction: p.direction }, id);
     }
+    if (data.type === "chat") {
+      const p = players[id];
+      if (!p) return;
+      const text = String(data.text || "").slice(0, 200);
+      broadcast({ type: "chat", id: id, dex: p.dex, text: text }, id);
+    }
   });
 
   socket.on("close", () => {
