@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>PMD Web</title>
+<style>
+  body { margin: 0; background: #1a1a2e; font-family: sans-serif; }
+  #game { display: flex; justify-content: center; padding-top: 20px; }
+  #chat { display: flex; justify-content: center; padding: 12px; }
+  #chatInput {
+    width: 640px;
+    padding: 10px 12px;
+    font-size: 14px;
+    border: none;
+    border-radius: 6px;
+    background: #2d2d44;
+    color: #ffffff;
+    outline: none;
+  }
+  #chatInput::placeholder { color: #8888aa; }
+
+  #inventory {
+    width: 664px;
+    margin: 0 auto 24px auto;
+    border: 2px solid #ffffff;
+    border-radius: 8px;
+    background: rgba(120,120,150,0.15);
+    padding: 14px;
+    color: #ffffff;
+    box-sizing: border-box;
+  }
+  #inventory.hidden { display: none; }
+  #invTop { display: flex; gap: 18px; align-items: center; margin-bottom: 14px; }
+  #invPortrait {
+    width: 74px; height: 74px;
+    border: 2px solid #4a6cff;
+    border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.25);
+    flex: none;
+  }
+  #invPortrait img { width: 64px; height: 64px; image-rendering: pixelated; }
+  #invStats { font-size: 14px; line-height: 1.9; }
+  #invStats .row { display: flex; gap: 24px; }
+  #invGrid {
+    border: 2px solid #ffd23f;
+    border-radius: 6px;
+    padding: 10px;
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    background: rgba(0,0,0,0.15);
+  }
+  .slot {
+    aspect-ratio: 1 / 1;
+    border: 1px solid #55557a;
+    border-radius: 4px;
+    background: rgba(0,0,0,0.25);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; text-align: center; color: #d0d0e0;
+    padding: 3px; box-sizing: border-box;
+    position: relative;
+  }
+  .slot img { width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; }
+  .slot.selected { border: 2px solid #ffffff; box-shadow: 0 0 6px rgba(255,255,255,0.7); }
+  .badge {
+    position: absolute;
+    top: 2px; right: 4px;
+    font-size: 12px; font-weight: bold;
+    color: #ffffff;
+    text-shadow: 0 0 3px #000000, 0 0 3px #000000;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="game"></div>
+<div id="chat">
+  <input id="chatInput" type="text" autocomplete="off" placeholder="Chat..." />
+</div>
+<div id="inventory" class="hidden">
+  <div id="invTop">
+    <div id="invPortrait"><img id="invPortraitImg" alt="" /></div>
+    <div id="invStats">
+      <div class="row"><span>Pokecoins: <span id="invCoins">0</span></span><span>Bag: <span id="invBag">none (10 slots)</span></span></div>
+      <div class="row"><span>Head: <span id="invHead">-</span></span><span>Neck: <span id="invNeck">-</span></span><span>Back: <span id="invBack">-</span></span></div>
+    </div>
+  </div>
+  <div id="invGrid"></div>
+</div>
+<script src="phaser.min.js"></script>
+<script>
+const TILE = 48;
+const DEX = "0004";
+
+const MAP = [
+  "############################",
+  "########...........#########",
+  "##.......#########........##",
+  "##.......##############...##",
+  "##....#..............##...##",
+  "##....#######.####...##...##",
+  "##.......####.####........##",
+  "###.#########.########.#####",
+  "###....####......#####....##",
+  "######.####....#.########.##",
+  "######........##.###......##",
+  "######.####......###.#######",
+  "######.######.######.#######",
+  "##.....######.#####.......##",
+  "##....#######.####.......###",
+  "##...###..............######",
+  "##....#...########........##",
+  "##........#########...##..##",
+  "############################",
+  "############################"
+];
+
+const DELTAS = {
+  up: { dc: 0, dr: -1 },
+  down: { dc: 0, dr: 1 },
+  left: { dc: -1, dr: 0 },
+  right: { dc: 1, dr: 0 },
+  upleft: { dc: -1, dr: -1 },
+  upright: { dc: 1, dr: -1 },
+  downleft: { dc: -1, dr: 1 },
+  downright: { dc: 1, dr: 1 }
+};
+
+const EMOTIONS = ["Angry", "Crying", "Determined", "Dizzy", "Happy", "Inspired", "Joyous", "Normal", "Pain", "Sad", "Shouting", "Sigh", "Special0", "Special1", "Special2", "Special3", "Stunned", "Surprised", "Teary-Eyed", "Worried"];
+const EMOTION_LOOKUP = {};
+for (let i = 0; i < EMOTIONS.length; i++) {
+  EMOTION_LOOKUP[EMOTIONS[i].toLowerCase()] = EMOTIONS[i];
+}
+
+const BASE_SLOTS = 10;
+const BAG_BONUS = {
+  none: 0,
+  RescueBag: 5,
+  WhiteBackpack: 10,
+  MerchantSache: 30
+};
+let carriedBag = "none";
+
+const config = {
+  type: Phaser.AUTO,
+  width: 640,
+  height: 480,
+  pixelArt: true,
+  parent: "game",
+  backgroundColor: "#1a1a2e",
+  loader: { crossOrigin: "anonymous" },
+  scene: {
+    preload: preload,
+    create: create,
+    update: update
+  }
+};
+
+let player;
+let readout;
+let turnCount = 1;
+let state = "input";
+let lockedAction = null;
+
+let sceneRef;
+let chatActive = false;
+let bubbleGfx;
+let bubbleTxt;
+let bubblePortrait;
+let bubbleVisible = false;
+let bubbleTimer = null;
+
+let inventoryOpen = false;
+let playerHp = 40;
+let playerMaxHp = 40;
+const inventoryItems = [{ name: "Oran Berry", count: 3 }, { name: "Apple", count: 1 }];
+let itemIndex = {};
+
+const floorItems = [
+  { col: 11, row: 9, name: "Oran Berry" },
+  { col: 16, row: 9, name: "Apple" }
+];
+const floorItemSprites = {};
+let selectedSlot = -1;
+const ITEM_LIFT = 10;
+
+function preload() {
+  this.load.spritesheet("charmander_walk", "sprites/0004/Walk-Anim.png", { frameWidth: 32, frameHeight: 32 });
+  this.load.spritesheet("charmander_idle", "sprites/0004/Idle-Anim.png", { frameWidth: 32, frameHeight: 40 });
+}
+
+function create() {
+  sceneRef = this;
+
+  fetch("items-index.json").then((r) => r.json()).then((data) => {
+    itemIndex = data;
+    placeFloorItems(sceneRef);
+    if (inventoryOpen) refreshInventoryPanel();
+  }).catch(() => {});
+
+  const g = this.add.graphics();
+  for (let r = 0; r < MAP.length; r++) {
+    for (let c = 0; c < MAP[r].length; c++) {
+      const isWall = MAP[r][c] === "#";
+      g.fillStyle(isWall ? 0x24243a : 0x3a3a55, 1);
+      g.fillRect(c * TILE, r * TILE, TILE - 2, TILE - 2);
+    }
+  }
+
+  this.anims.create({ key: "walk_down", frames: this.anims.generateFrameNumbers("charmander_walk", { start: 0, end: 3 }), frameRate: 8, repeat: -1 });
+  this.anims.create({ key: "walk_downright", frames: this.anims.generateFrameNumbers("charmander_walk", { start: 4, end: 7 }), frameRate: 8, repeat: -1 });
+  this.anims.create({ key: "walk_right", frames: this.anims.generateFrameNumbers("charmander_walk", { start: 8, end: 11 }), frameRate: 8, repeat: -1 });
+  this.anims.create({ key: "walk_upright", frames: this.anims.generateFrameNumbers("charmander_walk", { start: 12, end: 15 }), frameRate: 8, repeat: -1 });
+  this.anims.create({ key: "walk_up", frames: this.anims.generateFrameNumbers("charmander_walk", { start: 16, end: 19 }), frameRate: 8, repeat: -1 });
+  this.anims.create({ key: "walk_upleft", frames: this.anims.generateFrameNumbers("charmander_walk", { start: 20, end: 23 }), frameRate: 8, repeat: -1 });
+  this.anims.create({ key: "walk_left", frames: this.anims.generateFrameNumbers("charmander_walk", { start: 24, end: 27 }), frameRate: 8, repeat: -1 });
+  this.anims.create({ key: "walk_downleft", frames: this.anims.generateFrameNumbers("charmander_walk", { start: 28, end: 31 }), frameRate: 8, repeat: -1 });
+
+  this.anims.create({ key: "idle_down", frames: this.anims.generateFrameNumbers("charmander_idle", { start: 0, end: 3 }), frameRate: 4, repeat: -1 });
+  this.anims.create({ key: "idle_downright", frames: this.anims.generateFrameNumbers("charmander_idle", { start: 4, end: 7 }), frameRate: 4, repeat: -1 });
+  this.anims.create({ key: "idle_right", frames: this.anims.generateFrameNumbers("charmander_idle", { start: 8, end: 11 }), frameRate: 4, repeat: -1 });
+  this.anims.create({ key: "idle_upright", frames: this.anims.generateFrameNumbers("charmander_idle", { start: 12, end: 15 }), frameRate: 4, repeat: -1 });
+  this.anims.create({ key: "idle_up", frames: this.anims.generateFrameNumbers("charmander_idle", { start: 16, end: 19 }), frameRate: 4, repeat: -1 });
+  this.anims.create({ key: "idle_upleft", frames: this.anims.generateFrameNumbers("charmander_idle", { start: 20, end: 23 }), frameRate: 4, repeat: -1 });
+  this.anims.create({ key: "idle_left", frames: this.anims.generateFrameNumbers("charmander_idle", { start: 24, end: 27 }), frameRate: 4, repeat: -1 });
+  this.anims.create({ key: "idle_downleft", frames: this.anims.generateFrameNumbers("charmander_idle", { start: 28, end: 31 }), frameRate: 4, repeat: -1 });
+
+  player = this.add.sprite(0, 0, "charmander_idle");
+  player.setOrigin(0.5, 1);
+  player.setScale(1.5);
+  player.col = 13;
+  player.row = 9;
+  player.direction = "down";
+  player.x = tilePixelX(player.col);
+  player.y = tilePixelY(player.row);
+  player.play("idle_down");
+  player.setDepth(10);
+
+  this.cameras.main.setBounds(0, 0, MAP[0].length * TILE, MAP.length * TILE);
+  this.cameras.main.startFollow(player, true, 0.12, 0.12);
+
+  bubbleGfx = this.add.graphics();
+  bubbleGfx.setDepth(500);
+  bubbleTxt = this.add.text(0, 0, "", { fontSize: "13px", color: "#222233", fontFamily: "sans-serif", wordWrap: { width: 200 } });
+  bubbleTxt.setDepth(501);
+  bubblePortrait = this.add.image(0, 0, "__DEFAULT");
+  bubblePortrait.setDepth(501);
+  bubblePortrait.setDisplaySize(48, 48);
+  bubblePortrait.setVisible(false);
+  hideBubble();
+
+  readout = this.add.text(12, 12, "", { fontSize: "13px", color: "#ffffff", fontFamily: "monospace" });
+  readout.setScrollFactor(0);
+  readout.setDepth(1000);
+  updateReadout("none");
+
+  const kb = this.input.keyboard;
+  kb.on("keydown-Q", (e) => { if (e.repeat || chatActive) return; onDirection(this, "upleft"); });
+  kb.on("keydown-W", (e) => { if (e.repeat || chatActive) return; onDirection(this, "up"); });
+  kb.on("keydown-E", (e) => { if (e.repeat || chatActive) return; onDirection(this, "upright"); });
+  kb.on("keydown-A", (e) => { if (e.repeat || chatActive) return; onDirection(this, "left"); });
+  kb.on("keydown-D", (e) => { if (e.repeat || chatActive) return; onDirection(this, "right"); });
+  kb.on("keydown-Z", (e) => { if (e.repeat || chatActive) return; onDirection(this, "downleft"); });
+  kb.on("keydown-X", (e) => { if (e.repeat || chatActive) return; onDirection(this, "down"); });
+  kb.on("keydown-C", (e) => { if (e.repeat || chatActive) return; onDirection(this, "downright"); });
+  kb.on("keydown-H", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 1 }); });
+  kb.on("keydown-J", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 2 }); });
+  kb.on("keydown-K", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 3 }); });
+  kb.on("keydown-L", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 4 }); });
+  kb.on("keydown-S", (e) => { if (e.repeat || chatActive) return; toggleInventory(); });
+  kb.on("keydown-F", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "interact" }); });
+  kb.on("keydown-G", (e) => {
+    if (e.repeat || chatActive) return;
+    if (state !== "input") return;
+    if (selectedSlot < 0 || !inventoryItems[selectedSlot]) { updateReadout("select an item first"); return; }
+    if (hasFloorItemAt(player.col, player.row)) { updateReadout("tile already has an item"); return; }
+    lockAction(this, { type: "drop", slot: selectedSlot });
+  });
+  kb.on("keydown-R", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "use" }); });
+  kb.on("keydown-O", (e) => { if (e.repeat || chatActive) return; debugHp(-8); });
+  kb.on("keydown-P", (e) => { if (e.repeat || chatActive) return; debugHp(8); });
+  kb.on("keydown-B", (e) => { if (e.repeat || chatActive) return; cycleBag(); });
+
+  const input = document.getElementById("chatInput");
+  input.addEventListener("focus", () => { chatActive = true; });
+  input.addEventListener("blur", () => { chatActive = false; });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const value = input.value.trim();
+      if (value.length > 0) {
+        showBubble(value);
+      }
+      input.value = "";
+    }
+  });
+}
+
+function update() {
+  if (bubbleVisible) {
+    positionBubble();
+  }
+}
+
+function tilePixelX(col) {
+  return col * TILE + TILE / 2;
+}
+
+function tilePixelY(row) {
+  return row * TILE + TILE - 2;
+}
+
+function isFloor(col, row) {
+  if (row < 0 || row >= MAP.length) return false;
+  if (col < 0 || col >= MAP[row].length) return false;
+  return MAP[row][col] === ".";
+}
+
+function onDirection(scene, dir) {
+  if (state !== "input") return;
+
+  if (player.direction !== dir) {
+    player.direction = dir;
+    player.play("idle_" + dir);
+    updateReadout("face " + dir);
+    return;
+  }
+
+  lockAction(scene, { type: "move", dir: dir });
+}
+
+function lockAction(scene, action) {
+  if (state !== "input") return;
+
+  lockedAction = action;
+  state = "locked";
+  updateReadout("LOCKED " + describeAction(action));
+
+  scene.time.delayedCall(220, () => resolveTurn(scene));
+}
+
+function resolveTurn(scene) {
+  state = "resolving";
+
+  if (lockedAction.type === "move") {
+    const dir = lockedAction.dir;
+    const c = player.col + DELTAS[dir].dc;
+    const r = player.row + DELTAS[dir].dr;
+    if (isFloor(c, r)) {
+      player.col = c;
+      player.row = r;
+      player.play("walk_" + dir);
+      scene.tweens.add({
+        targets: player,
+        x: tilePixelX(c),
+        y: playerRestingY(c, r),
+        duration: 120,
+        onComplete: () => {
+          player.play("idle_" + player.direction);
+          endTurn();
+        }
+      });
+      return;
+    }
+    updateReadout("blocked " + dir);
+  } else if (lockedAction.type === "interact") {
+    tryPickup();
+  } else if (lockedAction.type === "drop") {
+    doDrop(scene);
+  }
+
+  endTurn();
+}
+
+function endTurn() {
+  turnCount = turnCount + 1;
+  lockedAction = null;
+  state = "input";
+  updateReadout("turn ready");
+}
+
+function ensureItemTexture(scene, name, cb) {
+  const key = "item_" + name;
+  if (scene.textures.exists(key)) {
+    cb(key);
+    return;
+  }
+  const iconPath = itemIndex[name];
+  if (!iconPath) {
+    cb(null);
+    return;
+  }
+  scene.load.image(key, encodeURI(iconPath));
+  scene.load.once("complete", () => {
+    cb(scene.textures.exists(key) ? key : null);
+  });
+  scene.load.start();
+}
+
+function placeFloorItems(scene) {
+  for (let i = 0; i < floorItems.length; i++) {
+    const item = floorItems[i];
+    ensureItemTexture(scene, item.name, (key) => {
+      if (!key) return;
+      const img = scene.add.image(item.col * TILE + TILE / 2, item.row * TILE + TILE / 2, key);
+      img.setDisplaySize(30, 30);
+      img.setDepth(5);
+      floorItemSprites[item.col + "," + item.row] = img;
+    });
+  }
+}
+
+function tryPickup() {
+  let found = -1;
+  for (let i = 0; i < floorItems.length; i++) {
+    if (floorItems[i].col === player.col && floorItems[i].row === player.row) {
+      found = i;
+      break;
+    }
+  }
+  if (found === -1) {
+    updateReadout("nothing to pick up");
+    return;
+  }
+  const name = floorItems[found].name;
+  const key = player.col + "," + player.row;
+  let stack = null;
+  for (let i = 0; i < inventoryItems.length; i++) {
+    if (inventoryItems[i].name === name) {
+      stack = inventoryItems[i];
+      break;
+    }
+  }
+  if (stack) {
+    stack.count = stack.count + 1;
+  } else {
+    if (inventoryItems.length >= slotCount()) {
+      updateReadout("bag full");
+      return;
+    }
+    inventoryItems.push({ name: name, count: 1 });
+  }
+  floorItems.splice(found, 1);
+  if (floorItemSprites[key]) {
+    floorItemSprites[key].destroy();
+    delete floorItemSprites[key];
+  }
+  updateReadout("picked up " + name);
+  if (inventoryOpen) refreshInventoryPanel();
+  updatePlayerLift();
+}
+
+function hasFloorItemAt(col, row) {
+  for (let i = 0; i < floorItems.length; i++) {
+    if (floorItems[i].col === col && floorItems[i].row === row) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function playerRestingY(col, row) {
+  return tilePixelY(row) - (hasFloorItemAt(col, row) ? ITEM_LIFT : 0);
+}
+
+function updatePlayerLift() {
+  player.y = playerRestingY(player.col, player.row);
+}
+
+function doDrop(scene) {
+  const slot = lockedAction.slot;
+  const stack = inventoryItems[slot];
+  if (!stack) {
+    updateReadout("nothing to drop");
+    return;
+  }
+  if (hasFloorItemAt(player.col, player.row)) {
+    updateReadout("tile already has an item");
+    return;
+  }
+  const name = stack.name;
+  stack.count = stack.count - 1;
+  if (stack.count <= 0) {
+    inventoryItems.splice(slot, 1);
+    selectedSlot = -1;
+  }
+  floorItems.push({ col: player.col, row: player.row, name: name });
+  ensureItemTexture(scene, name, (key) => {
+    if (!key) return;
+    const img = scene.add.image(player.col * TILE + TILE / 2, player.row * TILE + TILE / 2, key);
+    img.setDisplaySize(30, 30);
+    img.setDepth(5);
+    floorItemSprites[player.col + "," + player.row] = img;
+  });
+  updateReadout("dropped " + name);
+  if (inventoryOpen) refreshInventoryPanel();
+  updatePlayerLift();
+}
+
+function parseMessage(raw) {
+  let emotion = "Normal";
+  const tags = raw.match(/\[[^\]]+\]/g);
+  if (tags) {
+    for (let i = 0; i < tags.length; i++) {
+      const inner = tags[i].slice(1, -1).trim().toLowerCase();
+      if (EMOTION_LOOKUP[inner]) {
+        emotion = EMOTION_LOOKUP[inner];
+        break;
+      }
+    }
+  }
+  const text = raw.replace(/\[[^\]]*\]/g, "").replace(/\s+/g, " ").trim();
+  return { text: text, emotion: emotion };
+}
+
+function showBubble(raw) {
+  const parsed = parseMessage(raw);
+  bubbleTxt.setText(parsed.text);
+  bubbleVisible = true;
+
+  const key = "portrait_" + DEX + "_" + parsed.emotion;
+  if (sceneRef.textures.exists(key)) {
+    bubblePortrait.setTexture(key);
+    bubblePortrait.setDisplaySize(48, 48);
+    bubblePortrait.setVisible(true);
+    positionBubble();
+  } else {
+    const url = "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/portrait/" + DEX + "/" + parsed.emotion + ".png";
+    sceneRef.load.image(key, url);
+    sceneRef.load.once("complete", () => {
+      if (sceneRef.textures.exists(key)) {
+        bubblePortrait.setTexture(key);
+        bubblePortrait.setDisplaySize(48, 48);
+        bubblePortrait.setVisible(true);
+      } else {
+        bubblePortrait.setVisible(false);
+      }
+      positionBubble();
+    });
+    sceneRef.load.start();
+  }
+
+  positionBubble();
+
+  if (bubbleTimer) {
+    bubbleTimer.remove();
+  }
+  bubbleTimer = sceneRef.time.delayedCall(5000, () => hideBubble());
+}
+
+function positionBubble() {
+  const pad = 7;
+  const boxW = bubbleTxt.width + pad * 2;
+  const boxH = bubbleTxt.height + pad * 2;
+  const boxX = player.x - boxW / 2;
+  const boxY = player.y - 74 - boxH;
+
+  bubbleGfx.clear();
+  bubbleGfx.fillStyle(0xffffff, 0.95);
+  bubbleGfx.fillRoundedRect(boxX, boxY, boxW, boxH, 6);
+  bubbleGfx.fillTriangle(player.x - 6, boxY + boxH, player.x + 6, boxY + boxH, player.x, boxY + boxH + 8);
+
+  bubbleTxt.setPosition(boxX + pad, boxY + pad);
+
+  if (bubblePortrait.visible) {
+    bubblePortrait.setPosition(boxX - 28, boxY + boxH / 2);
+  }
+}
+
+function hideBubble() {
+  bubbleVisible = false;
+  bubbleGfx.clear();
+  bubbleTxt.setText("");
+  bubblePortrait.setVisible(false);
+}
+
+function emotionForHp(ratio) {
+  if (ratio <= 0) return "Dizzy";
+  if (ratio <= 0.25) return "Pain";
+  if (ratio <= 0.5) return "Worried";
+  return "Normal";
+}
+
+function portraitUrl(emotion) {
+  return "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/portrait/" + DEX + "/" + emotion + ".png";
+}
+
+function slotCount() {
+  return BASE_SLOTS + BAG_BONUS[carriedBag];
+}
+
+function buildInventoryGrid() {
+  const gridEl = document.getElementById("invGrid");
+  gridEl.innerHTML = "";
+  const total = slotCount();
+  for (let i = 0; i < total; i++) {
+    const cell = document.createElement("div");
+    cell.className = "slot";
+    const stack = inventoryItems[i];
+    if (stack) {
+      const iconPath = itemIndex[stack.name];
+      if (iconPath) {
+        const img = document.createElement("img");
+        img.src = encodeURI(iconPath);
+        img.alt = stack.name;
+        img.title = stack.name;
+        cell.appendChild(img);
+      } else {
+        cell.textContent = stack.name;
+      }
+      if (stack.count > 1) {
+        const badge = document.createElement("div");
+        badge.className = "badge";
+        badge.textContent = stack.count;
+        cell.appendChild(badge);
+      }
+      cell.style.cursor = "pointer";
+      if (i === selectedSlot) {
+        cell.classList.add("selected");
+      }
+      const slotIndex = i;
+      cell.addEventListener("click", () => selectSlot(slotIndex));
+    }
+    gridEl.appendChild(cell);
+  }
+}
+
+function refreshInventoryPanel() {
+  const ratio = playerMaxHp > 0 ? playerHp / playerMaxHp : 0;
+  document.getElementById("invPortraitImg").src = portraitUrl(emotionForHp(ratio));
+  document.getElementById("invCoins").textContent = "0";
+  document.getElementById("invBag").textContent = carriedBag + " | " + inventoryItems.length + "/" + slotCount() + " slots";
+  document.getElementById("invHead").textContent = "-";
+  document.getElementById("invNeck").textContent = "-";
+  document.getElementById("invBack").textContent = "-";
+  buildInventoryGrid();
+}
+
+function selectSlot(i) {
+  if (!inventoryItems[i]) return;
+  if (selectedSlot === i) {
+    selectedSlot = -1;
+  } else {
+    selectedSlot = i;
+  }
+  refreshInventoryPanel();
+}
+
+function toggleInventory() {
+  inventoryOpen = !inventoryOpen;
+  const panel = document.getElementById("inventory");
+  if (inventoryOpen) {
+    refreshInventoryPanel();
+    panel.classList.remove("hidden");
+    updateReadout("inventory open (free)");
+  } else {
+    panel.classList.add("hidden");
+    updateReadout("inventory closed");
+  }
+}
+
+function cycleBag() {
+  const order = ["none", "RescueBag", "WhiteBackpack", "MerchantSache"];
+  const idx = order.indexOf(carriedBag);
+  carriedBag = order[(idx + 1) % order.length];
+  if (inventoryOpen) refreshInventoryPanel();
+  updateReadout("bag: " + carriedBag + " (" + slotCount() + " slots)");
+}
+
+function debugHp(amount) {
+  playerHp = playerHp + amount;
+  if (playerHp < 0) playerHp = 0;
+  if (playerHp > playerMaxHp) playerHp = playerMaxHp;
+  if (inventoryOpen) refreshInventoryPanel();
+  updateReadout("debug HP " + playerHp + "/" + playerMaxHp);
+}
+
+function describeAction(action) {
+  if (action.type === "move") return "move " + action.dir;
+  if (action.type === "attack") return "move slot " + action.slot + " facing " + player.direction;
+  if (action.type === "interact") return "interact / pickup";
+  if (action.type === "drop") return "drop item";
+  if (action.type === "use") return "use item";
+  return action.type;
+}
+
+function updateReadout(action) {
+  readout.setText("Turn: " + turnCount + "\nState: " + state + "\nFacing: " + player.direction + "\nLast: " + action);
+}
+
+new Phaser.Game(config);
+</script>
+</body>
+</html>

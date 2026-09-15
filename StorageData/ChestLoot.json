@@ -1,0 +1,81 @@
+{
+  "Hard Chest": { "items": [
+    { "name": "Oran Berry", "weight": 5 },
+    { "name": "Apple", "weight": 4 },
+    { "name": "Ether", "weight": 3 },
+    { "name": "Cheri Berry", "weight": 2 },
+    { "name": "Tiny Revival Seed", "weight": 1 }
+  ]},
+  "Heavy Chest": { "items": [
+    { "name": "Oran Berry", "weight": 5 },
+    { "name": "Big Apple", "weight": 3 },
+    { "name": "Iron", "weight": 2 },
+    { "name": "Defense Scarf", "weight": 1 },
+    { "name": "Tiny Revival Seed", "weight": 2 }
+  ]},
+  "Light Chest": { "items": [
+    { "name": "Oran Berry", "weight": 4 },
+    { "name": "Apple", "weight": 4 },
+    { "name": "Tasty Honey", "weight": 2 },
+    { "name": "Speed Scarf", "weight": 1 },
+    { "name": "Tiny Revival Seed", "weight": 2 }
+  ]},
+  "Dubious Chest": { "items": [
+    { "name": "Pecha Berry", "weight": 3 },
+    { "name": "Rawst Berry", "weight": 3 },
+    { "name": "Chesto Berry", "weight": 3 },
+    { "name": "Lum Berry", "weight": 1 },
+    { "name": "Tiny Revival Seed", "weight": 2 }
+  ]},
+  "Adorable Chest": { "items": [
+    { "name": "Sitrus Berry", "weight": 4 },
+    { "name": "Leppa Berry", "weight": 3 },
+    { "name": "Heal Seed", "weight": 2 },
+    { "name": "Calcium", "weight": 2 },
+    { "name": "Revival Seed", "weight": 1 }
+  ]},
+  "Cool Chest": { "items": [
+    { "name": "Sitrus Berry", "weight": 3 },
+    { "name": "Protein", "weight": 3 },
+    { "name": "Special Band", "weight": 2 },
+    { "name": "Zinc", "weight": 2 },
+    { "name": "Revival Seed", "weight": 1 }
+  ]},
+  "Cute Chest": { "items": [
+    { "name": "Sitrus Berry", "weight": 3 },
+    { "name": "Tasty Honey", "weight": 3 },
+    { "name": "Heal Seed", "weight": 2 },
+    { "name": "Calcium", "weight": 2 },
+    { "name": "Revival Seed", "weight": 1 }
+  ]},
+  "Beautiful Chest": { "items": [
+    { "name": "Revival Seed", "weight": 4 },
+    { "name": "Calcium", "weight": 3 },
+    { "name": "Special Band", "weight": 2 },
+    { "name": "Nocturne Stone", "weight": 1 },
+    { "name": "Miracle Tonic", "weight": 1 }
+  ]},
+  "Luxurious Chest": { "items": [
+    { "name": "Revival Seed", "weight": 3 },
+    { "name": "Protein", "weight": 3 },
+    { "name": "Power Band", "weight": 2 },
+    { "name": "Eviolite", "weight": 1 }
+  ]},
+  "Pretty Chest": { "items": [
+    { "name": "Revival Seed", "weight": 3 },
+    { "name": "Sitrus Berry", "weight": 3 },
+    { "name": "Shiny Diamond", "weight": 1 },
+    { "name": "Tasty Honey", "weight": 2 }
+  ]},
+  "Shining Chest": { "items": [
+    { "name": "Revival Seed", "weight": 3 },
+    { "name": "Shiny Diamond", "weight": 2 },
+    { "name": "Assault Vest", "weight": 2 },
+    { "name": "Choice Band", "weight": 1 }
+  ]},
+  "Sparkling Chest": { "items": [
+    { "name": "Revival Seed", "weight": 3 }
+    { "name": "Eviolite", "weight": 1 }
+    { "name": "Choice Specs", "weight": 1 }
+  ]}
+}
