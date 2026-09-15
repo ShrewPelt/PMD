@@ -275,6 +275,14 @@ function create() {
   kb.on("keydown-O", (e) => { if (e.repeat || chatActive) return; debugHp(-8); });
   kb.on("keydown-P", (e) => { if (e.repeat || chatActive) return; debugHp(8); });
   kb.on("keydown-B", (e) => { if (e.repeat || chatActive) return; cycleBag(); });
+  kb.addCapture("SPACE");
+  kb.on("keydown-SPACE", (e) => {
+    if (e.repeat || chatActive) return;
+    if (state !== "input") return;
+    sendIntent(null);
+    state = "waiting";
+    updateReadout("wait (waiting for turn)");
+  });
 
   const input = document.getElementById("chatInput");
   input.addEventListener("focus", () => { chatActive = true; });
@@ -319,11 +327,13 @@ function onDirection(scene, dir) {
     player.direction = dir;
     player.play(DEX + "_idle_" + dir);
     updateReadout("face " + dir);
-    sendState();
+    sendFace();
     return;
   }
 
-  lockAction(scene, { type: "move", dir: dir });
+  sendIntent(dir);
+  state = "waiting";
+  updateReadout("locked move " + dir + " (waiting for turn)");
 }
 
 function lockAction(scene, action) {
@@ -339,29 +349,7 @@ function lockAction(scene, action) {
 function resolveTurn(scene) {
   state = "resolving";
 
-  if (lockedAction.type === "move") {
-    const dir = lockedAction.dir;
-    const c = player.col + DELTAS[dir].dc;
-    const r = player.row + DELTAS[dir].dr;
-    if (isFloor(c, r)) {
-      player.col = c;
-      player.row = r;
-      player.play(DEX + "_walk_" + dir);
-      scene.tweens.add({
-        targets: player,
-        x: tilePixelX(c),
-        y: playerRestingY(c, r),
-        duration: 120,
-        onComplete: () => {
-          player.play(DEX + "_idle_" + player.direction);
-          sendState();
-          endTurn();
-        }
-      });
-      return;
-    }
-    updateReadout("blocked " + dir);
-  } else if (lockedAction.type === "interact") {
+  if (lockedAction.type === "interact") {
     tryPickup();
   } else if (lockedAction.type === "drop") {
     doDrop(scene);
@@ -371,7 +359,6 @@ function resolveTurn(scene) {
 }
 
 function endTurn() {
-  turnCount = turnCount + 1;
   lockedAction = null;
   state = "input";
   updateReadout("turn ready");
@@ -725,6 +712,7 @@ function connectMultiplayer(scene) {
 
     if (data.type === "init") {
       myId = data.id;
+      turnCount = data.turn;
       const me = data.players[myId];
       if (me) {
         if (me.dex) DEX = me.dex;
@@ -745,8 +733,44 @@ function connectMultiplayer(scene) {
       if (data.player.id !== myId) {
         addOtherPlayer(scene, data.player);
       }
-    } else if (data.type === "move") {
-      updateOtherPlayer(scene, data);
+    } else if (data.type === "face") {
+      const sprite = otherPlayers[data.id];
+      if (sprite) {
+        sprite.direction = data.direction;
+        sprite.play(sprite.dex + "_idle_" + data.direction);
+      }
+    } else if (data.type === "resolve") {
+      turnCount = data.turn;
+      for (const entry of data.players) {
+        if (entry.id === myId) {
+          player.direction = entry.direction;
+          player.col = entry.col;
+          player.row = entry.row;
+          const tx = tilePixelX(entry.col);
+          const ty = playerRestingY(entry.col, entry.row);
+          if (player.x !== tx || player.y !== ty) {
+            player.play(DEX + "_walk_" + entry.direction);
+            scene.tweens.add({ targets: player, x: tx, y: ty, duration: 120, onComplete: () => { player.play(DEX + "_idle_" + player.direction); } });
+          } else {
+            player.play(DEX + "_idle_" + entry.direction);
+          }
+        } else {
+          const sprite = otherPlayers[entry.id];
+          if (sprite) {
+            sprite.direction = entry.direction;
+            const tx = tilePixelX(entry.col);
+            const ty = tilePixelY(entry.row);
+            if (sprite.x !== tx || sprite.y !== ty) {
+              sprite.play(sprite.dex + "_walk_" + entry.direction);
+              scene.tweens.add({ targets: sprite, x: tx, y: ty, duration: 120, onComplete: () => { sprite.play(sprite.dex + "_idle_" + sprite.direction); } });
+            } else {
+              sprite.play(sprite.dex + "_idle_" + entry.direction);
+            }
+          }
+        }
+      }
+      state = "input";
+      updateReadout("turn " + turnCount);
     } else if (data.type === "chat") {
       const sprite = otherPlayers[data.id];
       if (sprite) {
@@ -809,9 +833,15 @@ function removeOtherPlayer(id) {
   }
 }
 
-function sendState() {
+function sendFace() {
   if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ type: "move", col: player.col, row: player.row, direction: player.direction }));
+    socket.send(JSON.stringify({ type: "face", direction: player.direction }));
+  }
+}
+
+function sendIntent(dir) {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: "intent", dir: dir }));
   }
 }
 
