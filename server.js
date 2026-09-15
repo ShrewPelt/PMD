@@ -22,6 +22,7 @@ function checkSecret(req, res) {
 }
 
 const runs = {};
+const passcodes = {};
 
 function makeToken() {
   return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
@@ -31,9 +32,30 @@ app.post("/api/session", (req, res) => {
   if (!checkSecret(req, res)) return;
   const dungeon = req.body && req.body.dungeon ? req.body.dungeon : "Unknown";
   const roster = req.body && Array.isArray(req.body.roster) ? req.body.roster : [];
+  const gm = req.body && req.body.gm ? String(req.body.gm) : null;
   const token = makeToken();
-  runs[token] = { token: token, dungeon: dungeon, roster: roster, status: "active", results: null, created: Date.now() };
-  res.json({ token: token, link: "/?session=" + token });
+
+  const participants = [];
+  const passes = {};
+
+  if (gm) {
+    const gmPass = makeToken();
+    const info = { token: token, userId: gm, name: "GM", dex: null, role: "gm" };
+    passcodes[gmPass] = info;
+    passes[gmPass] = info;
+    participants.push({ userId: gm, name: "GM", role: "gm", pass: gmPass, link: "/?session=" + token + "&pass=" + gmPass });
+  }
+
+  for (const entry of roster) {
+    const pass = makeToken();
+    const info = { token: token, userId: String(entry.userId), name: entry.name || "", dex: entry.dex || "0004", role: "player" };
+    passcodes[pass] = info;
+    passes[pass] = info;
+    participants.push({ userId: info.userId, name: info.name, role: "player", pass: pass, link: "/?session=" + token + "&pass=" + pass });
+  }
+
+  runs[token] = { token: token, dungeon: dungeon, roster: roster, gm: gm, status: "active", results: null, created: Date.now(), passes: passes };
+  res.json({ token: token, participants: participants });
 });
 
 app.get("/api/session/:token", (req, res) => {
@@ -43,6 +65,16 @@ app.get("/api/session/:token", (req, res) => {
     return;
   }
   res.json({ token: run.token, dungeon: run.dungeon, roster: run.roster, status: run.status });
+});
+
+app.get("/api/redeem/:pass", (req, res) => {
+  const info = passcodes[req.params.pass];
+  if (!info) {
+    res.status(404).json({ error: "invalid" });
+    return;
+  }
+  const run = runs[info.token];
+  res.json({ token: info.token, userId: info.userId, name: info.name, dex: info.dex, role: info.role, dungeon: run ? run.dungeon : null });
 });
 
 app.post("/api/session/:token/finish", (req, res) => {
@@ -73,6 +105,9 @@ app.post("/api/session/:token/claim", (req, res) => {
   if (!run) {
     res.status(404).json({ error: "not found" });
     return;
+  }
+  for (const pass in run.passes) {
+    delete passcodes[pass];
   }
   delete runs[req.params.token];
   res.json({ ok: true });
