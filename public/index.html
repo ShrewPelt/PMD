@@ -275,9 +275,9 @@ function create() {
   kb.on("keydown-O", (e) => { if (e.repeat || chatActive) return; debugHp(-8); });
   kb.on("keydown-P", (e) => { if (e.repeat || chatActive) return; debugHp(8); });
   kb.on("keydown-B", (e) => { if (e.repeat || chatActive) return; cycleBag(); });
-  kb.addCapture("SPACE");
   kb.on("keydown-SPACE", (e) => {
     if (e.repeat || chatActive) return;
+    e.preventDefault();
     if (state !== "input") return;
     sendIntent(null);
     state = "waiting";
