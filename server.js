@@ -306,27 +306,46 @@ function resolveTurn(sessionId) {
   broadcast(sessionId, { type: "resolve", turn: session.turnNumber, players: result });
 }
 
+function sessionHasSockets(sessionId) {
+  let found = false;
+  wss.clients.forEach((client) => {
+    if (client.sessionId === sessionId && client.readyState === WebSocket.OPEN) {
+      found = true;
+    }
+  });
+  return found;
+}
+
 wss.on("connection", (socket, req) => {
   let sessionId = "default";
+  let pass = null;
   try {
     const parsed = new URL(req.url, "http://localhost");
     sessionId = parsed.searchParams.get("session") || "default";
+    pass = parsed.searchParams.get("pass");
   } catch (e) {
     sessionId = "default";
   }
 
+  const passInfo = pass ? passcodes[pass] : null;
+  const role = passInfo ? passInfo.role : "player";
+
   const session = getSession(sessionId);
-  const id = session.nextId;
-  session.nextId = session.nextId + 1;
-
   socket.sessionId = sessionId;
-  socket.playerId = id;
+  socket.role = role;
 
-  const spawn = SPAWNS[(id - 1) % SPAWNS.length];
-  session.players[id] = { id: id, col: spawn.col, row: spawn.row, direction: "down", dex: DEXES[(id - 1) % DEXES.length] };
-
-  socket.send(JSON.stringify({ type: "init", id: id, turn: session.turnNumber, players: session.players }));
-  broadcast(sessionId, { type: "join", player: session.players[id] }, id);
+  if (role === "gm") {
+    socket.playerId = null;
+    socket.send(JSON.stringify({ type: "init", id: null, role: "gm", turn: session.turnNumber, players: session.players }));
+  } else {
+    const id = session.nextId;
+    session.nextId = session.nextId + 1;
+    socket.playerId = id;
+    const spawn = SPAWNS[(id - 1) % SPAWNS.length];
+    session.players[id] = { id: id, col: spawn.col, row: spawn.row, direction: "down", dex: DEXES[(id - 1) % DEXES.length] };
+    socket.send(JSON.stringify({ type: "init", id: id, role: "player", turn: session.turnNumber, players: session.players }));
+    broadcast(sessionId, { type: "join", player: session.players[id] }, id);
+  }
 
   socket.on("message", (raw) => {
     let data;
@@ -336,26 +355,43 @@ wss.on("connection", (socket, req) => {
       return;
     }
     const s = sessions[sessionId];
-    if (!s || !s.players[id]) return;
+    if (!s) return;
+
+    if (data.type === "endSession") {
+      if (socket.role !== "gm") return;
+      const run = runs[sessionId];
+      if (run) {
+        run.status = "finished";
+        if (!run.results) run.results = [];
+      }
+      broadcast(sessionId, { type: "ended" });
+      return;
+    }
+
+    const pid = socket.playerId;
+    if (pid === null || !s.players[pid]) return;
 
     if (data.type === "face") {
-      s.players[id].direction = data.direction;
-      broadcast(sessionId, { type: "face", id: id, direction: s.players[id].direction }, id);
+      s.players[pid].direction = data.direction;
+      broadcast(sessionId, { type: "face", id: pid, direction: s.players[pid].direction }, pid);
     } else if (data.type === "intent") {
-      onIntent(sessionId, id, data.dir);
+      onIntent(sessionId, pid, data.dir);
     } else if (data.type === "chat") {
       const text = String(data.text || "").slice(0, 200);
-      broadcast(sessionId, { type: "chat", id: id, dex: s.players[id].dex, text: text }, id);
+      broadcast(sessionId, { type: "chat", id: pid, dex: s.players[pid].dex, text: text }, pid);
     }
   });
 
   socket.on("close", () => {
     const s = sessions[sessionId];
     if (!s) return;
-    delete s.players[id];
-    delete s.intents[id];
-    broadcast(sessionId, { type: "leave", id: id }, id);
-    if (Object.keys(s.players).length === 0) {
+    const pid = socket.playerId;
+    if (pid !== null) {
+      delete s.players[pid];
+      delete s.intents[pid];
+      broadcast(sessionId, { type: "leave", id: pid }, pid);
+    }
+    if (!sessionHasSockets(sessionId)) {
       if (s.turnTimer !== null) clearTimeout(s.turnTimer);
       delete sessions[sessionId];
     } else if (s.turnTimer !== null && allSubmitted(s)) {

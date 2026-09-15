@@ -19,6 +19,15 @@
   }
   #chatInput::placeholder { color: #8888aa; }
 
+  #endSession {
+    position: fixed; top: 12px; right: 12px;
+    padding: 8px 14px; font-size: 14px;
+    border: none; border-radius: 6px;
+    background: #c0392b; color: #ffffff; cursor: pointer;
+    z-index: 10;
+  }
+  #endSession.hidden { display: none; }
+
   #inventory {
     width: 664px;
     margin: 0 auto 24px auto;
@@ -74,6 +83,7 @@
 </style>
 </head>
 <body>
+<button id="endSession" class="hidden">End Session</button>
 <div id="game"></div>
 <div id="chat">
   <input id="chatInput" type="text" autocomplete="off" placeholder="Say something... add an expression like [Happy], [Angry], [Pain]" />
@@ -174,6 +184,7 @@ let lockedAction = null;
 
 let sceneRef;
 let chatActive = false;
+let isGM = false;
 let socket = null;
 let myId = null;
 const otherPlayers = {};
@@ -244,6 +255,30 @@ function create() {
   this.cameras.main.setBounds(0, 0, MAP[0].length * TILE, MAP.length * TILE);
   this.cameras.main.startFollow(player, true, 0.12, 0.12);
 
+  this.input.on("pointermove", (pointer) => {
+    if (!isGM || !pointer.isDown) return;
+    const cam = this.cameras.main;
+    cam.scrollX = cam.scrollX - (pointer.x - pointer.prevPosition.x) / cam.zoom;
+    cam.scrollY = cam.scrollY - (pointer.y - pointer.prevPosition.y) / cam.zoom;
+  });
+  this.input.on("wheel", (pointer, over, dx, dy) => {
+    if (!isGM) return;
+    const cam = this.cameras.main;
+    let z = cam.zoom - dy * 0.001;
+    if (z < 0.3) z = 0.3;
+    if (z > 2.5) z = 2.5;
+    cam.setZoom(z);
+  });
+
+  const endBtn = document.getElementById("endSession");
+  endBtn.addEventListener("click", () => {
+    if (!isGM) return;
+    if (!window.confirm("End this dungeon session?")) return;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "endSession" }));
+    }
+  });
+
   readout = this.add.text(12, 12, "", { fontSize: "13px", color: "#ffffff", fontFamily: "monospace" });
   readout.setScrollFactor(0);
   readout.setDepth(1000);
@@ -276,7 +311,7 @@ function create() {
   kb.on("keydown-P", (e) => { if (e.repeat || chatActive) return; debugHp(8); });
   kb.on("keydown-B", (e) => { if (e.repeat || chatActive) return; cycleBag(); });
   kb.on("keydown-SPACE", (e) => {
-    if (e.repeat || chatActive) return;
+    if (e.repeat || chatActive || isGM) return;
     e.preventDefault();
     if (state !== "input") return;
     sendIntent(null);
@@ -321,7 +356,7 @@ function isFloor(col, row) {
 }
 
 function onDirection(scene, dir) {
-  if (state !== "input") return;
+  if (isGM || state !== "input") return;
 
   if (player.direction !== dir) {
     player.direction = dir;
@@ -337,7 +372,7 @@ function onDirection(scene, dir) {
 }
 
 function lockAction(scene, action) {
-  if (state !== "input") return;
+  if (isGM || state !== "input") return;
 
   lockedAction = action;
   state = "locked";
@@ -657,6 +692,7 @@ function selectSlot(i) {
 }
 
 function toggleInventory() {
+  if (isGM) return;
   inventoryOpen = !inventoryOpen;
   const panel = document.getElementById("inventory");
   if (inventoryOpen) {
@@ -700,7 +736,9 @@ function updateReadout(action) {
 
 function connectMultiplayer(scene) {
   const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
-  socket = new WebSocket(wsProtocol + "//" + location.host);
+  const params = new URLSearchParams(location.search);
+  const session = params.get("session") || "default";
+  socket = new WebSocket(wsProtocol + "//" + location.host + "/?session=" + encodeURIComponent(session));
 
   socket.addEventListener("message", (event) => {
     let data;
@@ -713,15 +751,23 @@ function connectMultiplayer(scene) {
     if (data.type === "init") {
       myId = data.id;
       turnCount = data.turn;
-      const me = data.players[myId];
-      if (me) {
-        if (me.dex) DEX = me.dex;
-        player.col = me.col;
-        player.row = me.row;
-        player.direction = me.direction;
-        player.x = tilePixelX(player.col);
-        player.y = playerRestingY(player.col, player.row);
-        player.play(DEX + "_idle_" + player.direction);
+      if (data.role === "gm") {
+        isGM = true;
+        player.setVisible(false);
+        scene.cameras.main.stopFollow();
+        document.getElementById("endSession").classList.remove("hidden");
+        updateReadout("GM / director mode");
+      } else {
+        const me = data.players[myId];
+        if (me) {
+          if (me.dex) DEX = me.dex;
+          player.col = me.col;
+          player.row = me.row;
+          player.direction = me.direction;
+          player.x = tilePixelX(player.col);
+          player.y = playerRestingY(player.col, player.row);
+          player.play(DEX + "_idle_" + player.direction);
+        }
       }
       for (const key in data.players) {
         const p = data.players[key];
@@ -776,6 +822,8 @@ function connectMultiplayer(scene) {
       if (sprite) {
         showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text);
       }
+    } else if (data.type === "ended") {
+      updateReadout("dungeon ended by GM");
     } else if (data.type === "leave") {
       removeOtherPlayer(data.id);
     }
