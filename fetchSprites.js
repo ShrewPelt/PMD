@@ -5,7 +5,7 @@ const https = require("https");
 const REPO_BASE = "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/sprite";
 const OUTPUT_ROOT = path.join(__dirname, "public", "sprites");
 
-const SPECIES = ["0004"];
+const SPECIES = ["0004", "0025", "0133", "0495"];
 
 const ANIMATIONS = ["Walk", "Idle"];
 

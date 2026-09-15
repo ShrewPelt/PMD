@@ -76,7 +76,7 @@
 <body>
 <div id="game"></div>
 <div id="chat">
-  <input id="chatInput" type="text" autocomplete="off" placeholder="Chat..." />
+  <input id="chatInput" type="text" autocomplete="off" placeholder="Say something... add an expression like [Happy], [Angry], [Pain]" />
 </div>
 <div id="inventory" class="hidden">
   <div id="invTop">
@@ -91,7 +91,16 @@
 <script src="phaser.min.js"></script>
 <script>
 const TILE = 48;
-const DEX = "0004";
+let DEX = "0004";
+
+const SPECIES = {
+  "0004": { walk: { fw: 32, fh: 32, cols: 4 }, idle: { fw: 32, fh: 40, cols: 4 } },
+  "0025": { walk: { fw: 32, fh: 40, cols: 4 }, idle: { fw: 40, fh: 56, cols: 6 } },
+  "0133": { walk: { fw: 40, fh: 48, cols: 7 }, idle: { fw: 24, fh: 32, cols: 2 } },
+  "0495": { walk: { fw: 32, fh: 32, cols: 4 }, idle: { fw: 32, fh: 40, cols: 4 } }
+};
+
+const DIR_ORDER = ["down", "downright", "right", "upright", "up", "upleft", "left", "downleft"];
 
 const MAP = [
   "############################",
@@ -165,6 +174,9 @@ let lockedAction = null;
 
 let sceneRef;
 let chatActive = false;
+let socket = null;
+let myId = null;
+const otherPlayers = {};
 let bubbleGfx;
 let bubbleTxt;
 let bubblePortrait;
@@ -186,8 +198,11 @@ let selectedSlot = -1;
 const ITEM_LIFT = 10;
 
 function preload() {
-  this.load.spritesheet("charmander_walk", "sprites/0004/Walk-Anim.png", { frameWidth: 32, frameHeight: 32 });
-  this.load.spritesheet("charmander_idle", "sprites/0004/Idle-Anim.png", { frameWidth: 32, frameHeight: 40 });
+  for (const dex in SPECIES) {
+    const s = SPECIES[dex];
+    this.load.spritesheet(dex + "_walk", "sprites/" + dex + "/Walk-Anim.png", { frameWidth: s.walk.fw, frameHeight: s.walk.fh });
+    this.load.spritesheet(dex + "_idle", "sprites/" + dex + "/Idle-Anim.png", { frameWidth: s.idle.fw, frameHeight: s.idle.fh });
+  }
 }
 
 function create() {
@@ -199,6 +214,8 @@ function create() {
     if (inventoryOpen) refreshInventoryPanel();
   }).catch(() => {});
 
+  connectMultiplayer(this);
+
   const g = this.add.graphics();
   for (let r = 0; r < MAP.length; r++) {
     for (let c = 0; c < MAP[r].length; c++) {
@@ -208,25 +225,16 @@ function create() {
     }
   }
 
-  this.anims.create({ key: "walk_down", frames: this.anims.generateFrameNumbers("charmander_walk", { start: 0, end: 3 }), frameRate: 8, repeat: -1 });
-  this.anims.create({ key: "walk_downright", frames: this.anims.generateFrameNumbers("charmander_walk", { start: 4, end: 7 }), frameRate: 8, repeat: -1 });
-  this.anims.create({ key: "walk_right", frames: this.anims.generateFrameNumbers("charmander_walk", { start: 8, end: 11 }), frameRate: 8, repeat: -1 });
-  this.anims.create({ key: "walk_upright", frames: this.anims.generateFrameNumbers("charmander_walk", { start: 12, end: 15 }), frameRate: 8, repeat: -1 });
-  this.anims.create({ key: "walk_up", frames: this.anims.generateFrameNumbers("charmander_walk", { start: 16, end: 19 }), frameRate: 8, repeat: -1 });
-  this.anims.create({ key: "walk_upleft", frames: this.anims.generateFrameNumbers("charmander_walk", { start: 20, end: 23 }), frameRate: 8, repeat: -1 });
-  this.anims.create({ key: "walk_left", frames: this.anims.generateFrameNumbers("charmander_walk", { start: 24, end: 27 }), frameRate: 8, repeat: -1 });
-  this.anims.create({ key: "walk_downleft", frames: this.anims.generateFrameNumbers("charmander_walk", { start: 28, end: 31 }), frameRate: 8, repeat: -1 });
+  for (const dex in SPECIES) {
+    const s = SPECIES[dex];
+    for (let d = 0; d < 8; d++) {
+      const dir = DIR_ORDER[d];
+      this.anims.create({ key: dex + "_walk_" + dir, frames: this.anims.generateFrameNumbers(dex + "_walk", { start: d * s.walk.cols, end: d * s.walk.cols + s.walk.cols - 1 }), frameRate: 8, repeat: -1 });
+      this.anims.create({ key: dex + "_idle_" + dir, frames: this.anims.generateFrameNumbers(dex + "_idle", { start: d * s.idle.cols, end: d * s.idle.cols + s.idle.cols - 1 }), frameRate: 4, repeat: -1 });
+    }
+  }
 
-  this.anims.create({ key: "idle_down", frames: this.anims.generateFrameNumbers("charmander_idle", { start: 0, end: 3 }), frameRate: 4, repeat: -1 });
-  this.anims.create({ key: "idle_downright", frames: this.anims.generateFrameNumbers("charmander_idle", { start: 4, end: 7 }), frameRate: 4, repeat: -1 });
-  this.anims.create({ key: "idle_right", frames: this.anims.generateFrameNumbers("charmander_idle", { start: 8, end: 11 }), frameRate: 4, repeat: -1 });
-  this.anims.create({ key: "idle_upright", frames: this.anims.generateFrameNumbers("charmander_idle", { start: 12, end: 15 }), frameRate: 4, repeat: -1 });
-  this.anims.create({ key: "idle_up", frames: this.anims.generateFrameNumbers("charmander_idle", { start: 16, end: 19 }), frameRate: 4, repeat: -1 });
-  this.anims.create({ key: "idle_upleft", frames: this.anims.generateFrameNumbers("charmander_idle", { start: 20, end: 23 }), frameRate: 4, repeat: -1 });
-  this.anims.create({ key: "idle_left", frames: this.anims.generateFrameNumbers("charmander_idle", { start: 24, end: 27 }), frameRate: 4, repeat: -1 });
-  this.anims.create({ key: "idle_downleft", frames: this.anims.generateFrameNumbers("charmander_idle", { start: 28, end: 31 }), frameRate: 4, repeat: -1 });
-
-  player = this.add.sprite(0, 0, "charmander_idle");
+  player = this.add.sprite(0, 0, DEX + "_idle");
   player.setOrigin(0.5, 1);
   player.setScale(1.5);
   player.col = 13;
@@ -234,7 +242,7 @@ function create() {
   player.direction = "down";
   player.x = tilePixelX(player.col);
   player.y = tilePixelY(player.row);
-  player.play("idle_down");
+  player.play(DEX + "_idle_down");
   player.setDepth(10);
 
   this.cameras.main.setBounds(0, 0, MAP[0].length * TILE, MAP.length * TILE);
@@ -321,8 +329,9 @@ function onDirection(scene, dir) {
 
   if (player.direction !== dir) {
     player.direction = dir;
-    player.play("idle_" + dir);
+    player.play(DEX + "_idle_" + dir);
     updateReadout("face " + dir);
+    sendState();
     return;
   }
 
@@ -349,14 +358,15 @@ function resolveTurn(scene) {
     if (isFloor(c, r)) {
       player.col = c;
       player.row = r;
-      player.play("walk_" + dir);
+      player.play(DEX + "_walk_" + dir);
       scene.tweens.add({
         targets: player,
         x: tilePixelX(c),
         y: playerRestingY(c, r),
         duration: 120,
         onComplete: () => {
-          player.play("idle_" + player.direction);
+          player.play(DEX + "_idle_" + player.direction);
+          sendState();
           endTurn();
         }
       });
@@ -686,6 +696,97 @@ function describeAction(action) {
 
 function updateReadout(action) {
   readout.setText("Turn: " + turnCount + "\nState: " + state + "\nFacing: " + player.direction + "\nLast: " + action);
+}
+
+function connectMultiplayer(scene) {
+  const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+  socket = new WebSocket(wsProtocol + "//" + location.host);
+
+  socket.addEventListener("message", (event) => {
+    let data;
+    try {
+      data = JSON.parse(event.data);
+    } catch (e) {
+      return;
+    }
+
+    if (data.type === "init") {
+      myId = data.id;
+      const me = data.players[myId];
+      if (me) {
+        if (me.dex) DEX = me.dex;
+        player.col = me.col;
+        player.row = me.row;
+        player.direction = me.direction;
+        player.x = tilePixelX(player.col);
+        player.y = playerRestingY(player.col, player.row);
+        player.play(DEX + "_idle_" + player.direction);
+      }
+      for (const key in data.players) {
+        const p = data.players[key];
+        if (p.id !== myId) {
+          addOtherPlayer(scene, p);
+        }
+      }
+    } else if (data.type === "join") {
+      if (data.player.id !== myId) {
+        addOtherPlayer(scene, data.player);
+      }
+    } else if (data.type === "move") {
+      updateOtherPlayer(scene, data);
+    } else if (data.type === "leave") {
+      removeOtherPlayer(data.id);
+    }
+  });
+}
+
+function addOtherPlayer(scene, p) {
+  if (otherPlayers[p.id]) return;
+  const dex = p.dex || "0004";
+  const sprite = scene.add.sprite(tilePixelX(p.col), tilePixelY(p.row), dex + "_idle");
+  sprite.setOrigin(0.5, 1);
+  sprite.setScale(1.5);
+  sprite.setDepth(10);
+  sprite.dex = dex;
+  sprite.direction = p.direction;
+  sprite.play(dex + "_idle_" + p.direction);
+  otherPlayers[p.id] = sprite;
+}
+
+function updateOtherPlayer(scene, data) {
+  const sprite = otherPlayers[data.id];
+  if (!sprite) return;
+  sprite.direction = data.direction;
+  const targetX = tilePixelX(data.col);
+  const targetY = tilePixelY(data.row);
+  if (sprite.x !== targetX || sprite.y !== targetY) {
+    sprite.play(sprite.dex + "_walk_" + data.direction);
+    scene.tweens.add({
+      targets: sprite,
+      x: targetX,
+      y: targetY,
+      duration: 120,
+      onComplete: () => {
+        sprite.play(sprite.dex + "_idle_" + sprite.direction);
+      }
+    });
+  } else {
+    sprite.play(sprite.dex + "_idle_" + data.direction);
+  }
+}
+
+function removeOtherPlayer(id) {
+  const sprite = otherPlayers[id];
+  if (sprite) {
+    sprite.destroy();
+    delete otherPlayers[id];
+  }
+}
+
+function sendState() {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: "move", col: player.col, row: player.row, direction: player.direction }));
+  }
 }
 
 new Phaser.Game(config);
