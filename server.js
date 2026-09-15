@@ -9,6 +9,75 @@ const PORT = process.env.PORT || 3000;
 app.use(express.static(path.join(__dirname, "public")));
 app.use("/items", express.static(path.join(__dirname, "StorageData", "Items")));
 
+app.use(express.json());
+
+const API_SECRET = process.env.API_SECRET || "";
+
+function checkSecret(req, res) {
+  if (!API_SECRET || req.headers["x-api-key"] !== API_SECRET) {
+    res.status(401).json({ error: "unauthorized" });
+    return false;
+  }
+  return true;
+}
+
+const runs = {};
+
+function makeToken() {
+  return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+}
+
+app.post("/api/session", (req, res) => {
+  if (!checkSecret(req, res)) return;
+  const dungeon = req.body && req.body.dungeon ? req.body.dungeon : "Unknown";
+  const roster = req.body && Array.isArray(req.body.roster) ? req.body.roster : [];
+  const token = makeToken();
+  runs[token] = { token: token, dungeon: dungeon, roster: roster, status: "active", results: null, created: Date.now() };
+  res.json({ token: token, link: "/?session=" + token });
+});
+
+app.get("/api/session/:token", (req, res) => {
+  const run = runs[req.params.token];
+  if (!run) {
+    res.status(404).json({ error: "not found" });
+    return;
+  }
+  res.json({ token: run.token, dungeon: run.dungeon, roster: run.roster, status: run.status });
+});
+
+app.post("/api/session/:token/finish", (req, res) => {
+  const run = runs[req.params.token];
+  if (!run) {
+    res.status(404).json({ error: "not found" });
+    return;
+  }
+  run.status = "finished";
+  run.results = req.body && req.body.results ? req.body.results : [];
+  res.json({ ok: true });
+});
+
+app.get("/api/results", (req, res) => {
+  if (!checkSecret(req, res)) return;
+  const finished = [];
+  for (const token in runs) {
+    if (runs[token].status === "finished") {
+      finished.push({ token: token, dungeon: runs[token].dungeon, results: runs[token].results });
+    }
+  }
+  res.json({ runs: finished });
+});
+
+app.post("/api/session/:token/claim", (req, res) => {
+  if (!checkSecret(req, res)) return;
+  const run = runs[req.params.token];
+  if (!run) {
+    res.status(404).json({ error: "not found" });
+    return;
+  }
+  delete runs[req.params.token];
+  res.json({ ok: true });
+});
+
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
@@ -56,11 +125,14 @@ const SPAWNS = [
 const DEXES = ["0004", "0133", "0495", "0025"];
 const TURN_TIMEOUT = 30000;
 
-const players = {};
-let nextId = 1;
-let turnNumber = 1;
-let intents = {};
-let turnTimer = null;
+const sessions = {};
+
+function getSession(sessionId) {
+  if (!sessions[sessionId]) {
+    sessions[sessionId] = { players: {}, intents: {}, turnNumber: 1, turnTimer: null, nextId: 1 };
+  }
+  return sessions[sessionId];
+}
 
 function isFloor(col, row) {
   if (row < 0 || row >= MAP.length) return false;
@@ -68,52 +140,53 @@ function isFloor(col, row) {
   return MAP[row][col] === ".";
 }
 
-function broadcast(data, exceptId) {
+function broadcast(sessionId, data, exceptId) {
   const msg = JSON.stringify(data);
   wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN && client.playerId !== exceptId) {
+    if (client.readyState === WebSocket.OPEN && client.sessionId === sessionId && client.playerId !== exceptId) {
       client.send(msg);
     }
   });
 }
 
-function connectedIds() {
-  return Object.keys(players);
-}
-
-function allSubmitted() {
-  const ids = connectedIds();
+function allSubmitted(session) {
+  const ids = Object.keys(session.players);
   if (ids.length === 0) return false;
   for (const id of ids) {
-    if (!intents[id]) return false;
+    if (!session.intents[id]) return false;
   }
   return true;
 }
 
-function onIntent(id, dir) {
-  if (!players[id]) return;
-  intents[id] = { dir: dir };
-  if (dir) players[id].direction = dir;
-  if (turnTimer === null) {
-    turnTimer = setTimeout(resolveTurn, TURN_TIMEOUT);
+function onIntent(sessionId, playerId, dir) {
+  const session = sessions[sessionId];
+  if (!session || !session.players[playerId]) return;
+  session.intents[playerId] = { dir: dir };
+  if (dir) session.players[playerId].direction = dir;
+  if (session.turnTimer === null) {
+    session.turnTimer = setTimeout(() => resolveTurn(sessionId), TURN_TIMEOUT);
   }
-  if (allSubmitted()) {
-    resolveTurn();
+  if (allSubmitted(session)) {
+    resolveTurn(sessionId);
   }
 }
 
-function resolveTurn() {
-  if (turnTimer !== null) {
-    clearTimeout(turnTimer);
-    turnTimer = null;
+function resolveTurn(sessionId) {
+  const session = sessions[sessionId];
+  if (!session) return;
+
+  if (session.turnTimer !== null) {
+    clearTimeout(session.turnTimer);
+    session.turnTimer = null;
   }
 
-  const ids = connectedIds();
+  const players = session.players;
+  const ids = Object.keys(players);
   const desired = {};
 
   for (const id of ids) {
     const p = players[id];
-    const it = intents[id];
+    const it = session.intents[id];
     if (it && it.dir) {
       const d = DELTAS[it.dir];
       const nc = p.col + d.dc;
@@ -193,21 +266,32 @@ function resolveTurn() {
     result.push({ id: players[id].id, col: players[id].col, row: players[id].row, direction: players[id].direction });
   }
 
-  turnNumber = turnNumber + 1;
-  intents = {};
-  broadcast({ type: "resolve", turn: turnNumber, players: result });
+  session.turnNumber = session.turnNumber + 1;
+  session.intents = {};
+  broadcast(sessionId, { type: "resolve", turn: session.turnNumber, players: result });
 }
 
-wss.on("connection", (socket) => {
-  const id = nextId;
-  nextId = nextId + 1;
+wss.on("connection", (socket, req) => {
+  let sessionId = "default";
+  try {
+    const parsed = new URL(req.url, "http://localhost");
+    sessionId = parsed.searchParams.get("session") || "default";
+  } catch (e) {
+    sessionId = "default";
+  }
+
+  const session = getSession(sessionId);
+  const id = session.nextId;
+  session.nextId = session.nextId + 1;
+
+  socket.sessionId = sessionId;
   socket.playerId = id;
 
   const spawn = SPAWNS[(id - 1) % SPAWNS.length];
-  players[id] = { id: id, col: spawn.col, row: spawn.row, direction: "down", dex: DEXES[(id - 1) % DEXES.length] };
+  session.players[id] = { id: id, col: spawn.col, row: spawn.row, direction: "down", dex: DEXES[(id - 1) % DEXES.length] };
 
-  socket.send(JSON.stringify({ type: "init", id: id, turn: turnNumber, players: players }));
-  broadcast({ type: "join", player: players[id] }, id);
+  socket.send(JSON.stringify({ type: "init", id: id, turn: session.turnNumber, players: session.players }));
+  broadcast(sessionId, { type: "join", player: session.players[id] }, id);
 
   socket.on("message", (raw) => {
     let data;
@@ -216,27 +300,31 @@ wss.on("connection", (socket) => {
     } catch (e) {
       return;
     }
+    const s = sessions[sessionId];
+    if (!s || !s.players[id]) return;
+
     if (data.type === "face") {
-      const p = players[id];
-      if (!p) return;
-      p.direction = data.direction;
-      broadcast({ type: "face", id: id, direction: p.direction }, id);
+      s.players[id].direction = data.direction;
+      broadcast(sessionId, { type: "face", id: id, direction: s.players[id].direction }, id);
     } else if (data.type === "intent") {
-      onIntent(id, data.dir);
+      onIntent(sessionId, id, data.dir);
     } else if (data.type === "chat") {
-      const p = players[id];
-      if (!p) return;
       const text = String(data.text || "").slice(0, 200);
-      broadcast({ type: "chat", id: id, dex: p.dex, text: text }, id);
+      broadcast(sessionId, { type: "chat", id: id, dex: s.players[id].dex, text: text }, id);
     }
   });
 
   socket.on("close", () => {
-    delete players[id];
-    delete intents[id];
-    broadcast({ type: "leave", id: id }, id);
-    if (connectedIds().length > 0 && turnTimer !== null && allSubmitted()) {
-      resolveTurn();
+    const s = sessions[sessionId];
+    if (!s) return;
+    delete s.players[id];
+    delete s.intents[id];
+    broadcast(sessionId, { type: "leave", id: id }, id);
+    if (Object.keys(s.players).length === 0) {
+      if (s.turnTimer !== null) clearTimeout(s.turnTimer);
+      delete sessions[sessionId];
+    } else if (s.turnTimer !== null && allSubmitted(s)) {
+      resolveTurn(sessionId);
     }
   });
 });
