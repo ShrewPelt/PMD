@@ -86,7 +86,7 @@
 <button id="endSession" class="hidden">End Session</button>
 <div id="game"></div>
 <div id="chat">
-  <input id="chatInput" type="text" autocomplete="off" placeholder="Say something... add an expression like [Happy], [Angry], [Pain]" />
+  <input id="chatInput" type="text" autocomplete="off" placeholder="Chat..." />
 </div>
 <div id="inventory" class="hidden">
   <div id="invTop">
@@ -738,7 +738,12 @@ function connectMultiplayer(scene) {
   const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
   const params = new URLSearchParams(location.search);
   const session = params.get("session") || "default";
-  socket = new WebSocket(wsProtocol + "//" + location.host + "/?session=" + encodeURIComponent(session));
+  const pass = params.get("pass") || "";
+  let wsUrl = wsProtocol + "//" + location.host + "/?session=" + encodeURIComponent(session);
+  if (pass) {
+    wsUrl = wsUrl + "&pass=" + encodeURIComponent(pass);
+  }
+  socket = new WebSocket(wsUrl);
 
   socket.addEventListener("message", (event) => {
     let data;
