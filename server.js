@@ -169,6 +169,10 @@ function getSession(sessionId) {
   return sessions[sessionId];
 }
 
+function num(v, d) {
+  return (typeof v === "number" && !isNaN(v)) ? v : d;
+}
+
 function isFloor(col, row) {
   if (row < 0 || row >= MAP.length) return false;
   if (col < 0 || col >= MAP[row].length) return false;
@@ -316,6 +320,43 @@ function sessionHasSockets(sessionId) {
   return found;
 }
 
+function sendToPlayer(sessionId, pid, data) {
+  const msg = JSON.stringify(data);
+  wss.clients.forEach((c) => {
+    if (c.readyState === WebSocket.OPEN && c.sessionId === sessionId && c.playerId === pid) {
+      c.send(msg);
+    }
+  });
+}
+
+function handleMove(sessionId, pid, dir) {
+  const s = sessions[sessionId];
+  if (!s) return;
+  const p = s.players[pid];
+  if (!p) return;
+  if (dir) p.direction = dir;
+
+  const blocked = () => {
+    broadcast(sessionId, { type: "face", id: pid, direction: p.direction }, pid);
+    sendToPlayer(sessionId, pid, { type: "moveblocked", direction: p.direction });
+  };
+
+  const d = DELTAS[dir];
+  if (!d) { blocked(); return; }
+  const nc = p.col + d.dc;
+  const nr = p.row + d.dr;
+  if (!isFloor(nc, nr)) { blocked(); return; }
+  for (const oid in s.players) {
+    if (String(oid) !== String(pid) && s.players[oid].col === nc && s.players[oid].row === nr) {
+      blocked();
+      return;
+    }
+  }
+  p.col = nc;
+  p.row = nr;
+  broadcast(sessionId, { type: "moved", id: pid, col: nc, row: nr, direction: p.direction });
+}
+
 wss.on("connection", (socket, req) => {
   let sessionId = "default";
   let pass = null;
@@ -359,8 +400,17 @@ wss.on("connection", (socket, req) => {
     }
     if (!displayName && passInfo) displayName = passInfo.name || "";
 
+    let maxHp = 30, hp = 30, maxMp = 10, mp = 10;
+    if (sheet) {
+      const st = sheet.stats || {};
+      maxHp = num(sheet.maxHp, num(st.hp, num(sheet.hp, 30)));
+      hp = num(sheet.hp, maxHp);
+      maxMp = num(sheet.maxMp, num(st.mp, num(sheet.mp, 10)));
+      mp = num(sheet.mp, maxMp);
+    }
+
     const spawn = SPAWNS[(id - 1) % SPAWNS.length];
-    session.players[id] = { id: id, col: spawn.col, row: spawn.row, direction: "down", dex: dex, name: displayName, userId: socket.userId };
+    session.players[id] = { id: id, col: spawn.col, row: spawn.row, direction: "down", dex: dex, name: displayName, userId: socket.userId, hp: hp, maxHp: maxHp, mp: mp, maxMp: maxMp };
     if (sheet) session.characters[id] = sheet;
     socket.send(JSON.stringify({ type: "init", id: id, role: "player", turn: session.turnNumber, players: session.players }));
     broadcast(sessionId, { type: "join", player: session.players[id] }, id);
@@ -387,12 +437,21 @@ wss.on("connection", (socket, req) => {
       return;
     }
 
+    if (data.type === "gmchat") {
+      if (socket.role !== "gm") return;
+      const text = String(data.text || "").slice(0, 300);
+      broadcast(sessionId, { type: "gmchat", text: text, ts: Date.now() }, socket.playerId);
+      return;
+    }
+
     const pid = socket.playerId;
     if (pid === null || !s.players[pid]) return;
 
     if (data.type === "face") {
       s.players[pid].direction = data.direction;
       broadcast(sessionId, { type: "face", id: pid, direction: s.players[pid].direction }, pid);
+    } else if (data.type === "move") {
+      handleMove(sessionId, pid, data.dir);
     } else if (data.type === "intent") {
       onIntent(sessionId, pid, data.dir);
     } else if (data.type === "chat") {

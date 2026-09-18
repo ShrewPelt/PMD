@@ -28,6 +28,23 @@
   }
   #endSession.hidden { display: none; }
 
+  #gmlog {
+    position: fixed; top: 16px; left: 16px;
+    width: 240px; max-height: 46vh;
+    background: rgba(20,20,34,0.82);
+    border: 1px solid #3a3a55; border-radius: 8px;
+    color: #ffffff; font-size: 13px;
+    display: flex; flex-direction: column;
+    z-index: 9;
+  }
+  #gmloghead {
+    padding: 7px 10px; font-weight: bold;
+    border-bottom: 1px solid #3a3a55; color: #ffd23f;
+  }
+  #gmlogbody { padding: 6px 10px; overflow-y: auto; }
+  .gmline { margin: 4px 0; line-height: 1.35; }
+  .gmts { color: #8888aa; font-size: 11px; }
+
   #inventory {
     width: 664px;
     margin: 0 auto 24px auto;
@@ -84,6 +101,10 @@
 </head>
 <body>
 <button id="endSession" class="hidden">End Session</button>
+<div id="gmlog">
+  <div id="gmloghead">Game Master</div>
+  <div id="gmlogbody"></div>
+</div>
 <div id="game"></div>
 <div id="chat">
   <input id="chatInput" type="text" autocomplete="off" placeholder="Say something... add an expression like [Happy], [Angry], [Pain]" />
@@ -247,12 +268,14 @@ const config = {
 let player;
 let readout;
 let turnCount = 1;
+let stepCount = 0;
 let state = "input";
 let lockedAction = null;
 
 let sceneRef;
 let chatActive = false;
 let isGM = false;
+let barsGfx;
 let socket = null;
 let myId = null;
 const otherPlayers = {};
@@ -348,6 +371,9 @@ function create() {
     }
   });
 
+  barsGfx = this.add.graphics();
+  barsGfx.setDepth(400);
+
   readout = this.add.text(12, 12, "", { fontSize: "13px", color: "#ffffff", fontFamily: "monospace" });
   readout.setScrollFactor(0);
   readout.setDepth(1000);
@@ -380,12 +406,8 @@ function create() {
   kb.on("keydown-P", (e) => { if (e.repeat || chatActive) return; debugHp(8); });
   kb.on("keydown-B", (e) => { if (e.repeat || chatActive) return; cycleBag(); });
   kb.on("keydown-SPACE", (e) => {
-    if (e.repeat || chatActive || isGM) return;
+    if (chatActive) return;
     e.preventDefault();
-    if (state !== "input") return;
-    sendIntent(null);
-    state = "waiting";
-    updateReadout("wait (waiting for turn)");
   });
 
   const input = document.getElementById("chatInput");
@@ -395,7 +417,12 @@ function create() {
     if (e.key === "Enter") {
       const value = input.value.trim();
       if (value.length > 0) {
-        showBubble(value);
+        if (isGM) {
+          sendGmChat(value);
+          addGmLine(value, Date.now());
+        } else {
+          showBubble(value);
+        }
       }
       input.value = "";
     }
@@ -406,6 +433,51 @@ function update() {
   for (const key in bubbles) {
     if (bubbles[key].visible) {
       positionBubbleObj(bubbles[key]);
+    }
+  }
+  drawBars();
+}
+
+function hpColor(r) {
+  if (r > 0.5) return 0x3ec13e;
+  if (r > 0.25) return 0xe0c020;
+  return 0xd83030;
+}
+
+function drawEntityBars(s) {
+  const w = 34;
+  const h = 4;
+  const x = s.x - w / 2;
+  const y = s.y + 4;
+  const hpRatio = s.maxHp > 0 ? Math.max(0, Math.min(1, s.hp / s.maxHp)) : 0;
+  const mpRatio = s.maxMp > 0 ? Math.max(0, Math.min(1, s.mp / s.maxMp)) : 0;
+
+  barsGfx.fillStyle(0x000000, 0.55);
+  barsGfx.fillRect(x - 1, y - 1, w + 2, h + 2);
+  barsGfx.fillStyle(0x2a2a2a, 1);
+  barsGfx.fillRect(x, y, w, h);
+  barsGfx.fillStyle(hpColor(hpRatio), 1);
+  barsGfx.fillRect(x, y, w * hpRatio, h);
+
+  const y2 = y + h + 2;
+  barsGfx.fillStyle(0x000000, 0.55);
+  barsGfx.fillRect(x - 1, y2 - 1, w + 2, h + 2);
+  barsGfx.fillStyle(0x2a2a2a, 1);
+  barsGfx.fillRect(x, y2, w, h);
+  barsGfx.fillStyle(0x3a8bd4, 1);
+  barsGfx.fillRect(x, y2, w * mpRatio, h);
+}
+
+function drawBars() {
+  if (!barsGfx) return;
+  barsGfx.clear();
+  if (!isGM && player.visible && player.maxHp) {
+    drawEntityBars(player);
+  }
+  for (const id in otherPlayers) {
+    const s = otherPlayers[id];
+    if (s && s !== "loading" && s.maxHp) {
+      drawEntityBars(s);
     }
   }
 }
@@ -435,9 +507,8 @@ function onDirection(scene, dir) {
     return;
   }
 
-  sendIntent(dir);
-  state = "waiting";
-  updateReadout("locked move " + dir + " (waiting for turn)");
+  sendMove(dir);
+  state = "moving";
 }
 
 function lockAction(scene, action) {
@@ -786,6 +857,8 @@ function debugHp(amount) {
   playerHp = playerHp + amount;
   if (playerHp < 0) playerHp = 0;
   if (playerHp > playerMaxHp) playerHp = playerMaxHp;
+  player.hp = playerHp;
+  player.maxHp = playerMaxHp;
   if (inventoryOpen) refreshInventoryPanel();
   updateReadout("debug HP " + playerHp + "/" + playerMaxHp);
 }
@@ -800,7 +873,7 @@ function describeAction(action) {
 }
 
 function updateReadout(action) {
-  readout.setText("Turn: " + turnCount + "\nState: " + state + "\nFacing: " + player.direction + "\nLast: " + action);
+  readout.setText("Steps: " + stepCount + "\nState: " + state + "\nFacing: " + player.direction + "\nLast: " + action);
 }
 
 function connectMultiplayer(scene) {
@@ -837,6 +910,12 @@ function connectMultiplayer(scene) {
           player.col = me.col;
           player.row = me.row;
           player.direction = me.direction;
+          player.hp = me.hp;
+          player.maxHp = me.maxHp;
+          player.mp = me.mp;
+          player.maxMp = me.maxMp;
+          playerHp = me.hp;
+          playerMaxHp = me.maxHp;
           player.x = tilePixelX(player.col);
           player.y = playerRestingY(player.col, player.row);
           loadSpecies(scene, me.dex, (okDex) => {
@@ -856,6 +935,33 @@ function connectMultiplayer(scene) {
       if (data.player.id !== myId) {
         addOtherPlayer(scene, data.player);
       }
+    } else if (data.type === "moved") {
+      if (data.id === myId) {
+        player.direction = data.direction;
+        player.col = data.col;
+        player.row = data.row;
+        const tx = tilePixelX(data.col);
+        const ty = playerRestingY(data.col, data.row);
+        player.play(DEX + "_walk_" + data.direction);
+        stepCount = stepCount + 1;
+        scene.tweens.add({ targets: player, x: tx, y: ty, duration: 110, onComplete: () => { player.play(DEX + "_idle_" + player.direction); state = "input"; updateReadout("moved " + data.direction); } });
+      } else {
+        const sprite = otherPlayers[data.id];
+        if (sprite && sprite !== "loading") {
+          sprite.direction = data.direction;
+          const tx = tilePixelX(data.col);
+          const ty = tilePixelY(data.row);
+          sprite.play(sprite.dex + "_walk_" + data.direction);
+          scene.tweens.add({ targets: sprite, x: tx, y: ty, duration: 110, onComplete: () => { sprite.play(sprite.dex + "_idle_" + sprite.direction); } });
+        }
+      }
+    } else if (data.type === "moveblocked") {
+      player.direction = data.direction;
+      player.play(DEX + "_idle_" + data.direction);
+      state = "input";
+      updateReadout("blocked");
+    } else if (data.type === "gmchat") {
+      addGmLine(data.text, data.ts);
     } else if (data.type === "face") {
       const sprite = otherPlayers[data.id];
       if (sprite && sprite !== "loading") {
@@ -918,6 +1024,10 @@ function addOtherPlayer(scene, p) {
     sprite.setDepth(10);
     sprite.dex = okDex;
     sprite.direction = p.direction;
+    sprite.hp = p.hp;
+    sprite.maxHp = p.maxHp;
+    sprite.mp = p.mp;
+    sprite.maxMp = p.maxMp;
     sprite.play(okDex + "_idle_" + p.direction);
     otherPlayers[p.id] = sprite;
   });
@@ -973,6 +1083,37 @@ function sendIntent(dir) {
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: "intent", dir: dir }));
   }
+}
+
+function sendMove(dir) {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: "move", dir: dir }));
+  }
+}
+
+function sendGmChat(text) {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: "gmchat", text: text }));
+  }
+}
+
+function addGmLine(text, ts) {
+  const body = document.getElementById("gmlogbody");
+  if (!body) return;
+  const d = new Date(ts || Date.now());
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const line = document.createElement("div");
+  line.className = "gmline";
+  const stamp = document.createElement("span");
+  stamp.className = "gmts";
+  stamp.textContent = "[" + hh + ":" + mm + "] ";
+  const bodyText = document.createElement("span");
+  bodyText.textContent = 'GM : "' + text + '"';
+  line.appendChild(stamp);
+  line.appendChild(bodyText);
+  body.insertBefore(line, body.firstChild);
+  body.scrollTop = 0;
 }
 
 new Phaser.Game(config);
