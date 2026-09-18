@@ -118,23 +118,23 @@ const wss = new WebSocket.Server({ server });
 
 const MAP = [
   "############################",
-  "########...........#########",
+  "############################",
   "##.......#########........##",
-  "##.......##############...##",
-  "##....#..............##...##",
-  "##....#######.####...##...##",
-  "##.......####.####........##",
-  "###.#########.########.#####",
-  "###....####......#####....##",
-  "######.####....#.########.##",
-  "######........##.###......##",
-  "######.####......###.#######",
-  "######.######.######.#######",
-  "##.....######.#####.......##",
-  "##....#######.####.......###",
-  "##...###..............######",
-  "##....#...########........##",
-  "##........#########...##..##",
+  "##.......#########........##",
+  "##........................##",
+  "##.......####..###........##",
+  "##.......####..###........##",
+  "#############..#############",
+  "###########......###########",
+  "###########......###########",
+  "###########......###########",
+  "###########......###########",
+  "#############..#############",
+  "##........###..###........##",
+  "##........###..###........##",
+  "##........................##",
+  "##........########........##",
+  "##........########........##",
   "############################",
   "############################"
 ];
@@ -164,7 +164,7 @@ const sessions = {};
 
 function getSession(sessionId) {
   if (!sessions[sessionId]) {
-    sessions[sessionId] = { players: {}, intents: {}, turnNumber: 1, turnTimer: null, nextId: 1 };
+    sessions[sessionId] = { players: {}, intents: {}, turnNumber: 1, turnTimer: null, nextId: 1, characters: {} };
   }
   return sessions[sessionId];
 }
@@ -341,8 +341,27 @@ wss.on("connection", (socket, req) => {
     const id = session.nextId;
     session.nextId = session.nextId + 1;
     socket.playerId = id;
+    socket.userId = passInfo ? passInfo.userId : null;
+
+    let dex = DEXES[(id - 1) % DEXES.length];
+    let displayName = "";
+    let sheet = null;
+    const run = runs[sessionId];
+    if (passInfo && run && Array.isArray(run.roster)) {
+      for (const entry of run.roster) {
+        if (String(entry.userId) === String(passInfo.userId)) {
+          if (entry.dex) dex = String(entry.dex);
+          displayName = entry.name || "";
+          sheet = entry.character || entry;
+          break;
+        }
+      }
+    }
+    if (!displayName && passInfo) displayName = passInfo.name || "";
+
     const spawn = SPAWNS[(id - 1) % SPAWNS.length];
-    session.players[id] = { id: id, col: spawn.col, row: spawn.row, direction: "down", dex: DEXES[(id - 1) % DEXES.length] };
+    session.players[id] = { id: id, col: spawn.col, row: spawn.row, direction: "down", dex: dex, name: displayName, userId: socket.userId };
+    if (sheet) session.characters[id] = sheet;
     socket.send(JSON.stringify({ type: "init", id: id, role: "player", turn: session.turnNumber, players: session.players }));
     broadcast(sessionId, { type: "join", player: session.players[id] }, id);
   }
@@ -389,6 +408,7 @@ wss.on("connection", (socket, req) => {
     if (pid !== null) {
       delete s.players[pid];
       delete s.intents[pid];
+      delete s.characters[pid];
       broadcast(sessionId, { type: "leave", id: pid }, pid);
     }
     if (!sessionHasSockets(sessionId)) {

@@ -86,7 +86,7 @@
 <button id="endSession" class="hidden">End Session</button>
 <div id="game"></div>
 <div id="chat">
-  <input id="chatInput" type="text" autocomplete="off" placeholder="Chat..." />
+  <input id="chatInput" type="text" autocomplete="off" placeholder="Say something... add an expression like [Happy], [Angry], [Pain]" />
 </div>
 <div id="inventory" class="hidden">
   <div id="invTop">
@@ -112,25 +112,93 @@ const SPECIES = {
 
 const DIR_ORDER = ["down", "downright", "right", "upright", "up", "upleft", "left", "downleft"];
 
+const SPECIES_BASE = "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/sprite/";
+const loadedSpecies = {};
+const loadingSpecies = {};
+
+function parseAnimDims(xmlText) {
+  const doc = new DOMParser().parseFromString(xmlText, "text/xml");
+  const anims = doc.getElementsByTagName("Anim");
+  const out = {};
+  for (let i = 0; i < anims.length; i++) {
+    const nameEl = anims[i].getElementsByTagName("Name")[0];
+    if (!nameEl) continue;
+    const name = nameEl.textContent;
+    if (name !== "Walk" && name !== "Idle") continue;
+    const fwEl = anims[i].getElementsByTagName("FrameWidth")[0];
+    const fhEl = anims[i].getElementsByTagName("FrameHeight")[0];
+    const durs = anims[i].getElementsByTagName("Duration");
+    if (!fwEl || !fhEl || durs.length === 0) continue;
+    out[name.toLowerCase()] = { fw: parseInt(fwEl.textContent, 10), fh: parseInt(fhEl.textContent, 10), cols: durs.length };
+  }
+  return out;
+}
+
+function buildSpeciesAnims(scene, dex, dims) {
+  for (let d = 0; d < 8; d++) {
+    const dir = DIR_ORDER[d];
+    if (!scene.anims.exists(dex + "_walk_" + dir)) {
+      scene.anims.create({ key: dex + "_walk_" + dir, frames: scene.anims.generateFrameNumbers(dex + "_walk", { start: d * dims.walk.cols, end: d * dims.walk.cols + dims.walk.cols - 1 }), frameRate: 8, repeat: -1 });
+    }
+    if (!scene.anims.exists(dex + "_idle_" + dir)) {
+      scene.anims.create({ key: dex + "_idle_" + dir, frames: scene.anims.generateFrameNumbers(dex + "_idle", { start: d * dims.idle.cols, end: d * dims.idle.cols + dims.idle.cols - 1 }), frameRate: 4, repeat: -1 });
+    }
+  }
+}
+
+function loadSpecies(scene, dex, cb) {
+  if (!dex) { cb("0004"); return; }
+  if (loadedSpecies[dex] === true) { cb(dex); return; }
+  if (loadedSpecies[dex] === false) { cb("0004"); return; }
+  if (loadingSpecies[dex]) { loadingSpecies[dex].push(cb); return; }
+  loadingSpecies[dex] = [cb];
+  const done = (okDex) => {
+    const list = loadingSpecies[dex] || [];
+    delete loadingSpecies[dex];
+    for (const fn of list) fn(okDex);
+  };
+  fetch(SPECIES_BASE + dex + "/AnimData.xml").then((r) => {
+    if (!r.ok) throw new Error("no anim data");
+    return r.text();
+  }).then((xml) => {
+    const dims = parseAnimDims(xml);
+    if (!dims.walk) { loadedSpecies[dex] = false; done("0004"); return; }
+    if (!dims.idle) dims.idle = dims.walk;
+    scene.load.spritesheet(dex + "_walk", SPECIES_BASE + dex + "/Walk-Anim.png", { frameWidth: dims.walk.fw, frameHeight: dims.walk.fh });
+    scene.load.spritesheet(dex + "_idle", SPECIES_BASE + dex + "/Idle-Anim.png", { frameWidth: dims.idle.fw, frameHeight: dims.idle.fh });
+    scene.load.once("complete", () => {
+      if (scene.textures.exists(dex + "_walk") && scene.textures.exists(dex + "_idle")) {
+        buildSpeciesAnims(scene, dex, dims);
+        loadedSpecies[dex] = true;
+        done(dex);
+      } else {
+        loadedSpecies[dex] = false;
+        done("0004");
+      }
+    });
+    scene.load.start();
+  }).catch(() => { loadedSpecies[dex] = false; done("0004"); });
+}
+
 const MAP = [
   "############################",
-  "########...........#########",
+  "############################",
   "##.......#########........##",
-  "##.......##############...##",
-  "##....#..............##...##",
-  "##....#######.####...##...##",
-  "##.......####.####........##",
-  "###.#########.########.#####",
-  "###....####......#####....##",
-  "######.####....#.########.##",
-  "######........##.###......##",
-  "######.####......###.#######",
-  "######.######.######.#######",
-  "##.....######.#####.......##",
-  "##....#######.####.......###",
-  "##...###..............######",
-  "##....#...########........##",
-  "##........#########...##..##",
+  "##.......#########........##",
+  "##........................##",
+  "##.......####..###........##",
+  "##.......####..###........##",
+  "#############..#############",
+  "###########......###########",
+  "###########......###########",
+  "###########......###########",
+  "###########......###########",
+  "#############..#############",
+  "##........###..###........##",
+  "##........###..###........##",
+  "##........................##",
+  "##........########........##",
+  "##........########........##",
   "############################",
   "############################"
 ];
@@ -239,6 +307,7 @@ function create() {
       this.anims.create({ key: dex + "_walk_" + dir, frames: this.anims.generateFrameNumbers(dex + "_walk", { start: d * s.walk.cols, end: d * s.walk.cols + s.walk.cols - 1 }), frameRate: 8, repeat: -1 });
       this.anims.create({ key: dex + "_idle_" + dir, frames: this.anims.generateFrameNumbers(dex + "_idle", { start: d * s.idle.cols, end: d * s.idle.cols + s.idle.cols - 1 }), frameRate: 4, repeat: -1 });
     }
+    loadedSpecies[dex] = true;
   }
 
   player = this.add.sprite(0, 0, DEX + "_idle");
@@ -765,13 +834,16 @@ function connectMultiplayer(scene) {
       } else {
         const me = data.players[myId];
         if (me) {
-          if (me.dex) DEX = me.dex;
           player.col = me.col;
           player.row = me.row;
           player.direction = me.direction;
           player.x = tilePixelX(player.col);
           player.y = playerRestingY(player.col, player.row);
-          player.play(DEX + "_idle_" + player.direction);
+          loadSpecies(scene, me.dex, (okDex) => {
+            DEX = okDex;
+            player.setTexture(okDex + "_idle");
+            player.play(okDex + "_idle_" + player.direction);
+          });
         }
       }
       for (const key in data.players) {
@@ -786,7 +858,7 @@ function connectMultiplayer(scene) {
       }
     } else if (data.type === "face") {
       const sprite = otherPlayers[data.id];
-      if (sprite) {
+      if (sprite && sprite !== "loading") {
         sprite.direction = data.direction;
         sprite.play(sprite.dex + "_idle_" + data.direction);
       }
@@ -807,7 +879,7 @@ function connectMultiplayer(scene) {
           }
         } else {
           const sprite = otherPlayers[entry.id];
-          if (sprite) {
+          if (sprite && sprite !== "loading") {
             sprite.direction = entry.direction;
             const tx = tilePixelX(entry.col);
             const ty = tilePixelY(entry.row);
@@ -824,7 +896,7 @@ function connectMultiplayer(scene) {
       updateReadout("turn " + turnCount);
     } else if (data.type === "chat") {
       const sprite = otherPlayers[data.id];
-      if (sprite) {
+      if (sprite && sprite !== "loading") {
         showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text);
       }
     } else if (data.type === "ended") {
@@ -837,20 +909,23 @@ function connectMultiplayer(scene) {
 
 function addOtherPlayer(scene, p) {
   if (otherPlayers[p.id]) return;
-  const dex = p.dex || "0004";
-  const sprite = scene.add.sprite(tilePixelX(p.col), tilePixelY(p.row), dex + "_idle");
-  sprite.setOrigin(0.5, 1);
-  sprite.setScale(1.5);
-  sprite.setDepth(10);
-  sprite.dex = dex;
-  sprite.direction = p.direction;
-  sprite.play(dex + "_idle_" + p.direction);
-  otherPlayers[p.id] = sprite;
+  otherPlayers[p.id] = "loading";
+  loadSpecies(scene, p.dex || "0004", (okDex) => {
+    if (otherPlayers[p.id] !== "loading") return;
+    const sprite = scene.add.sprite(tilePixelX(p.col), tilePixelY(p.row), okDex + "_idle");
+    sprite.setOrigin(0.5, 1);
+    sprite.setScale(1.5);
+    sprite.setDepth(10);
+    sprite.dex = okDex;
+    sprite.direction = p.direction;
+    sprite.play(okDex + "_idle_" + p.direction);
+    otherPlayers[p.id] = sprite;
+  });
 }
 
 function updateOtherPlayer(scene, data) {
   const sprite = otherPlayers[data.id];
-  if (!sprite) return;
+  if (!sprite || sprite === "loading") return;
   sprite.direction = data.direction;
   const targetX = tilePixelX(data.col);
   const targetY = tilePixelY(data.row);
@@ -872,7 +947,9 @@ function updateOtherPlayer(scene, data) {
 
 function removeOtherPlayer(id) {
   const sprite = otherPlayers[id];
-  if (sprite) {
+  if (sprite === "loading") {
+    delete otherPlayers[id];
+  } else if (sprite) {
     sprite.destroy();
     delete otherPlayers[id];
   }
