@@ -164,7 +164,7 @@ const sessions = {};
 
 function getSession(sessionId) {
   if (!sessions[sessionId]) {
-    sessions[sessionId] = { players: {}, intents: {}, turnNumber: 1, turnTimer: null, nextId: 1, characters: {} };
+    sessions[sessionId] = { players: {}, intents: {}, turnNumber: 1, turnTimer: null, nextId: 1, characters: {}, floorItems: [ { col: 11, row: 9, name: "Oran Berry" }, { col: 16, row: 9, name: "Apple" } ] };
   }
   return sessions[sessionId];
 }
@@ -377,7 +377,7 @@ wss.on("connection", (socket, req) => {
 
   if (role === "gm") {
     socket.playerId = null;
-    socket.send(JSON.stringify({ type: "init", id: null, role: "gm", turn: session.turnNumber, players: session.players }));
+    socket.send(JSON.stringify({ type: "init", id: null, role: "gm", turn: session.turnNumber, players: session.players, floorItems: session.floorItems }));
   } else {
     const id = session.nextId;
     session.nextId = session.nextId + 1;
@@ -412,7 +412,7 @@ wss.on("connection", (socket, req) => {
     const spawn = SPAWNS[(id - 1) % SPAWNS.length];
     session.players[id] = { id: id, col: spawn.col, row: spawn.row, direction: "down", dex: dex, name: displayName, userId: socket.userId, hp: hp, maxHp: maxHp, mp: mp, maxMp: maxMp };
     if (sheet) session.characters[id] = sheet;
-    socket.send(JSON.stringify({ type: "init", id: id, role: "player", turn: session.turnNumber, players: session.players }));
+    socket.send(JSON.stringify({ type: "init", id: id, role: "player", turn: session.turnNumber, players: session.players, floorItems: session.floorItems }));
     broadcast(sessionId, { type: "join", player: session.players[id] }, id);
   }
 
@@ -452,6 +452,34 @@ wss.on("connection", (socket, req) => {
       broadcast(sessionId, { type: "face", id: pid, direction: s.players[pid].direction }, pid);
     } else if (data.type === "move") {
       handleMove(sessionId, pid, data.dir);
+    } else if (data.type === "pickup") {
+      const p = s.players[pid];
+      let idx = -1;
+      for (let i = 0; i < s.floorItems.length; i++) {
+        if (s.floorItems[i].col === p.col && s.floorItems[i].row === p.row) { idx = i; break; }
+      }
+      if (idx !== -1) {
+        const it = s.floorItems[idx];
+        s.floorItems.splice(idx, 1);
+        broadcast(sessionId, { type: "itemremoved", col: it.col, row: it.row });
+        sendToPlayer(sessionId, pid, { type: "pickedup", name: it.name });
+      }
+    } else if (data.type === "drop") {
+      const p = s.players[pid];
+      const name = String(data.name || "");
+      if (name) {
+        let occupied = false;
+        for (const fi of s.floorItems) {
+          if (fi.col === p.col && fi.row === p.row) { occupied = true; break; }
+        }
+        if (occupied) {
+          sendToPlayer(sessionId, pid, { type: "dropfail" });
+        } else {
+          s.floorItems.push({ col: p.col, row: p.row, name: name });
+          broadcast(sessionId, { type: "itemadded", col: p.col, row: p.row, name: name });
+          sendToPlayer(sessionId, pid, { type: "dropok", name: name });
+        }
+      }
     } else if (data.type === "intent") {
       onIntent(sessionId, pid, data.dir);
     } else if (data.type === "chat") {
