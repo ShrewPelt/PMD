@@ -421,7 +421,8 @@ function create() {
   updateReadout("none");
 
   const kb = this.input.keyboard;
-  moveKeys = kb.addKeys("W,A,S,D");
+  moveKeys = kb.addKeys("W,A,S,D", false);
+  kb.removeCapture("W,A,S,D,Q,E,I,F,G,R,H,J,K,L,B,O,P");
   kb.on("keydown-Q", (e) => { if (e.repeat || chatActive || isGM) return; rotateView(1); });
   kb.on("keydown-E", (e) => { if (e.repeat || chatActive || isGM) return; rotateView(-1); });
   kb.on("keydown-H", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 1 }); });
