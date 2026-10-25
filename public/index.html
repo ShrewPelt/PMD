@@ -27,6 +27,23 @@
     z-index: 10;
   }
   #endSession.hidden { display: none; }
+  #exitWorld {
+    position: fixed; top: 12px; right: 12px;
+    padding: 8px 14px; font-size: 14px;
+    border: none; border-radius: 6px;
+    background: #c0392b; color: #ffffff; cursor: pointer;
+    z-index: 10;
+  }
+  #exitWorld.hidden { display: none; }
+  #leftOverlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(10,10,20,0.92); z-index: 50;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #leftOverlay.hidden { display: none; }
+  #leftBox { text-align: center; color: #ffffff; font-family: sans-serif; }
+  #leftTitle { font-size: 26px; margin-bottom: 10px; }
+  #leftText { font-size: 15px; color: #b8b8d0; }
 
   #hud {
     position: fixed; top: 12px; left: 12px;
@@ -113,6 +130,8 @@
 </head>
 <body>
 <button id="endSession" class="hidden">End Session</button>
+<button id="exitWorld" class="hidden">Exit World</button>
+<div id="leftOverlay" class="hidden"><div id="leftBox"><div id="leftTitle">You have left the world</div><div id="leftText">Your character is saved. You can close this tab.</div></div></div>
 <div id="hud">
   <div id="readout"></div>
   <div id="gmlog">
@@ -216,7 +235,7 @@ function loadSpecies(scene, dex, cb) {
   }).catch(() => { loadedSpecies[dex] = false; done("0004"); });
 }
 
-const MAP = [
+let MAP = [
   "############################",
   "############################",
   "##.......#########........##",
@@ -288,6 +307,12 @@ let lockedAction = null;
 
 let sceneRef;
 let chatActive = false;
+let moveKeys = null;
+let viewStep = 0;
+let viewRot = 0;
+let comboKey = "";
+let comboSince = 0;
+let VIEW_SIGN = 1;
 let isGM = false;
 let barsGfx;
 let socket = null;
@@ -305,6 +330,20 @@ let floorItems = [];
 const floorItemSprites = {};
 let selectedSlot = -1;
 const ITEM_LIFT = 10;
+
+let mapGraphics = null;
+
+function drawMap() {
+  if (!mapGraphics) return;
+  mapGraphics.clear();
+  for (let r = 0; r < MAP.length; r++) {
+    for (let c = 0; c < MAP[r].length; c++) {
+      const isWall = MAP[r][c] === "#";
+      mapGraphics.fillStyle(isWall ? 0x24243a : 0x3a3a55, 1);
+      mapGraphics.fillRect(c * TILE, r * TILE, TILE - 2, TILE - 2);
+    }
+  }
+}
 
 function preload() {
   for (const dex in SPECIES) {
@@ -325,14 +364,8 @@ function create() {
 
   connectMultiplayer(this);
 
-  const g = this.add.graphics();
-  for (let r = 0; r < MAP.length; r++) {
-    for (let c = 0; c < MAP[r].length; c++) {
-      const isWall = MAP[r][c] === "#";
-      g.fillStyle(isWall ? 0x24243a : 0x3a3a55, 1);
-      g.fillRect(c * TILE, r * TILE, TILE - 2, TILE - 2);
-    }
-  }
+  mapGraphics = this.add.graphics();
+  drawMap();
 
   for (const dex in SPECIES) {
     const s = SPECIES[dex];
@@ -359,13 +392,13 @@ function create() {
   this.cameras.main.startFollow(player, true, 0.12, 0.12);
 
   this.input.on("pointermove", (pointer) => {
-    if (!isGM || !pointer.isDown) return;
+    if (!isGM || !pointer.isDown || window.worldGmActive) return;
     const cam = this.cameras.main;
     cam.scrollX = cam.scrollX - (pointer.x - pointer.prevPosition.x) / cam.zoom;
     cam.scrollY = cam.scrollY - (pointer.y - pointer.prevPosition.y) / cam.zoom;
   });
   this.input.on("wheel", (pointer, over, dx, dy) => {
-    if (!isGM) return;
+    if (!isGM || window.worldGmActive) return;
     const cam = this.cameras.main;
     let z = cam.zoom - dy * 0.001;
     if (z < 0.3) z = 0.3;
@@ -388,19 +421,14 @@ function create() {
   updateReadout("none");
 
   const kb = this.input.keyboard;
-  kb.on("keydown-Q", (e) => { if (e.repeat || chatActive) return; onDirection(this, "upleft"); });
-  kb.on("keydown-W", (e) => { if (e.repeat || chatActive) return; onDirection(this, "up"); });
-  kb.on("keydown-E", (e) => { if (e.repeat || chatActive) return; onDirection(this, "upright"); });
-  kb.on("keydown-A", (e) => { if (e.repeat || chatActive) return; onDirection(this, "left"); });
-  kb.on("keydown-D", (e) => { if (e.repeat || chatActive) return; onDirection(this, "right"); });
-  kb.on("keydown-Z", (e) => { if (e.repeat || chatActive) return; onDirection(this, "downleft"); });
-  kb.on("keydown-X", (e) => { if (e.repeat || chatActive) return; onDirection(this, "down"); });
-  kb.on("keydown-C", (e) => { if (e.repeat || chatActive) return; onDirection(this, "downright"); });
+  moveKeys = kb.addKeys("W,A,S,D");
+  kb.on("keydown-Q", (e) => { if (e.repeat || chatActive || isGM) return; rotateView(1); });
+  kb.on("keydown-E", (e) => { if (e.repeat || chatActive || isGM) return; rotateView(-1); });
   kb.on("keydown-H", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 1 }); });
   kb.on("keydown-J", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 2 }); });
   kb.on("keydown-K", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 3 }); });
   kb.on("keydown-L", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 4 }); });
-  kb.on("keydown-S", (e) => { if (e.repeat || chatActive) return; toggleInventory(); });
+  kb.on("keydown-I", (e) => { if (e.repeat || chatActive) return; toggleInventory(); });
   kb.on("keydown-F", (e) => { if (e.repeat || chatActive || isGM) return; attemptPickup(); });
   kb.on("keydown-G", (e) => { if (e.repeat || chatActive || isGM) return; attemptDrop(); });
   kb.on("keydown-R", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "use" }); });
@@ -431,7 +459,117 @@ function create() {
   });
 }
 
+const VIEW_VEC = {
+  down: [0, 1], downright: [1, 1], right: [1, 0], upright: [1, -1],
+  up: [0, -1], upleft: [-1, -1], left: [-1, 0], downleft: [-1, 1]
+};
+
+function vecToDir(x, y) {
+  for (const name in VIEW_VEC) {
+    if (VIEW_VEC[name][0] === x && VIEW_VEC[name][1] === y) return name;
+  }
+  return null;
+}
+
+function quarterTurns() {
+  return ((viewStep % 4) + 4) % 4;
+}
+
+function rotateVecClockwise(v, turns) {
+  let x = v[0];
+  let y = v[1];
+  for (let i = 0; i < turns; i++) {
+    const nx = -y;
+    const ny = x;
+    x = nx;
+    y = ny;
+  }
+  return [x, y];
+}
+
+function screenToWorldDir(screenVec) {
+  const turns = (4 - quarterTurns()) % 4;
+  const v = rotateVecClockwise(screenVec, turns);
+  return vecToDir(v[0], v[1]);
+}
+
+function worldToScreenDir(dir) {
+  const v = VIEW_VEC[dir];
+  if (!v) return dir;
+  const r = rotateVecClockwise(v, quarterTurns());
+  return vecToDir(r[0], r[1]);
+}
+
+function rotateView(delta) {
+  if (isGM) return;
+  const cam = sceneRef.cameras.main;
+  cam.removeBounds();
+  viewStep = viewStep + delta;
+  updateReadout(delta > 0 ? "camera left" : "camera right");
+}
+
+function updateViewRotation() {
+  const target = viewStep * (Math.PI / 2) * VIEW_SIGN;
+  const diff = target - viewRot;
+  if (Math.abs(diff) < 0.002) {
+    viewRot = target;
+  } else {
+    viewRot = viewRot + diff * 0.22;
+  }
+  sceneRef.cameras.main.setRotation(viewRot);
+  const counter = -viewRot;
+  if (player) player.setRotation(counter);
+  for (const id in otherPlayers) {
+    const sp = otherPlayers[id];
+    if (sp && sp !== "loading") sp.setRotation(counter);
+  }
+  for (const key in floorItemSprites) {
+    floorItemSprites[key].setRotation(counter);
+  }
+}
+
+function syncSpriteFacing(sp) {
+  if (!sp || !sp.anims || !sp.anims.currentAnim || !sp.direction) return;
+  const current = sp.anims.currentAnim.key;
+  const kind = current.indexOf("_walk_") !== -1 ? "walk" : "idle";
+  const dex = current.split("_")[0];
+  const want = dex + "_" + kind + "_" + worldToScreenDir(sp.direction);
+  if (current !== want) sp.play(want, true);
+}
+
+function pollMovement() {
+  if (!moveKeys || isGM || chatActive || state !== "input") {
+    comboKey = "";
+    return;
+  }
+  const sx = (moveKeys.D.isDown ? 1 : 0) - (moveKeys.A.isDown ? 1 : 0);
+  const sy = (moveKeys.S.isDown ? 1 : 0) - (moveKeys.W.isDown ? 1 : 0);
+  if (sx === 0 && sy === 0) {
+    comboKey = "";
+    return;
+  }
+  const key = sx + "," + sy;
+  const now = Date.now();
+  if (key !== comboKey) {
+    comboKey = key;
+    comboSince = now;
+    return;
+  }
+  if (now - comboSince < 45) return;
+  const dir = screenToWorldDir([sx, sy]);
+  if (!dir) return;
+  player.direction = dir;
+  sendMove(dir);
+  state = "moving";
+}
+
 function update() {
+  updateViewRotation();
+  pollMovement();
+  syncSpriteFacing(player);
+  for (const id in otherPlayers) {
+    syncSpriteFacing(otherPlayers[id]);
+  }
   for (const key in bubbles) {
     if (bubbles[key].visible) {
       positionBubbleObj(bubbles[key]);
@@ -449,10 +587,14 @@ function hpColor(r) {
 function drawEntityBars(s) {
   const w = 34;
   const h = 4;
-  const x = s.x - w / 2;
-  const y = s.y + 4;
+  const x = -w / 2;
+  const y = 4;
   const hpRatio = s.maxHp > 0 ? Math.max(0, Math.min(1, s.hp / s.maxHp)) : 0;
   const mpRatio = s.maxMp > 0 ? Math.max(0, Math.min(1, s.mp / s.maxMp)) : 0;
+
+  barsGfx.save();
+  barsGfx.translateCanvas(s.x, s.y);
+  barsGfx.rotateCanvas(-viewRot);
 
   barsGfx.fillStyle(0x000000, 0.55);
   barsGfx.fillRect(x - 1, y - 1, w + 2, h + 2);
@@ -468,6 +610,8 @@ function drawEntityBars(s) {
   barsGfx.fillRect(x, y2, w, h);
   barsGfx.fillStyle(0x3a8bd4, 1);
   barsGfx.fillRect(x, y2, w * mpRatio, h);
+
+  barsGfx.restore();
 }
 
 function drawBars() {
@@ -726,18 +870,32 @@ function positionBubbleObj(b) {
   const pad = 7;
   const boxW = b.txt.width + pad * 2;
   const boxH = b.txt.height + pad * 2;
-  const boxX = b.target.x - boxW / 2;
-  const boxY = b.target.y - 74 - boxH;
+  const ax = b.target.x;
+  const ay = b.target.y;
+  const boxX = -boxW / 2;
+  const boxY = -74 - boxH;
+  const cosA = Math.cos(-viewRot);
+  const sinA = Math.sin(-viewRot);
 
   b.gfx.clear();
+  b.gfx.save();
+  b.gfx.translateCanvas(ax, ay);
+  b.gfx.rotateCanvas(-viewRot);
   b.gfx.fillStyle(0xffffff, 0.95);
   b.gfx.fillRoundedRect(boxX, boxY, boxW, boxH, 6);
-  b.gfx.fillTriangle(b.target.x - 6, boxY + boxH, b.target.x + 6, boxY + boxH, b.target.x, boxY + boxH + 8);
+  b.gfx.fillTriangle(-6, boxY + boxH, 6, boxY + boxH, 0, boxY + boxH + 8);
+  b.gfx.restore();
 
-  b.txt.setPosition(boxX + pad, boxY + pad);
+  const tx = boxX + pad;
+  const ty = boxY + pad;
+  b.txt.setRotation(-viewRot);
+  b.txt.setPosition(ax + tx * cosA - ty * sinA, ay + tx * sinA + ty * cosA);
 
   if (b.portrait.visible) {
-    b.portrait.setPosition(boxX - 28, boxY + boxH / 2);
+    const px = boxX - 28;
+    const py = boxY + boxH / 2;
+    b.portrait.setRotation(-viewRot);
+    b.portrait.setPosition(ax + px * cosA - py * sinA, ay + px * sinA + py * cosA);
   }
 }
 
@@ -896,9 +1054,29 @@ function connectMultiplayer(scene) {
       return;
     }
 
+    if (typeof worldHook === "function" && worldHook(scene, data)) return;
+
+    if (data.type === "denied") {
+      updateReadout(data.reason || "Access denied.");
+      window.alert(data.reason || "Access denied.");
+      return;
+    }
+
     if (data.type === "init") {
       myId = data.id;
       turnCount = data.turn;
+      if (Array.isArray(data.map) && data.map.length > 0) {
+        MAP = data.map;
+        drawMap();
+        scene.cameras.main.setBounds(0, 0, MAP[0].length * TILE, MAP.length * TILE);
+      }
+      if (Array.isArray(data.inventory)) {
+        inventoryItems.length = 0;
+        for (const entry of data.inventory) {
+          inventoryItems.push({ name: entry.name, count: entry.count });
+        }
+        if (inventoryOpen) refreshInventoryPanel();
+      }
       if (data.role === "gm") {
         isGM = true;
         player.setVisible(false);
@@ -1026,7 +1204,14 @@ function connectMultiplayer(scene) {
         showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text);
       }
     } else if (data.type === "ended") {
-      updateReadout("dungeon ended by GM");
+      updateReadout(data.reason ? data.reason : "dungeon ended by GM");
+      if (worldPlayerMode) {
+        document.getElementById("leftText").textContent = data.reason ? data.reason : "Your character is saved. You can close this tab.";
+        document.getElementById("leftOverlay").classList.remove("hidden");
+        document.getElementById("exitWorld").classList.add("hidden");
+      } else if (data.reason) {
+        window.alert(data.reason);
+      }
     } else if (data.type === "leave") {
       removeOtherPlayer(data.id);
     }
@@ -1138,5 +1323,6 @@ function addGmLine(text, ts) {
 
 new Phaser.Game(config);
 </script>
+<script src="world.js"></script>
 </body>
 </html>

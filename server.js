@@ -2,6 +2,7 @@ const express = require("express");
 const path = require("path");
 const http = require("http");
 const WebSocket = require("ws");
+const fs = require("fs");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -173,10 +174,14 @@ function num(v, d) {
   return (typeof v === "number" && !isNaN(v)) ? v : d;
 }
 
+function isFloorIn(map, col, row) {
+  if (row < 0 || row >= map.length) return false;
+  if (col < 0 || col >= map[row].length) return false;
+  return map[row][col] === ".";
+}
+
 function isFloor(col, row) {
-  if (row < 0 || row >= MAP.length) return false;
-  if (col < 0 || col >= MAP[row].length) return false;
-  return MAP[row][col] === ".";
+  return isFloorIn(MAP, col, row);
 }
 
 function broadcast(sessionId, data, exceptId) {
@@ -345,7 +350,7 @@ function handleMove(sessionId, pid, dir) {
   if (!d) { blocked(); return; }
   const nc = p.col + d.dc;
   const nr = p.row + d.dr;
-  if (!isFloor(nc, nr)) { blocked(); return; }
+  if (!isFloorIn(s.map || MAP, nc, nr)) { blocked(); return; }
   for (const oid in s.players) {
     if (String(oid) !== String(pid) && s.players[oid].col === nc && s.players[oid].row === nr) {
       blocked();
@@ -356,6 +361,948 @@ function handleMove(sessionId, pid, dir) {
   p.row = nr;
   broadcast(sessionId, { type: "moved", id: pid, col: nc, row: nr, direction: p.direction });
 }
+
+const WORLD_DIR = path.join(__dirname, "StorageData", "World");
+const WORLD_FILE = path.join(WORLD_DIR, "world.json");
+const LAYERS_FILE = path.join(WORLD_DIR, "layers.json");
+const PASSES_FILE = path.join(WORLD_DIR, "passes.json");
+const PENDING_FILE = path.join(WORLD_DIR, "pending.json");
+const WORLD_SESSION = "world";
+const WORLD_GM_SESSION = "worldgm";
+const WORLD_SAVE_INTERVAL = 30000;
+const WORLD_CHECKPOINT_INTERVAL = 60000;
+const LAYER_SAVE_DELAY = 1500;
+const LAYER_W = 256;
+const LAYER_H = 256;
+const MAX_LAYER = 999;
+const MIN_LAYER = -999;
+const VIEW_HALF_W = 8;
+const VIEW_HALF_H = 6;
+const TILE_CHARS = " .#xP";
+const MAX_EDIT_OPS = 6000;
+
+function readJsonFile(file, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (e) {
+    return fallback;
+  }
+}
+
+function writeJsonFile(file, data) {
+  try {
+    fs.mkdirSync(WORLD_DIR, { recursive: true });
+    const tmp = file + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(data));
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    console.error("Could not write " + file + ": " + e.message);
+  }
+}
+
+function buildSeedMap() {
+  const W = 64;
+  const H = 44;
+  const grid = [];
+  for (let r = 0; r < H; r++) {
+    const row = [];
+    for (let c = 0; c < W; c++) {
+      row.push(r === 0 || c === 0 || r === H - 1 || c === W - 1 ? "#" : ".");
+    }
+    grid.push(row);
+  }
+
+  const blocks = [
+    [6, 5, 8, 5], [20, 5, 6, 4], [38, 4, 10, 5], [52, 6, 6, 5],
+    [6, 18, 5, 8], [14, 30, 9, 5], [28, 32, 7, 6], [44, 28, 8, 6],
+    [54, 18, 5, 6], [20, 16, 4, 4], [40, 16, 4, 4]
+  ];
+  for (const b of blocks) {
+    for (let r = b[1]; r < b[1] + b[3]; r++) {
+      for (let c = b[0]; c < b[0] + b[2]; c++) {
+        grid[r][c] = "#";
+      }
+    }
+  }
+
+  for (let r = 36; r < 41; r++) {
+    for (let c = 4; c < 11; c++) {
+      grid[r][c] = "#";
+    }
+  }
+
+  let seed = 12345;
+  function next() {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed / 2147483648;
+  }
+  for (let r = 2; r < H - 2; r++) {
+    for (let c = 2; c < W - 2; c++) {
+      if (grid[r][c] !== ".") continue;
+      if (Math.abs(c - 32) < 6 && Math.abs(r - 22) < 5) continue;
+      if (next() > 0.035) continue;
+      let lonely = true;
+      for (let dr = -2; dr <= 2 && lonely; dr++) {
+        for (let dc = -2; dc <= 2; dc++) {
+          if (dr === 0 && dc === 0) continue;
+          if (grid[r + dr] && grid[r + dr][c + dc] === "#") { lonely = false; break; }
+        }
+      }
+      if (lonely) grid[r][c] = "#";
+    }
+  }
+
+  return grid.map((row) => row.join(""));
+}
+
+function makeLayer(name) {
+  const rows = [];
+  const blank = " ".repeat(LAYER_W);
+  for (let r = 0; r < LAYER_H; r++) rows.push(blank);
+  return { name: name || "", rows: rows, portals: {}, spawn: null };
+}
+
+function layerHasContent(L) {
+  if (L.name || L.spawn || Object.keys(L.portals).length > 0) return true;
+  for (const row of L.rows) {
+    if (row.trim().length > 0) return true;
+  }
+  return false;
+}
+
+let layers = {};
+
+function loadLayers() {
+  const data = readJsonFile(LAYERS_FILE, null);
+  if (data && typeof data === "object") {
+    for (const key of Object.keys(data)) {
+      const n = parseInt(key, 10);
+      if (isNaN(n) || n < MIN_LAYER || n > MAX_LAYER) continue;
+      const saved = data[key];
+      const L = makeLayer(saved.name || "");
+      const rows = Array.isArray(saved.rows) ? saved.rows : [];
+      for (let r = 0; r < LAYER_H && r < rows.length; r++) {
+        L.rows[r] = String(rows[r]).padEnd(LAYER_W, " ").slice(0, LAYER_W);
+      }
+      L.portals = saved.portals && typeof saved.portals === "object" ? saved.portals : {};
+      L.spawn = saved.spawn || null;
+      layers[n] = L;
+    }
+    return;
+  }
+  const L = makeLayer("Ground");
+  const seedMap = buildSeedMap();
+  for (let r = 0; r < seedMap.length; r++) {
+    L.rows[r] = seedMap[r].padEnd(LAYER_W, " ");
+  }
+  L.spawn = { col: 32, row: 22 };
+  layers[0] = L;
+}
+
+loadLayers();
+
+let layersDirty = false;
+let layerSaveTimer = null;
+
+function saveLayersNow() {
+  if (layerSaveTimer) {
+    clearTimeout(layerSaveTimer);
+    layerSaveTimer = null;
+  }
+  const out = {};
+  for (const key of Object.keys(layers)) {
+    const L = layers[key];
+    if (!layerHasContent(L)) continue;
+    out[key] = { name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), portals: L.portals, spawn: L.spawn };
+  }
+  writeJsonFile(LAYERS_FILE, out);
+  layersDirty = false;
+}
+
+function scheduleLayerSave() {
+  layersDirty = true;
+  if (layerSaveTimer) return;
+  layerSaveTimer = setTimeout(saveLayersNow, LAYER_SAVE_DELAY);
+}
+
+function ensureLayer(n) {
+  if (!layers[n]) layers[n] = makeLayer("");
+  return layers[n];
+}
+
+function validLayerNumber(n) {
+  return Number.isInteger(n) && n >= MIN_LAYER && n <= MAX_LAYER;
+}
+
+function tileAt(layer, col, row) {
+  const L = layers[layer];
+  if (!L) return " ";
+  if (row < 0 || row >= LAYER_H || col < 0 || col >= LAYER_W) return " ";
+  return L.rows[row][col];
+}
+
+function isWalkable(layer, col, row) {
+  const ch = tileAt(layer, col, row);
+  return ch === "." || ch === "P";
+}
+
+function layerSpawn(layer) {
+  const L = layers[layer];
+  if (L && L.spawn) return { col: L.spawn.col, row: L.spawn.row };
+  if (L) {
+    for (let r = 0; r < LAYER_H; r++) {
+      const c = L.rows[r].search(/[.P]/);
+      if (c !== -1) return { col: c, row: r };
+    }
+  }
+  return { col: 0, row: 0 };
+}
+
+let worldState = readJsonFile(WORLD_FILE, null);
+if (!worldState || typeof worldState !== "object") {
+  worldState = { positions: {}, floorItems: [ { layer: 0, col: 30, row: 22, name: "Oran Berry" }, { layer: 0, col: 34, row: 22, name: "Apple" } ] };
+}
+if (!worldState.positions) worldState.positions = {};
+if (!Array.isArray(worldState.floorItems)) worldState.floorItems = [];
+for (const it of worldState.floorItems) {
+  if (!Number.isInteger(it.layer)) it.layer = 0;
+}
+
+let worldPasses = readJsonFile(PASSES_FILE, {});
+let pendingSaves = readJsonFile(PENDING_FILE, []);
+if (!Array.isArray(pendingSaves)) pendingSaves = [];
+const worldByUser = {};
+const worldGmByUser = {};
+for (const pass in worldPasses) {
+  if (worldPasses[pass].role === "gm") {
+    worldGmByUser[worldPasses[pass].userId] = pass;
+  } else {
+    worldByUser[worldPasses[pass].userId] = pass;
+  }
+}
+
+const worldSession = { players: {}, intents: {}, turnNumber: 1, turnTimer: null, nextId: 1, characters: {}, floorItems: worldState.floorItems };
+sessions[WORLD_SESSION] = worldSession;
+const worldGms = [];
+
+function saveWorldState() {
+  for (const id in worldSession.players) {
+    const p = worldSession.players[id];
+    worldState.positions[p._key] = { layer: p.layer, col: p.col, row: p.row, direction: p.direction };
+  }
+  worldState.floorItems = worldSession.floorItems;
+  writeJsonFile(WORLD_FILE, worldState);
+}
+
+function countInventory(list) {
+  const counts = {};
+  for (const entry of list) {
+    if (!entry || !entry.name) continue;
+    counts[entry.name] = (counts[entry.name] || 0) + (entry.count || 1);
+  }
+  return counts;
+}
+
+function publicPlayer(p) {
+  return { id: p.id, layer: p.layer, col: p.col, row: p.row, direction: p.direction, dex: p.dex, name: p.name, userId: p.userId, hp: p.hp, maxHp: p.maxHp, mp: p.mp, maxMp: p.maxMp };
+}
+
+function sendSocket(socket, data) {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(data));
+  }
+}
+
+function sendPlayer(p, data) {
+  sendSocket(p._socket, data);
+}
+
+function sendGms(layer, data) {
+  for (const gm of worldGms) {
+    if (layer === null || gm.layer === layer) sendSocket(gm.socket, data);
+  }
+}
+
+function inView(a, b) {
+  return a.layer === b.layer && Math.abs(a.col - b.col) <= VIEW_HALF_W && Math.abs(a.row - b.row) <= VIEW_HALF_H;
+}
+
+function cellInView(p, layer, col, row) {
+  return p.layer === layer && Math.abs(p.col - col) <= VIEW_HALF_W && Math.abs(p.row - row) <= VIEW_HALF_H;
+}
+
+function updatePair(p, q) {
+  const visible = inView(p, q);
+  const had = !!p._seen[q.id];
+  if (visible && !had) {
+    p._seen[q.id] = true;
+    q._seen[p.id] = true;
+    sendPlayer(p, { type: "join", player: publicPlayer(q) });
+    sendPlayer(q, { type: "join", player: publicPlayer(p) });
+  } else if (!visible && had) {
+    delete p._seen[q.id];
+    delete q._seen[p.id];
+    sendPlayer(p, { type: "leave", id: q.id });
+    sendPlayer(q, { type: "leave", id: p.id });
+  }
+}
+
+function refreshVisibility(p) {
+  for (const id in worldSession.players) {
+    const q = worldSession.players[id];
+    if (q !== p) updatePair(p, q);
+  }
+}
+
+function visiblePlayersOf(p) {
+  const list = [];
+  for (const id in p._seen) {
+    const q = worldSession.players[id];
+    if (q) list.push(publicPlayer(q));
+  }
+  return list;
+}
+
+function itemsInWindow(layer, c0, r0, w, h) {
+  const out = [];
+  for (const it of worldSession.floorItems) {
+    if (it.layer === layer && it.col >= c0 && it.col < c0 + w && it.row >= r0 && it.row < r0 + h) {
+      out.push({ col: it.col, row: it.row, name: it.name });
+    }
+  }
+  return out;
+}
+
+function sendView(p) {
+  const w = VIEW_HALF_W * 2 + 1;
+  const h = VIEW_HALF_H * 2 + 1;
+  const c0 = p.col - VIEW_HALF_W;
+  const r0 = p.row - VIEW_HALF_H;
+  const rows = [];
+  for (let r = r0; r < r0 + h; r++) {
+    let line = "";
+    for (let c = c0; c < c0 + w; c++) {
+      const ch = tileAt(p.layer, c, r);
+      line += ch === "x" ? "." : ch;
+    }
+    rows.push(line);
+  }
+  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, items: itemsInWindow(p.layer, c0, r0, w, h) });
+}
+
+function notifyItem(layer, col, row, data) {
+  for (const id in worldSession.players) {
+    const q = worldSession.players[id];
+    if (cellInView(q, layer, col, row)) sendPlayer(q, data);
+  }
+  sendGms(layer, data);
+}
+
+function queueWorldSave(p, final) {
+  const current = countInventory(p._inv);
+  const delta = {};
+  const names = {};
+  for (const n in current) names[n] = true;
+  for (const n in p._reported) names[n] = true;
+  for (const n in names) {
+    const d = (current[n] || 0) - (p._reported[n] || 0);
+    if (d !== 0) delta[n] = d;
+  }
+  if (!final && Object.keys(delta).length === 0) return;
+  pendingSaves.push({ id: makeToken(), userId: p.userId, name: p.name, slot: p._slot, pass: p._pass, delta: delta, hp: p.hp, mp: p.mp, layer: p.layer, col: p.col, row: p.row, final: final, ts: Date.now() });
+  p._reported = current;
+  writeJsonFile(PENDING_FILE, pendingSaves);
+}
+
+function leaveWorldPlayer(id) {
+  const p = worldSession.players[id];
+  if (!p) return false;
+  queueWorldSave(p, true);
+  worldState.positions[p._key] = { layer: p.layer, col: p.col, row: p.row, direction: p.direction };
+  for (const otherId in p._seen) {
+    const q = worldSession.players[otherId];
+    if (q) {
+      delete q._seen[id];
+      sendPlayer(q, { type: "leave", id: id });
+    }
+  }
+  delete worldSession.players[id];
+  sendGms(null, { type: "gm_player_leave", id: id });
+  saveWorldState();
+  return true;
+}
+
+function forceLeaveUser(userId, reason) {
+  let left = false;
+  for (const id of Object.keys(worldSession.players)) {
+    const p = worldSession.players[id];
+    if (String(p.userId) !== String(userId)) continue;
+    const socket = p._socket;
+    leaveWorldPlayer(p.id);
+    left = true;
+    if (socket) {
+      try { socket.send(JSON.stringify({ type: "ended", reason: reason })); } catch (e) {}
+      socket.playerId = null;
+      try { socket.close(); } catch (e) {}
+    }
+  }
+  return left;
+}
+
+app.post("/api/world/join", (req, res) => {
+  if (!checkSecret(req, res)) return;
+  const body = req.body || {};
+  if (!body.userId || !body.name) {
+    res.status(400).json({ error: "userId and name are required" });
+    return;
+  }
+  const userId = String(body.userId);
+  forceLeaveUser(userId, "You joined the world with another character.");
+  const oldPass = worldByUser[userId];
+  if (oldPass) delete worldPasses[oldPass];
+  const pass = makeToken();
+  const sheet = body.character || {};
+  worldPasses[pass] = {
+    userId: userId,
+    role: "player",
+    name: String(body.name),
+    slot: num(body.slot, 1),
+    dex: body.dex ? String(body.dex) : "0004",
+    hp: num(sheet.hp, 30),
+    maxHp: num(sheet.maxHp, num(sheet.hp, 30)),
+    mp: num(sheet.mp, 10),
+    maxMp: num(sheet.maxMp, num(sheet.mp, 10)),
+    inventory: Array.isArray(sheet.inventory) ? sheet.inventory.filter((e) => e && e.name).map((e) => ({ name: String(e.name), count: num(e.count, 1) })) : []
+  };
+  worldByUser[userId] = pass;
+  writeJsonFile(PASSES_FILE, worldPasses);
+  res.json({ pass: pass, link: "/?session=" + WORLD_SESSION + "&pass=" + pass });
+});
+
+app.post("/api/world/gm", (req, res) => {
+  if (!checkSecret(req, res)) return;
+  const userId = req.body && req.body.userId ? String(req.body.userId) : "";
+  if (!userId) {
+    res.status(400).json({ error: "userId is required" });
+    return;
+  }
+  const oldPass = worldGmByUser[userId];
+  if (oldPass) delete worldPasses[oldPass];
+  const pass = makeToken();
+  worldPasses[pass] = { userId: userId, role: "gm" };
+  worldGmByUser[userId] = pass;
+  writeJsonFile(PASSES_FILE, worldPasses);
+  res.json({ pass: pass, link: "/?session=" + WORLD_SESSION + "&pass=" + pass });
+});
+
+app.post("/api/world/leave", (req, res) => {
+  if (!checkSecret(req, res)) return;
+  const userId = req.body && req.body.userId ? String(req.body.userId) : "";
+  if (!userId) {
+    res.status(400).json({ error: "userId is required" });
+    return;
+  }
+  const left = forceLeaveUser(userId, "You were removed from the world.");
+  const oldPass = worldByUser[userId];
+  if (oldPass) {
+    delete worldPasses[oldPass];
+    delete worldByUser[userId];
+    writeJsonFile(PASSES_FILE, worldPasses);
+  }
+  res.json({ ok: true, left: left });
+});
+
+app.get("/api/world/saves", (req, res) => {
+  if (!checkSecret(req, res)) return;
+  res.json({ saves: pendingSaves });
+});
+
+app.post("/api/world/ack", (req, res) => {
+  if (!checkSecret(req, res)) return;
+  const ids = req.body && Array.isArray(req.body.ids) ? req.body.ids : [];
+  const gone = {};
+  for (const id of ids) gone[id] = true;
+  pendingSaves = pendingSaves.filter((entry) => !gone[entry.id]);
+  writeJsonFile(PENDING_FILE, pendingSaves);
+  res.json({ ok: true, remaining: pendingSaves.length });
+});
+
+app.get("/api/world/online", (req, res) => {
+  if (!checkSecret(req, res)) return;
+  const list = [];
+  for (const id in worldSession.players) {
+    const p = worldSession.players[id];
+    list.push({ userId: p.userId, name: p.name, layer: p.layer, col: p.col, row: p.row });
+  }
+  res.json({ online: list });
+});
+
+function worldFreeSpot(layer, col, row, ignoreId) {
+  function free(c, r) {
+    if (!isWalkable(layer, c, r)) return false;
+    for (const id in worldSession.players) {
+      const o = worldSession.players[id];
+      if (o.id !== ignoreId && o.layer === layer && o.col === c && o.row === r) return false;
+    }
+    return true;
+  }
+  if (free(col, row)) return { col: col, row: row };
+  for (let radius = 1; radius < 12; radius++) {
+    for (let dr = -radius; dr <= radius; dr++) {
+      for (let dc = -radius; dc <= radius; dc++) {
+        if (free(col + dc, row + dr)) return { col: col + dc, row: row + dr };
+      }
+    }
+  }
+  const spawn = layerSpawn(layer);
+  return { col: spawn.col, row: spawn.row };
+}
+
+function teleportPlayer(p, layer, col, row) {
+  for (const otherId of Object.keys(p._seen)) {
+    const q = worldSession.players[otherId];
+    if (q) {
+      delete q._seen[p.id];
+      sendPlayer(q, { type: "leave", id: p.id });
+    }
+  }
+  p._seen = {};
+  const spot = worldFreeSpot(layer, col, row, p.id);
+  p.layer = layer;
+  p.col = spot.col;
+  p.row = spot.row;
+  refreshVisibility(p);
+  sendPlayer(p, { type: "teleport", layer: p.layer, col: p.col, row: p.row, direction: p.direction, players: visiblePlayersOf(p) });
+  sendView(p);
+  sendGms(null, { type: "gm_player", player: publicPlayer(p) });
+}
+
+function handleWorldMove(p, dir) {
+  const d = DELTAS[dir];
+  if (d) p.direction = dir;
+  const nc = d ? p.col + d.dc : p.col;
+  const nr = d ? p.row + d.dr : p.row;
+  let blocked = !d || !isWalkable(p.layer, nc, nr);
+  if (!blocked) {
+    for (const id in worldSession.players) {
+      const o = worldSession.players[id];
+      if (o !== p && o.layer === p.layer && o.col === nc && o.row === nr) { blocked = true; break; }
+    }
+  }
+  if (blocked) {
+    for (const id in p._seen) {
+      const q = worldSession.players[id];
+      if (q) sendPlayer(q, { type: "face", id: p.id, direction: p.direction });
+    }
+    sendPlayer(p, { type: "moveblocked", direction: p.direction });
+    return;
+  }
+
+  const L = layers[p.layer];
+  const portal = tileAt(p.layer, nc, nr) === "P" && L ? L.portals[nc + "," + nr] : null;
+  if (portal && validLayerNumber(portal.layer)) {
+    teleportPlayer(p, portal.layer, portal.col, portal.row);
+    return;
+  }
+
+  p.col = nc;
+  p.row = nr;
+  refreshVisibility(p);
+  const moved = { type: "moved", id: p.id, col: nc, row: nr, direction: p.direction };
+  sendPlayer(p, moved);
+  for (const id in p._seen) {
+    const q = worldSession.players[id];
+    if (q) sendPlayer(q, moved);
+  }
+  sendGms(null, { type: "gm_player", player: publicPlayer(p) });
+  sendView(p);
+}
+
+function refreshViewsForCells(layer, cells) {
+  for (const id in worldSession.players) {
+    const q = worldSession.players[id];
+    if (q.layer !== layer) continue;
+    for (const cell of cells) {
+      if (cellInView(q, layer, cell[0], cell[1])) {
+        sendView(q);
+        break;
+      }
+    }
+  }
+}
+
+function applyCells(layer, cells) {
+  const L = ensureLayer(layer);
+  const changed = [];
+  for (const cell of cells) {
+    const c = cell[0];
+    const r = cell[1];
+    const ch = cell[2];
+    if (!Number.isInteger(c) || !Number.isInteger(r)) continue;
+    if (c < 0 || c >= LAYER_W || r < 0 || r >= LAYER_H) continue;
+    if (typeof ch !== "string" || ch.length !== 1 || TILE_CHARS.indexOf(ch) === -1) continue;
+    const old = L.rows[r][c];
+    if (old === ch) continue;
+    L.rows[r] = L.rows[r].substring(0, c) + ch + L.rows[r].substring(c + 1);
+    if (old === "P" && ch !== "P") delete L.portals[c + "," + r];
+    changed.push([c, r, ch]);
+  }
+  if (changed.length > 0) {
+    scheduleLayerSave();
+    sendGms(layer, { type: "gm_tiles", layer: layer, cells: changed });
+    refreshViewsForCells(layer, changed);
+  }
+  return changed;
+}
+
+function layerSummaries() {
+  const counts = {};
+  for (const id in worldSession.players) {
+    const lay = worldSession.players[id].layer;
+    counts[lay] = (counts[lay] || 0) + 1;
+  }
+  const out = [];
+  const seen = {};
+  for (const key of Object.keys(layers)) {
+    const n = parseInt(key, 10);
+    if (layerHasContent(layers[key]) || counts[n]) {
+      out.push({ layer: n, name: layers[key].name, players: counts[n] || 0 });
+      seen[n] = true;
+    }
+  }
+  for (const key of Object.keys(counts)) {
+    const n = parseInt(key, 10);
+    if (!seen[n]) out.push({ layer: n, name: "", players: counts[n] });
+  }
+  out.sort((a, b) => a.layer - b.layer);
+  return out;
+}
+
+function sendLayerSummaries() {
+  sendGms(null, { type: "gm_layers", layers: layerSummaries() });
+}
+
+function sendGmLayer(gm) {
+  const L = layers[gm.layer] || makeLayer("");
+  const items = [];
+  for (const it of worldSession.floorItems) {
+    if (it.layer === gm.layer) items.push({ col: it.col, row: it.row, name: it.name });
+  }
+  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), portals: L.portals, spawn: L.spawn, floorItems: items, layers: layerSummaries() });
+}
+
+function handleGmMessage(gm, data) {
+  if (data.type === "gm_layer") {
+    const n = parseInt(data.layer, 10);
+    if (!validLayerNumber(n)) return;
+    gm.layer = n;
+    sendGmLayer(gm);
+    return;
+  }
+
+  if (data.type === "gm_edit") {
+    const n = parseInt(data.layer, 10);
+    if (!validLayerNumber(n) || !Array.isArray(data.ops)) return;
+    applyCells(n, data.ops.slice(0, MAX_EDIT_OPS));
+    sendLayerSummaries();
+    return;
+  }
+
+  if (data.type === "gm_portal") {
+    const n = parseInt(data.layer, 10);
+    const c = parseInt(data.col, 10);
+    const r = parseInt(data.row, 10);
+    const tl = parseInt(data.toLayer, 10);
+    const tc = parseInt(data.toCol, 10);
+    const tr = parseInt(data.toRow, 10);
+    if (!validLayerNumber(n) || !validLayerNumber(tl)) return;
+    if (![c, r, tc, tr].every((v) => Number.isInteger(v) && v >= 0 && v < LAYER_W)) return;
+    applyCells(n, [[c, r, "P"]]);
+    ensureLayer(n).portals[c + "," + r] = { layer: tl, col: tc, row: tr };
+    if (data.twoWay) {
+      applyCells(tl, [[tc, tr, "P"]]);
+      ensureLayer(tl).portals[tc + "," + tr] = { layer: n, col: c, row: r };
+    }
+    scheduleLayerSave();
+    for (const gmEntry of worldGms) {
+      if (gmEntry.layer === n || gmEntry.layer === tl) sendGmLayer(gmEntry);
+    }
+    sendLayerSummaries();
+    return;
+  }
+
+  if (data.type === "gm_spawn") {
+    const n = parseInt(data.layer, 10);
+    const c = parseInt(data.col, 10);
+    const r = parseInt(data.row, 10);
+    if (!validLayerNumber(n) || !Number.isInteger(c) || !Number.isInteger(r)) return;
+    if (c < 0 || c >= LAYER_W || r < 0 || r >= LAYER_H) return;
+    ensureLayer(n).spawn = { col: c, row: r };
+    scheduleLayerSave();
+    for (const gmEntry of worldGms) {
+      if (gmEntry.layer === n) sendGmLayer(gmEntry);
+    }
+    return;
+  }
+
+  if (data.type === "gm_layername") {
+    const n = parseInt(data.layer, 10);
+    if (!validLayerNumber(n)) return;
+    ensureLayer(n).name = String(data.name || "").slice(0, 40);
+    scheduleLayerSave();
+    sendLayerSummaries();
+    return;
+  }
+
+  if (data.type === "gm_item") {
+    const n = parseInt(data.layer, 10);
+    const c = parseInt(data.col, 10);
+    const r = parseInt(data.row, 10);
+    if (!validLayerNumber(n) || !Number.isInteger(c) || !Number.isInteger(r)) return;
+    const name = String(data.name || "").slice(0, 60);
+    let idx = -1;
+    for (let i = 0; i < worldSession.floorItems.length; i++) {
+      const it = worldSession.floorItems[i];
+      if (it.layer === n && it.col === c && it.row === r) { idx = i; break; }
+    }
+    if (idx !== -1) {
+      worldSession.floorItems.splice(idx, 1);
+      notifyItem(n, c, r, { type: "itemremoved", col: c, row: r });
+    }
+    if (name) {
+      worldSession.floorItems.push({ layer: n, col: c, row: r, name: name });
+      notifyItem(n, c, r, { type: "itemadded", col: c, row: r, name: name });
+    }
+    return;
+  }
+
+  if (data.type === "gm_tp") {
+    const p = worldSession.players[data.playerId];
+    const n = parseInt(data.layer, 10);
+    const c = parseInt(data.col, 10);
+    const r = parseInt(data.row, 10);
+    if (!p || !validLayerNumber(n) || !Number.isInteger(c) || !Number.isInteger(r)) return;
+    teleportPlayer(p, n, c, r);
+    sendLayerSummaries();
+    return;
+  }
+
+  if (data.type === "gmchat") {
+    const text = String(data.text || "").slice(0, 300);
+    for (const id in worldSession.players) {
+      sendPlayer(worldSession.players[id], { type: "gmchat", text: text, ts: Date.now() });
+    }
+    return;
+  }
+}
+
+function handleWorldGmConnection(socket, info) {
+  const gm = { socket: socket, userId: info.userId, layer: 0 };
+  socket.sessionId = WORLD_GM_SESSION;
+  socket.role = "gm";
+  socket.playerId = null;
+  worldGms.push(gm);
+
+  sendSocket(socket, { type: "init", id: null, role: "gm", world: true, turn: 1, players: {}, floorItems: [] });
+  const list = [];
+  for (const id in worldSession.players) list.push(publicPlayer(worldSession.players[id]));
+  sendSocket(socket, { type: "gm_players", players: list });
+  sendGmLayer(gm);
+
+  socket.on("message", (raw) => {
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch (e) {
+      return;
+    }
+    handleGmMessage(gm, data);
+  });
+
+  socket.on("close", () => {
+    const idx = worldGms.indexOf(gm);
+    if (idx !== -1) worldGms.splice(idx, 1);
+  });
+}
+
+function handleWorldConnection(socket, pass) {
+  const info = pass ? worldPasses[pass] : null;
+  if (!info) {
+    socket.send(JSON.stringify({ type: "denied", reason: "This world link is invalid or expired. Use /joinworld in Discord to get a new one." }));
+    socket.close();
+    return;
+  }
+
+  if (info.role === "gm") {
+    handleWorldGmConnection(socket, info);
+    return;
+  }
+
+  forceLeaveUser(info.userId, "You opened the world in another window.");
+
+  const id = worldSession.nextId;
+  worldSession.nextId = worldSession.nextId + 1;
+  socket.sessionId = WORLD_SESSION;
+  socket.role = "player";
+  socket.playerId = id;
+  socket.userId = info.userId;
+
+  const key = info.userId + "|" + info.name;
+  const saved = worldState.positions[key];
+  let layer = 0;
+  let startCol = layerSpawn(0).col;
+  let startRow = layerSpawn(0).row;
+  if (saved && Number.isInteger(saved.col) && Number.isInteger(saved.row)) {
+    const savedLayer = Number.isInteger(saved.layer) ? saved.layer : 0;
+    if (layers[savedLayer]) {
+      layer = savedLayer;
+      startCol = saved.col;
+      startRow = saved.row;
+    }
+  }
+  const start = worldFreeSpot(layer, startCol, startRow, id);
+  const inventory = info.inventory.map((e) => ({ name: e.name, count: e.count }));
+
+  const p = {
+    id: id,
+    layer: layer,
+    col: start.col,
+    row: start.row,
+    direction: saved && saved.direction ? saved.direction : "down",
+    dex: info.dex,
+    name: info.name,
+    userId: info.userId,
+    hp: info.hp,
+    maxHp: info.maxHp,
+    mp: info.mp,
+    maxMp: info.maxMp,
+    _key: key,
+    _slot: info.slot,
+    _pass: pass,
+    _inv: inventory,
+    _reported: countInventory(inventory),
+    _seen: {},
+    _socket: socket
+  };
+  worldSession.players[id] = p;
+  refreshVisibility(p);
+
+  const w = VIEW_HALF_W * 2 + 1;
+  const h = VIEW_HALF_H * 2 + 1;
+  const players = {};
+  for (const seenId in p._seen) {
+    const q = worldSession.players[seenId];
+    if (q) players[seenId] = publicPlayer(q);
+  }
+  players[id] = publicPlayer(p);
+  sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W, p.row - VIEW_HALF_H, w, h), inventory: inventory });
+  sendView(p);
+  sendGms(null, { type: "gm_player", player: publicPlayer(p) });
+  sendLayerSummaries();
+
+  socket.on("message", (raw) => {
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch (e) {
+      return;
+    }
+    const me = worldSession.players[socket.playerId];
+    if (!me || socket.playerId === null) return;
+
+    if (data.type === "face") {
+      if (DELTAS[data.direction]) me.direction = data.direction;
+      for (const seenId in me._seen) {
+        const q = worldSession.players[seenId];
+        if (q) sendPlayer(q, { type: "face", id: me.id, direction: me.direction });
+      }
+    } else if (data.type === "exit") {
+      const exitUser = me.userId;
+      forceLeaveUser(exitUser, "You left the world. Your character is saved.");
+      sendLayerSummaries();
+    } else if (data.type === "move") {
+      handleWorldMove(me, data.dir);
+    } else if (data.type === "pickup") {
+      let idx = -1;
+      for (let i = 0; i < worldSession.floorItems.length; i++) {
+        const it = worldSession.floorItems[i];
+        if (it.layer === me.layer && it.col === me.col && it.row === me.row) { idx = i; break; }
+      }
+      if (idx !== -1) {
+        const it = worldSession.floorItems[idx];
+        worldSession.floorItems.splice(idx, 1);
+        let stack = null;
+        for (const entry of me._inv) {
+          if (entry.name === it.name) { stack = entry; break; }
+        }
+        if (stack) {
+          stack.count = stack.count + 1;
+        } else {
+          me._inv.push({ name: it.name, count: 1 });
+        }
+        notifyItem(me.layer, it.col, it.row, { type: "itemremoved", col: it.col, row: it.row });
+        sendPlayer(me, { type: "pickedup", name: it.name });
+      }
+    } else if (data.type === "drop") {
+      const name = String(data.name || "");
+      let stackIndex = -1;
+      for (let i = 0; i < me._inv.length; i++) {
+        if (me._inv[i].name === name) { stackIndex = i; break; }
+      }
+      if (!name || stackIndex === -1) {
+        sendPlayer(me, { type: "dropfail" });
+        return;
+      }
+      let occupied = false;
+      for (const fi of worldSession.floorItems) {
+        if (fi.layer === me.layer && fi.col === me.col && fi.row === me.row) { occupied = true; break; }
+      }
+      if (occupied) {
+        sendPlayer(me, { type: "dropfail" });
+        return;
+      }
+      me._inv[stackIndex].count = me._inv[stackIndex].count - 1;
+      if (me._inv[stackIndex].count <= 0) me._inv.splice(stackIndex, 1);
+      worldSession.floorItems.push({ layer: me.layer, col: me.col, row: me.row, name: name });
+      notifyItem(me.layer, me.col, me.row, { type: "itemadded", col: me.col, row: me.row, name: name });
+      sendPlayer(me, { type: "dropok", name: name });
+    } else if (data.type === "chat") {
+      const text = String(data.text || "").slice(0, 200);
+      const message = { type: "chat", id: me.id, dex: me.dex, name: me.name, text: text };
+      for (const seenId in me._seen) {
+        const q = worldSession.players[seenId];
+        if (q) sendPlayer(q, message);
+      }
+      sendGms(me.layer, message);
+    }
+  });
+
+  socket.on("close", () => {
+    if (socket.playerId === null || socket.playerId === undefined) return;
+    leaveWorldPlayer(socket.playerId);
+    sendLayerSummaries();
+  });
+}
+
+setInterval(saveWorldState, WORLD_SAVE_INTERVAL);
+
+setInterval(() => {
+  for (const id in worldSession.players) {
+    queueWorldSave(worldSession.players[id], false);
+  }
+}, WORLD_CHECKPOINT_INTERVAL);
+
+function shutdownWorld() {
+  for (const id of Object.keys(worldSession.players)) {
+    leaveWorldPlayer(worldSession.players[id].id);
+  }
+  saveWorldState();
+  saveLayersNow();
+  process.exit(0);
+}
+
+process.on("SIGINT", shutdownWorld);
+process.on("SIGTERM", shutdownWorld);
 
 wss.on("connection", (socket, req) => {
   let sessionId = "default";
@@ -368,6 +1315,11 @@ wss.on("connection", (socket, req) => {
     sessionId = "default";
   }
 
+  if (sessionId === WORLD_SESSION) {
+    handleWorldConnection(socket, pass);
+    return;
+  }
+
   const passInfo = pass ? passcodes[pass] : null;
   const role = passInfo ? passInfo.role : "player";
 
@@ -377,7 +1329,7 @@ wss.on("connection", (socket, req) => {
 
   if (role === "gm") {
     socket.playerId = null;
-    socket.send(JSON.stringify({ type: "init", id: null, role: "gm", turn: session.turnNumber, players: session.players, floorItems: session.floorItems }));
+    socket.send(JSON.stringify({ type: "init", id: null, role: "gm", turn: session.turnNumber, map: MAP, players: session.players, floorItems: session.floorItems }));
   } else {
     const id = session.nextId;
     session.nextId = session.nextId + 1;
@@ -412,7 +1364,7 @@ wss.on("connection", (socket, req) => {
     const spawn = SPAWNS[(id - 1) % SPAWNS.length];
     session.players[id] = { id: id, col: spawn.col, row: spawn.row, direction: "down", dex: dex, name: displayName, userId: socket.userId, hp: hp, maxHp: maxHp, mp: mp, maxMp: maxMp };
     if (sheet) session.characters[id] = sheet;
-    socket.send(JSON.stringify({ type: "init", id: id, role: "player", turn: session.turnNumber, players: session.players, floorItems: session.floorItems }));
+    socket.send(JSON.stringify({ type: "init", id: id, role: "player", turn: session.turnNumber, map: MAP, players: session.players, floorItems: session.floorItems }));
     broadcast(sessionId, { type: "join", player: session.players[id] }, id);
   }
 
