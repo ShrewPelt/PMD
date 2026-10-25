@@ -518,10 +518,18 @@ function updateViewRotation() {
   }
   sceneRef.cameras.main.setRotation(viewRot);
   const counter = -viewRot;
-  if (player) player.setRotation(counter);
+  if (player) {
+    player.feetOff = (TILE / 2 - 2) - (hasFloorItemAt(player.col, player.row) ? ITEM_LIFT : 0);
+    player.setOrigin(0.5, 1 - player.feetOff / (player.height * player.scaleY));
+    player.setRotation(counter);
+  }
   for (const id in otherPlayers) {
     const sp = otherPlayers[id];
-    if (sp && sp !== "loading") sp.setRotation(counter);
+    if (sp && sp !== "loading") {
+      sp.feetOff = TILE / 2 - 2;
+      sp.setOrigin(0.5, 1 - sp.feetOff / (sp.height * sp.scaleY));
+      sp.setRotation(counter);
+    }
   }
   for (const key in floorItemSprites) {
     floorItemSprites[key].setRotation(counter);
@@ -593,7 +601,8 @@ function drawEntityBars(s) {
   const mpRatio = s.maxMp > 0 ? Math.max(0, Math.min(1, s.mp / s.maxMp)) : 0;
 
   barsGfx.save();
-  barsGfx.translateCanvas(s.x, s.y);
+  const off = s.feetOff !== undefined ? s.feetOff : TILE / 2 - 2;
+  barsGfx.translateCanvas(s.x + off * Math.sin(viewRot), s.y + off * Math.cos(viewRot));
   barsGfx.rotateCanvas(-viewRot);
 
   barsGfx.fillStyle(0x000000, 0.55);
@@ -633,7 +642,7 @@ function tilePixelX(col) {
 }
 
 function tilePixelY(row) {
-  return row * TILE + TILE - 2;
+  return row * TILE + TILE / 2;
 }
 
 function isFloor(col, row) {
@@ -789,7 +798,7 @@ function hasFloorItemAt(col, row) {
 }
 
 function playerRestingY(col, row) {
-  return tilePixelY(row) - (hasFloorItemAt(col, row) ? ITEM_LIFT : 0);
+  return tilePixelY(row);
 }
 
 function updatePlayerLift() {
@@ -870,8 +879,9 @@ function positionBubbleObj(b) {
   const pad = 7;
   const boxW = b.txt.width + pad * 2;
   const boxH = b.txt.height + pad * 2;
-  const ax = b.target.x;
-  const ay = b.target.y;
+  const feet = b.target.feetOff !== undefined ? b.target.feetOff : TILE / 2 - 2;
+  const ax = b.target.x + feet * Math.sin(viewRot);
+  const ay = b.target.y + feet * Math.cos(viewRot);
   const boxX = -boxW / 2;
   const boxY = -74 - boxH;
   const cosA = Math.cos(-viewRot);
