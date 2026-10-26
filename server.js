@@ -782,7 +782,7 @@ function sendView(p) {
     rows.push(line);
     artRows.push(artLine);
   }
-  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, art: artRows, palette: tilePalette, objects: objectsInWindow(p.layer, c0, r0, w, h), items: itemsInWindow(p.layer, c0, r0, w, h) });
+  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, art: artRows, palette: tilePalette, objects: objectsInWindow(p.layer, c0, r0, w, h), entities: entitiesInWindow(p.layer, c0, r0, w, h), items: itemsInWindow(p.layer, c0, r0, w, h) });
 }
 
 function notifyItem(layer, col, row, data) {
@@ -874,6 +874,10 @@ app.post("/api/world/join", (req, res) => {
   res.json({ pass: pass, link: "/?session=" + WORLD_SESSION + "&pass=" + pass });
 });
 
+app.get("/api/world/species", (req, res) => {
+  res.json({ species: Object.keys(speciesDex) });
+});
+
 app.get("/api/world/assets", (req, res) => {
   res.json({ tiles: listAssetNames(TILE_ASSET_DIR), objects: listAssetNames(OBJECT_ASSET_DIR), blocking: BLOCKING_TILES });
 });
@@ -936,9 +940,289 @@ app.get("/api/world/online", (req, res) => {
   res.json({ online: list });
 });
 
+const ENTITIES_FILE = path.join(WORLD_DIR, "entities.json");
+const SPECIES_DEX_FILE = path.join(__dirname, "StorageData", "SpeciesDex.json");
+const ENTITY_TICK_MS = 600;
+const ENTITY_SAVE_DELAY = 2000;
+const MAX_ENTITY_LINES = 12;
+const SPEECH_MIN_MS = 25000;
+const SPEECH_MAX_MS = 45000;
+const DEFAULT_SENSOR = 10;
+const DEFAULT_WANDER = 4;
+const WANDER_CHANCE = 0.3;
+
+const speciesDex = readJsonFile(SPECIES_DEX_FILE, {});
+const speciesDexLower = {};
+for (const key of Object.keys(speciesDex)) {
+  speciesDexLower[key.toLowerCase()] = { name: key, dex: String(speciesDex[key]).padStart(4, "0") };
+}
+
+const entityStore = readJsonFile(ENTITIES_FILE, { nextId: 1, list: [] });
+const entities = {};
+let entityNextId = Number.isInteger(entityStore.nextId) ? entityStore.nextId : 1;
+for (const saved of Array.isArray(entityStore.list) ? entityStore.list : []) {
+  if (!saved || typeof saved.id !== "string") continue;
+  saved.state = "idle";
+  saved._nextSpeech = Date.now() + SPEECH_MIN_MS + Math.random() * (SPEECH_MAX_MS - SPEECH_MIN_MS);
+  saved._lineIdx = 0;
+  entities[saved.id] = saved;
+}
+
+let entitySaveTimer = null;
+
+function saveEntitiesNow() {
+  if (entitySaveTimer) {
+    clearTimeout(entitySaveTimer);
+    entitySaveTimer = null;
+  }
+  const list = [];
+  for (const id of Object.keys(entities)) {
+    const e = entities[id];
+    list.push({ id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines });
+  }
+  writeJsonFile(ENTITIES_FILE, { nextId: entityNextId, list: list });
+}
+
+function scheduleEntitySave() {
+  if (entitySaveTimer) return;
+  entitySaveTimer = setTimeout(saveEntitiesNow, ENTITY_SAVE_DELAY);
+}
+
+function publicEntity(e) {
+  return { id: e.id, kind: e.kind, name: e.name, dex: e.dex, layer: e.layer, col: e.col, row: e.row, direction: e.direction, state: e.state };
+}
+
+function gmEntity(e) {
+  return { id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, state: e.state };
+}
+
+function entityAt(layer, col, row, ignoreId) {
+  for (const id in entities) {
+    const e = entities[id];
+    if (e.id !== ignoreId && e.layer === layer && e.col === col && e.row === row) return e;
+  }
+  return null;
+}
+
+function playerAt(layer, col, row) {
+  for (const id in worldSession.players) {
+    const q = worldSession.players[id];
+    if (q.layer === layer && q.col === col && q.row === row) return q;
+  }
+  return null;
+}
+
+function entitiesInWindow(layer, c0, r0, w, h) {
+  const out = [];
+  for (const id in entities) {
+    const e = entities[id];
+    if (e.layer === layer && e.col >= c0 && e.col < c0 + w && e.row >= r0 && e.row < r0 + h) out.push(publicEntity(e));
+  }
+  return out;
+}
+
+function broadcastEntity(e, oldLayer, oldCol, oldRow) {
+  for (const id in worldSession.players) {
+    const q = worldSession.players[id];
+    const nowIn = cellInView(q, e.layer, e.col, e.row);
+    const wasIn = oldLayer !== null && cellInView(q, oldLayer, oldCol, oldRow);
+    if (nowIn) sendPlayer(q, { type: "e_move", entity: publicEntity(e) });
+    else if (wasIn) sendPlayer(q, { type: "e_del", id: e.id });
+  }
+  sendGms(e.layer, { type: "gm_entity", entity: gmEntity(e) });
+  if (oldLayer !== null && oldLayer !== e.layer) sendGms(oldLayer, { type: "gm_entity_del", id: e.id });
+}
+
+function removeEntity(id) {
+  const e = entities[id];
+  if (!e) return;
+  for (const pid in worldSession.players) {
+    const q = worldSession.players[pid];
+    if (cellInView(q, e.layer, e.col, e.row)) sendPlayer(q, { type: "e_del", id: id });
+  }
+  sendGms(e.layer, { type: "gm_entity_del", id: id });
+  delete entities[id];
+  scheduleEntitySave();
+}
+
+function layerHasViewers(layer) {
+  for (const id in worldSession.players) {
+    if (worldSession.players[id].layer === layer) return true;
+  }
+  for (const gm of worldGms) {
+    if (gm.layer === layer) return true;
+  }
+  return false;
+}
+
+function saySpeech(e, text) {
+  const message = { type: "npc_say", id: e.id, dex: e.dex, name: e.name, text: text };
+  for (const pid in worldSession.players) {
+    const q = worldSession.players[pid];
+    if (cellInView(q, e.layer, e.col, e.row)) sendPlayer(q, message);
+  }
+  sendGms(e.layer, message);
+}
+
+function nearestPlayerTo(e) {
+  let best = null;
+  let bestDist = Infinity;
+  for (const pid in worldSession.players) {
+    const q = worldSession.players[pid];
+    if (q.layer !== e.layer) continue;
+    const dist = Math.max(Math.abs(q.col - e.col), Math.abs(q.row - e.row));
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = q;
+    }
+  }
+  return best ? { player: best, dist: bestDist } : null;
+}
+
+function entityTick() {
+  const now = Date.now();
+  for (const id in entities) {
+    const e = entities[id];
+    if (!layerHasViewers(e.layer)) continue;
+
+    if (e.kind === "enemy") {
+      const near = nearestPlayerTo(e);
+      const nextState = near && near.dist <= e.sensor ? "alert" : "idle";
+      if (nextState !== e.state) {
+        e.state = nextState;
+        broadcastEntity(e, e.layer, e.col, e.row);
+      }
+    }
+
+    if (e.kind === "npc" && e.lines.length > 0 && now >= e._nextSpeech) {
+      e._nextSpeech = now + SPEECH_MIN_MS + Math.random() * (SPEECH_MAX_MS - SPEECH_MIN_MS);
+      let seen = false;
+      for (const pid in worldSession.players) {
+        if (cellInView(worldSession.players[pid], e.layer, e.col, e.row)) { seen = true; break; }
+      }
+      if (seen) {
+        saySpeech(e, e.lines[Math.floor(Math.random() * e.lines.length)]);
+      }
+    }
+
+    if (e.state === "alert") continue;
+    if (e.wander <= 0 || Math.random() > WANDER_CHANCE) continue;
+    const dirs = ["up", "down", "left", "right"];
+    const dir = dirs[Math.floor(Math.random() * dirs.length)];
+    const d = DELTAS[dir];
+    const nc = e.col + d.dc;
+    const nr = e.row + d.dr;
+    if (Math.max(Math.abs(nc - e.homeCol), Math.abs(nr - e.homeRow)) > e.wander) continue;
+    if (!isWalkable(e.layer, nc, nr)) continue;
+    if (entityAt(e.layer, nc, nr, e.id)) continue;
+    if (playerAt(e.layer, nc, nr)) continue;
+    const oldCol = e.col;
+    const oldRow = e.row;
+    e.col = nc;
+    e.row = nr;
+    e.direction = dir;
+    broadcastEntity(e, e.layer, oldCol, oldRow);
+    scheduleEntitySave();
+  }
+}
+
+function cleanLines(value) {
+  const out = [];
+  if (Array.isArray(value)) {
+    for (const line of value) {
+      const text = String(line || "").trim().slice(0, 200);
+      if (text) out.push(text);
+      if (out.length >= MAX_ENTITY_LINES) break;
+    }
+  }
+  return out;
+}
+
+function handleGmEntitySet(gm, data) {
+  const src = data.entity;
+  if (!src || typeof src !== "object") return;
+  const kind = src.kind === "npc" ? "npc" : "enemy";
+  const speciesName = String(src.species || "").trim();
+  const found = speciesDexLower[speciesName.toLowerCase()];
+  if (!found) {
+    sendSocket(gm.socket, { type: "gm_notice", text: "Unknown species: " + speciesName });
+    return;
+  }
+  const layer = parseInt(src.layer, 10);
+  const col = parseInt(src.col, 10);
+  const row = parseInt(src.row, 10);
+  if (!validLayerNumber(layer) || !Number.isInteger(col) || !Number.isInteger(row)) return;
+  if (col < 0 || col >= LAYER_W || row < 0 || row >= LAYER_H) return;
+
+  let e = typeof src.id === "string" ? entities[src.id] : null;
+  let oldLayer = null;
+  let oldCol = 0;
+  let oldRow = 0;
+  if (e) {
+    oldLayer = e.layer;
+    oldCol = e.col;
+    oldRow = e.row;
+  } else {
+    const id = "e" + entityNextId;
+    entityNextId = entityNextId + 1;
+    e = { id: id, direction: "down", state: "idle", _nextSpeech: Date.now() + SPEECH_MIN_MS, _lineIdx: 0 };
+    entities[id] = e;
+  }
+
+  const level = Math.max(1, Math.min(100, parseInt(src.level, 10) || 5));
+  const wander = Math.max(0, Math.min(30, parseInt(src.wander, 10)));
+  const sensor = Math.max(1, Math.min(30, parseInt(src.sensor, 10)));
+  const moved = e.layer !== layer || e.col !== col || e.row !== row;
+  e.kind = kind;
+  e.species = found.name;
+  e.dex = found.dex;
+  e.level = level;
+  e.name = String(src.name || "").trim().slice(0, 30) || found.name;
+  e.layer = layer;
+  e.col = col;
+  e.row = row;
+  if (moved || typeof e.homeCol !== "number") {
+    e.homeCol = col;
+    e.homeRow = row;
+  }
+  e.wander = Number.isNaN(wander) ? DEFAULT_WANDER : wander;
+  e.sensor = Number.isNaN(sensor) ? DEFAULT_SENSOR : sensor;
+  e.lines = kind === "npc" ? cleanLines(src.lines) : [];
+  e.state = "idle";
+  broadcastEntity(e, oldLayer, oldCol, oldRow);
+  scheduleEntitySave();
+}
+
+function handleInteract(p) {
+  let best = null;
+  let bestDist = Infinity;
+  for (const id in entities) {
+    const e = entities[id];
+    if (e.kind !== "npc" || e.layer !== p.layer) continue;
+    const dist = Math.max(Math.abs(e.col - p.col), Math.abs(e.row - p.row));
+    if (dist <= 1 && dist < bestDist) {
+      bestDist = dist;
+      best = e;
+    }
+  }
+  if (!best) {
+    sendPlayer(p, { type: "interact_none" });
+    return;
+  }
+  if (best.lines.length === 0) {
+    saySpeech(best, "...");
+    return;
+  }
+  const text = best.lines[best._lineIdx % best.lines.length];
+  best._lineIdx = best._lineIdx + 1;
+  best._nextSpeech = Date.now() + SPEECH_MIN_MS + Math.random() * (SPEECH_MAX_MS - SPEECH_MIN_MS);
+  saySpeech(best, text);
+}
+
 function worldFreeSpot(layer, col, row, ignoreId) {
   function free(c, r) {
     if (!isWalkable(layer, c, r)) return false;
+    if (entityAt(layer, c, r)) return false;
     for (const id in worldSession.players) {
       const o = worldSession.players[id];
       if (o.id !== ignoreId && o.layer === layer && o.col === c && o.row === r) return false;
@@ -982,6 +1266,7 @@ function handleWorldMove(p, dir) {
   const nc = d ? p.col + d.dc : p.col;
   const nr = d ? p.row + d.dr : p.row;
   let blocked = !d || !isWalkable(p.layer, nc, nr);
+  if (!blocked && entityAt(p.layer, nc, nr)) blocked = true;
   if (!blocked) {
     for (const id in worldSession.players) {
       const o = worldSession.players[id];
@@ -1181,7 +1466,7 @@ function sendGmLayer(gm) {
     const parts = k.split(",");
     objList.push([parseInt(parts[0], 10), parseInt(parts[1], 10), L.objects[k].name, L.objects[k].solid ? 1 : 0]);
   }
-  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), palette: tilePalette, objects: objList, portals: L.portals, spawn: L.spawn, floorItems: items, layers: layerSummaries() });
+  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: L.spawn, floorItems: items, layers: layerSummaries() });
 }
 
 function handleGmMessage(gm, data) {
@@ -1198,6 +1483,16 @@ function handleGmMessage(gm, data) {
     if (!validLayerNumber(n) || !Array.isArray(data.ops)) return;
     applyCells(n, data.ops.slice(0, MAX_EDIT_OPS));
     sendLayerSummaries();
+    return;
+  }
+
+  if (data.type === "gm_entity_set") {
+    handleGmEntitySet(gm, data);
+    return;
+  }
+
+  if (data.type === "gm_entity_del") {
+    if (typeof data.id === "string") removeEntity(data.id);
     return;
   }
 
@@ -1425,6 +1720,8 @@ function handleWorldConnection(socket, pass) {
         const q = worldSession.players[seenId];
         if (q) sendPlayer(q, { type: "face", id: me.id, direction: me.direction });
       }
+    } else if (data.type === "interact") {
+      handleInteract(me);
     } else if (data.type === "exit") {
       const exitUser = me.userId;
       forceLeaveUser(exitUser, "You left the world. Your character is saved.");
@@ -1494,6 +1791,8 @@ function handleWorldConnection(socket, pass) {
 }
 
 setInterval(saveWorldState, WORLD_SAVE_INTERVAL);
+setInterval(entityTick, ENTITY_TICK_MS);
+setInterval(saveEntitiesNow, WORLD_SAVE_INTERVAL);
 
 setInterval(() => {
   for (const id in worldSession.players) {
@@ -1507,6 +1806,7 @@ function shutdownWorld() {
   }
   saveWorldState();
   saveLayersNow();
+  saveEntitiesNow();
   process.exit(0);
 }
 

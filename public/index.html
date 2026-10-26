@@ -422,13 +422,14 @@ function create() {
 
   const kb = this.input.keyboard;
   moveKeys = kb.addKeys("W,A,S,D", false);
-  kb.removeCapture("W,A,S,D,Q,E,I,F,G,R,H,J,K,L,B,O,P");
+  kb.removeCapture("W,A,S,D,Q,E,I,T,F,G,R,H,J,K,L,B,O,P");
   kb.on("keydown-Q", (e) => { if (e.repeat || chatActive || isGM) return; rotateView(1); });
   kb.on("keydown-E", (e) => { if (e.repeat || chatActive || isGM) return; rotateView(-1); });
   kb.on("keydown-H", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 1 }); });
   kb.on("keydown-J", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 2 }); });
   kb.on("keydown-K", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 3 }); });
   kb.on("keydown-L", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 4 }); });
+  kb.on("keydown-T", (e) => { if (e.repeat || chatActive || isGM) return; if (typeof worldInteract === "function") worldInteract(); });
   kb.on("keydown-I", (e) => { if (e.repeat || chatActive) return; toggleInventory(); });
   kb.on("keydown-F", (e) => { if (e.repeat || chatActive || isGM) return; attemptPickup(); });
   kb.on("keydown-G", (e) => { if (e.repeat || chatActive || isGM) return; attemptDrop(); });

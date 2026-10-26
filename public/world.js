@@ -10,6 +10,89 @@ let worldAssetsDirty = false;
 let worldLastView = null;
 let worldViewOverGfx = null;
 let worldAssetList = { tiles: [], objects: [], blocking: [] };
+const worldEntityMeta = {};
+const worldEntityLabels = {};
+
+function entityUpsert(scene, e) {
+  worldEntityMeta[e.id] = { kind: e.kind, name: e.name, state: e.state, dex: e.dex };
+  const sprite = otherPlayers[e.id];
+  if (!sprite) {
+    addOtherPlayer(scene, { id: e.id, dex: e.dex, col: e.col, row: e.row, direction: e.direction });
+    return;
+  }
+  if (sprite === "loading") return;
+  sprite.direction = e.direction;
+  const tx = tilePixelX(e.col);
+  const ty = tilePixelY(e.row);
+  if (sprite.x !== tx || sprite.y !== ty) {
+    sprite.play(sprite.dex + "_walk_" + e.direction);
+    scene.tweens.add({ targets: sprite, x: tx, y: ty, duration: 110, onComplete: () => { if (sprite.active) sprite.play(sprite.dex + "_idle_" + sprite.direction); } });
+  } else {
+    sprite.play(sprite.dex + "_idle_" + e.direction);
+  }
+}
+
+function entityRemove(id) {
+  removeOtherPlayer(id);
+  delete worldEntityMeta[id];
+  if (worldEntityLabels[id]) {
+    worldEntityLabels[id].destroy();
+    delete worldEntityLabels[id];
+  }
+}
+
+function entitiesReconcile(scene, list) {
+  const wanted = {};
+  for (const e of list) wanted[e.id] = true;
+  for (const id of Object.keys(otherPlayers)) {
+    if (id.charAt(0) === "e" && !wanted[id]) entityRemove(id);
+  }
+  for (const e of list) entityUpsert(scene, e);
+}
+
+function entityClearAll() {
+  for (const id of Object.keys(otherPlayers)) {
+    if (id.charAt(0) === "e") entityRemove(id);
+  }
+}
+
+function entityLabelsFrame(scene) {
+  for (const id of Object.keys(worldEntityMeta)) {
+    const sp = otherPlayers[id];
+    if (!sp) {
+      delete worldEntityMeta[id];
+      if (worldEntityLabels[id]) {
+        worldEntityLabels[id].destroy();
+        delete worldEntityLabels[id];
+      }
+      continue;
+    }
+    if (sp === "loading") continue;
+    const meta = worldEntityMeta[id];
+    let label = worldEntityLabels[id];
+    if (!label) {
+      label = scene.add.text(0, 0, "", { fontFamily: "sans-serif", fontSize: "12px", stroke: "#000000", strokeThickness: 3 });
+      label.setOrigin(0.5, 0);
+      label.setDepth(200);
+      worldEntityLabels[id] = label;
+    }
+    label.setText((meta.state === "alert" ? "! " : "") + meta.name);
+    label.setColor(meta.state === "alert" ? "#ff5050" : (meta.kind === "enemy" ? "#ffb0b0" : "#9fe89f"));
+    const off = (sp.feetOff !== undefined ? sp.feetOff : TILE / 2 - 2) + 12;
+    label.setRotation(-viewRot);
+    label.setPosition(sp.x + off * Math.sin(viewRot), sp.y + off * Math.cos(viewRot));
+  }
+  for (const id of Object.keys(worldEntityLabels)) {
+    if (!worldEntityMeta[id]) {
+      worldEntityLabels[id].destroy();
+      delete worldEntityLabels[id];
+    }
+  }
+}
+
+function worldInteract() {
+  if (worldPlayerMode) gmSend({ type: "interact" });
+}
 
 let worldPlayerMode = false;
 let worldGmMode = false;
@@ -37,6 +120,10 @@ const WG = {
   art: [],
   palette: {},
   objects: {},
+  entities: {},
+  selectedEntity: null,
+  notice: "",
+  noticeUntil: 0,
   tileName: "",
   objName: "",
   viewKey: "",
@@ -272,6 +359,7 @@ function gmSyncArt(scene) {
 }
 
 function worldFrame(scene) {
+  entityLabelsFrame(scene);
   if (worldGmMode) {
     gmSyncArt(scene);
     return;
@@ -305,6 +393,11 @@ function gmDrawMarkers() {
   if (WG.spawn) {
     g.lineStyle(4, 0x3ec13e, 1);
     g.strokeCircle(WG.spawn.col * TILE + TILE / 2 - 1, WG.spawn.row * TILE + TILE / 2 - 1, 19);
+  }
+  const picked = WG.selectedEntity ? WG.entities[WG.selectedEntity] : null;
+  if (picked) {
+    g.lineStyle(3, 0xff9f1c, 1);
+    g.strokeCircle(picked.col * TILE + TILE / 2 - 1, picked.row * TILE + TILE / 2 - 1, 22);
   }
   if (WG.portalSource && WG.portalSource.layer === WG.layer) {
     g.lineStyle(4, 0xffd23f, 1);
@@ -488,6 +581,10 @@ function gmUpdateHoverStatus() {
   const ch = WG.rows[WG.hoverRow][WG.hoverCol];
   const names = { " ": "empty", ".": "floor", "#": "wall", "x": "barrier", "P": "portal" };
   let text = "Layer " + WG.layer + " | " + WG.hoverCol + ", " + WG.hoverRow + " | " + names[ch];
+  for (const eid in WG.entities) {
+    const he = WG.entities[eid];
+    if (he.col === WG.hoverCol && he.row === WG.hoverRow) text += " | " + he.kind + " " + he.name + " lv" + he.level;
+  }
   const hoverArt = WG.art[WG.hoverRow][WG.hoverCol];
   if (hoverArt !== " " && WG.palette[hoverArt]) text += " | tile " + WG.palette[hoverArt];
   const hoverObj = WG.objects[WG.hoverCol + "," + WG.hoverRow];
@@ -496,6 +593,7 @@ function gmUpdateHoverStatus() {
   if (portal) text += " to layer " + portal.layer + " (" + portal.col + ", " + portal.row + ")";
   if (WG.portalSource) text += "\nPortal start set on layer " + WG.portalSource.layer + ". Pick the destination.";
   if (WG.tpTarget && WG.players[WG.tpTarget]) text += "\nMoving " + WG.players[WG.tpTarget].name + ": click a tile.";
+  if (WG.notice && Date.now() < WG.noticeUntil) text = WG.notice + "\n" + text;
   gmStatus(text);
 }
 
@@ -520,6 +618,26 @@ function gmHandleClickTool(scene, c, r) {
   }
   if (WG.tool === "item") {
     gmSend({ type: "gm_item", layer: WG.layer, col: c, row: r, name: document.getElementById("wgItem").value.trim() });
+    return;
+  }
+  if (WG.tool === "creature") {
+    gmSend({ type: "gm_entity_set", entity: gmReadCreatureForm(null, c, r) });
+    return;
+  }
+  if (WG.tool === "select") {
+    let found = null;
+    for (const eid in WG.entities) {
+      const he = WG.entities[eid];
+      if (he.col === c && he.row === r) found = he;
+    }
+    WG.selectedEntity = found ? found.id : null;
+    gmShowSelection();
+    gmDrawMarkers();
+    return;
+  }
+  if (WG.tool === "movecreature") {
+    const picked = WG.selectedEntity ? WG.entities[WG.selectedEntity] : null;
+    if (picked) gmSend({ type: "gm_entity_set", entity: gmReadCreatureForm(picked, c, r) });
     return;
   }
   if (WG.tool === "teleport") {
@@ -680,6 +798,7 @@ function gmRenderPlayers() {
 
 function gmSyncPlayerSprites(scene) {
   for (const id in otherPlayers) {
+    if (id.charAt(0) === "e") continue;
     const p = WG.players[id];
     if (!p || p.layer !== WG.layer) removeOtherPlayer(id);
   }
@@ -777,6 +896,21 @@ function gmBuildPanel() {
     + "<h4>Tile art</h4><div id='wgTileList'>Loading...</div>"
     + "<h4>Objects</h4><div id='wgObjList'>Loading...</div>"
     + "<div style='margin-top:6px'><label><input type='checkbox' id='wgSolid' checked> Objects block movement</label></div>"
+    + "<h4>Creatures</h4>"
+    + "<div>Type <select id='wgEKind'><option value='enemy'>Enemy</option><option value='npc'>NPC</option></select></div>"
+    + "<div style='margin-top:4px'>Species <input type='text' id='wgESpecies' list='wgSpeciesList' placeholder='e.g. Pikachu'><datalist id='wgSpeciesList'></datalist></div>"
+    + "<div style='margin-top:4px'>Name <input type='text' id='wgEName' placeholder='optional'></div>"
+    + "<div style='margin-top:4px'>Level <input type='number' id='wgELevel' value='5' min='1' max='100'> Wander <input type='number' id='wgEWander' value='4' min='0' max='30'></div>"
+    + "<div style='margin-top:4px'>Sensor range <input type='number' id='wgESensor' value='10' min='1' max='30'> (enemies)</div>"
+    + "<div style='margin-top:4px'>NPC lines, one per line:<br><textarea id='wgELines' rows='4' style='width:96%;background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px'></textarea></div>"
+    + "<div style='margin-top:4px'>"
+    + "<button class='wgBtn' data-wgtool='creature'>Place</button>"
+    + "<button class='wgBtn' data-wgtool='select'>Select</button>"
+    + "<button class='wgBtn' data-wgtool='movecreature'>Move selected</button>"
+    + "<button class='wgBtn' id='wgEUpdate'>Update selected</button>"
+    + "<button class='wgBtn' id='wgEDelete'>Delete selected</button>"
+    + "</div>"
+    + "<div id='wgESel' style='margin-top:4px;color:#c8c8ff'>Nothing selected.</div>"
     + "<h4>Shape</h4>"
     + "<div>"
     + "<button class='wgBtn on' data-wgshape='pencil'>Pencil</button>"
@@ -798,15 +932,56 @@ function gmBuildPanel() {
   document.getElementById("wgNext").addEventListener("click", () => gmGoLayer(WG.layer + 1));
   document.getElementById("wgSetName").addEventListener("click", () => gmSend({ type: "gm_layername", layer: WG.layer, name: document.getElementById("wgName").value }));
   document.getElementById("wgUndo").addEventListener("click", gmUndo);
+  document.getElementById("wgEUpdate").addEventListener("click", () => {
+    const picked = WG.selectedEntity ? WG.entities[WG.selectedEntity] : null;
+    if (picked) gmSend({ type: "gm_entity_set", entity: gmReadCreatureForm(picked, picked.col, picked.row) });
+  });
+  document.getElementById("wgEDelete").addEventListener("click", () => {
+    const picked = WG.selectedEntity ? WG.entities[WG.selectedEntity] : null;
+    if (picked) gmSend({ type: "gm_entity_del", id: picked.id });
+  });
   document.querySelectorAll("[data-wgtool]").forEach((b) => b.addEventListener("click", () => gmSetTool(b.getAttribute("data-wgtool"))));
   document.querySelectorAll("[data-wgshape]").forEach((b) => b.addEventListener("click", () => gmSetShape(b.getAttribute("data-wgshape"))));
-  panel.querySelectorAll("input[type=text],input[type=number]").forEach((input) => {
+  panel.querySelectorAll("input[type=text],input[type=number],textarea,select").forEach((input) => {
     input.addEventListener("focus", () => { chatActive = true; });
     input.addEventListener("blur", () => { chatActive = false; });
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && input.id === "wgLayerNum") gmGoLayer(input.value);
     });
   });
+}
+
+function gmReadCreatureForm(existing, col, row) {
+  return {
+    id: existing ? existing.id : undefined,
+    kind: document.getElementById("wgEKind").value,
+    species: document.getElementById("wgESpecies").value,
+    name: document.getElementById("wgEName").value,
+    level: document.getElementById("wgELevel").value,
+    wander: document.getElementById("wgEWander").value,
+    sensor: document.getElementById("wgESensor").value,
+    lines: document.getElementById("wgELines").value.split("\n"),
+    layer: WG.layer,
+    col: col,
+    row: row
+  };
+}
+
+function gmShowSelection() {
+  const box = document.getElementById("wgESel");
+  const picked = WG.selectedEntity ? WG.entities[WG.selectedEntity] : null;
+  if (!picked) {
+    box.textContent = "Nothing selected.";
+    return;
+  }
+  box.textContent = "Selected: " + picked.name + " (" + picked.kind + ", " + picked.species + ")";
+  document.getElementById("wgEKind").value = picked.kind;
+  document.getElementById("wgESpecies").value = picked.species;
+  document.getElementById("wgEName").value = picked.name === picked.species ? "" : picked.name;
+  document.getElementById("wgELevel").value = picked.level;
+  document.getElementById("wgEWander").value = picked.wander;
+  document.getElementById("wgESensor").value = picked.sensor;
+  document.getElementById("wgELines").value = (picked.lines || []).join("\n");
 }
 
 function gmBuildAssetButtons(list) {
@@ -865,6 +1040,14 @@ function enterGmWorld(scene) {
     document.getElementById("wgTileList").textContent = "Could not load the picture list.";
     document.getElementById("wgObjList").textContent = "";
   });
+  fetch("/api/world/species").then((r) => r.json()).then((data) => {
+    const list = document.getElementById("wgSpeciesList");
+    for (const name of data.species || []) {
+      const opt = document.createElement("option");
+      opt.value = name;
+      list.appendChild(opt);
+    }
+  }).catch(() => {});
   scene.input.mouse.disableContextMenu();
   scene.input.on("pointerdown", (pointer) => gmPointerDown(scene, pointer));
   scene.input.on("pointermove", (pointer) => gmPointerMove(scene, pointer));
@@ -911,6 +1094,14 @@ function gmLoadLayer(scene, data) {
     WG.objects[o[0] + "," + o[1]] = { name: o[2], solid: o[3] !== 0 };
   }
   WG.artDirty = true;
+  entityClearAll();
+  WG.entities = {};
+  for (const e of data.entities || []) {
+    WG.entities[e.id] = e;
+    entityUpsert(scene, e);
+  }
+  WG.selectedEntity = null;
+  gmShowSelection();
   WG.portals = data.portals || {};
   WG.spawn = data.spawn || null;
   WG.layers = data.layers || WG.layers;
@@ -942,6 +1133,24 @@ window.worldHook = function (scene, data) {
   if (worldPlayerMode) {
     if (data.type === "view") {
       drawPlayerView(scene, data);
+      entitiesReconcile(scene, data.entities || []);
+      return true;
+    }
+    if (data.type === "e_move") {
+      entityUpsert(scene, data.entity);
+      return true;
+    }
+    if (data.type === "e_del") {
+      entityRemove(data.id);
+      return true;
+    }
+    if (data.type === "npc_say") {
+      const sprite = otherPlayers[data.id];
+      if (sprite && sprite !== "loading") showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text);
+      return true;
+    }
+    if (data.type === "interact_none") {
+      updateReadout("nobody to talk to");
       return true;
     }
     if (data.type === "teleport") {
@@ -972,6 +1181,33 @@ window.worldHook = function (scene, data) {
         gmApplyTiles(scene, data.cells);
         gmUpdateHoverStatus();
       }
+      return true;
+    }
+    if (data.type === "gm_entity") {
+      WG.entities[data.entity.id] = data.entity;
+      entityUpsert(scene, data.entity);
+      gmDrawMarkers();
+      return true;
+    }
+    if (data.type === "gm_entity_del") {
+      delete WG.entities[data.id];
+      entityRemove(data.id);
+      if (WG.selectedEntity === data.id) {
+        WG.selectedEntity = null;
+        gmShowSelection();
+      }
+      gmDrawMarkers();
+      return true;
+    }
+    if (data.type === "npc_say") {
+      const sprite = otherPlayers[data.id];
+      if (sprite && sprite !== "loading") showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text);
+      return true;
+    }
+    if (data.type === "gm_notice") {
+      WG.notice = data.text;
+      WG.noticeUntil = Date.now() + 5000;
+      gmUpdateHoverStatus();
       return true;
     }
     if (data.type === "gm_art") {
