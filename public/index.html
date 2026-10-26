@@ -532,6 +532,9 @@ function updateViewRotation() {
       sp.setRotation(counter);
     }
   }
+  for (const key in worldObjectPool) {
+    worldObjectPool[key].setRotation(counter);
+  }
   for (const key in floorItemSprites) {
     floorItemSprites[key].setRotation(counter);
   }
@@ -574,6 +577,7 @@ function pollMovement() {
 
 function update() {
   updateViewRotation();
+  if (typeof worldFrame === "function") worldFrame(sceneRef);
   pollMovement();
   syncSpriteFacing(player);
   for (const id in otherPlayers) {
@@ -601,8 +605,8 @@ function drawEntityBars(s) {
   const hpRatio = s.maxHp > 0 ? Math.max(0, Math.min(1, s.hp / s.maxHp)) : 0;
   const mpRatio = s.maxMp > 0 ? Math.max(0, Math.min(1, s.mp / s.maxMp)) : 0;
 
-  barsGfx.save();
   const off = s.feetOff !== undefined ? s.feetOff : TILE / 2 - 2;
+  barsGfx.save();
   barsGfx.translateCanvas(s.x + off * Math.sin(viewRot), s.y + off * Math.cos(viewRot));
   barsGfx.rotateCanvas(-viewRot);
 

@@ -9,6 +9,7 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.static(path.join(__dirname, "public")));
 app.use("/items", express.static(path.join(__dirname, "StorageData", "Items")));
+app.use("/assets", express.static(path.join(__dirname, "assets")));
 
 app.use(express.json());
 
@@ -380,6 +381,32 @@ const VIEW_HALF_W = 8;
 const VIEW_HALF_H = 6;
 const TILE_CHARS = " .#xP";
 const MAX_EDIT_OPS = 6000;
+const TILE_ASSET_DIR = path.join(__dirname, "assets", "tilemap");
+const OBJECT_ASSET_DIR = path.join(__dirname, "assets", "objects");
+const PALETTE_FILE = path.join(WORLD_DIR, "palette.json");
+const PALETTE_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+const BLOCKING_TILES = ["Water"];
+
+function listAssetNames(dir) {
+  try {
+    const names = [];
+    for (const file of fs.readdirSync(dir)) {
+      if (/\.png$/i.test(file)) names.push(file.replace(/\.png$/i, ""));
+    }
+    names.sort();
+    return names;
+  } catch (e) {
+    return [];
+  }
+}
+
+function isBlockingTile(name) {
+  const lower = String(name).toLowerCase();
+  for (const blocked of BLOCKING_TILES) {
+    if (blocked.toLowerCase() === lower) return true;
+  }
+  return false;
+}
 
 function readJsonFile(file, fallback) {
   try {
@@ -398,6 +425,32 @@ function writeJsonFile(file, data) {
   } catch (e) {
     console.error("Could not write " + file + ": " + e.message);
   }
+}
+
+let tilePalette = {};
+
+function loadPalette() {
+  const data = readJsonFile(PALETTE_FILE, {});
+  tilePalette = data && typeof data === "object" ? data : {};
+}
+
+function savePalette() {
+  writeJsonFile(PALETTE_FILE, tilePalette);
+}
+
+function paletteChar(name) {
+  for (const ch of Object.keys(tilePalette)) {
+    if (tilePalette[ch] === name) return ch;
+  }
+  for (let i = 0; i < PALETTE_CHARS.length; i++) {
+    const ch = PALETTE_CHARS[i];
+    if (!tilePalette[ch]) {
+      tilePalette[ch] = name;
+      savePalette();
+      return ch;
+    }
+  }
+  return null;
 }
 
 function buildSeedMap() {
@@ -459,11 +512,11 @@ function makeLayer(name) {
   const rows = [];
   const blank = " ".repeat(LAYER_W);
   for (let r = 0; r < LAYER_H; r++) rows.push(blank);
-  return { name: name || "", rows: rows, portals: {}, spawn: null };
+  return { name: name || "", rows: rows, art: rows.slice(), objects: {}, portals: {}, spawn: null };
 }
 
 function layerHasContent(L) {
-  if (L.name || L.spawn || Object.keys(L.portals).length > 0) return true;
+  if (L.name || L.spawn || Object.keys(L.portals).length > 0 || Object.keys(L.objects).length > 0) return true;
   for (const row of L.rows) {
     if (row.trim().length > 0) return true;
   }
@@ -484,6 +537,14 @@ function loadLayers() {
       for (let r = 0; r < LAYER_H && r < rows.length; r++) {
         L.rows[r] = String(rows[r]).padEnd(LAYER_W, " ").slice(0, LAYER_W);
       }
+      const art = Array.isArray(saved.art) ? saved.art : [];
+      for (let r = 0; r < LAYER_H && r < art.length; r++) {
+        L.art[r] = String(art[r]).padEnd(LAYER_W, " ").slice(0, LAYER_W);
+      }
+      const objList = Array.isArray(saved.objects) ? saved.objects : [];
+      for (const o of objList) {
+        if (Array.isArray(o) && o.length >= 3) L.objects[o[0] + "," + o[1]] = { name: String(o[2]), solid: o[3] !== 0 };
+      }
       L.portals = saved.portals && typeof saved.portals === "object" ? saved.portals : {};
       L.spawn = saved.spawn || null;
       layers[n] = L;
@@ -499,6 +560,7 @@ function loadLayers() {
   layers[0] = L;
 }
 
+loadPalette();
 loadLayers();
 
 let layersDirty = false;
@@ -513,7 +575,12 @@ function saveLayersNow() {
   for (const key of Object.keys(layers)) {
     const L = layers[key];
     if (!layerHasContent(L)) continue;
-    out[key] = { name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), portals: L.portals, spawn: L.spawn };
+    const objList = [];
+    for (const k of Object.keys(L.objects)) {
+      const parts = k.split(",");
+      objList.push([parseInt(parts[0], 10), parseInt(parts[1], 10), L.objects[k].name, L.objects[k].solid ? 1 : 0]);
+    }
+    out[key] = { name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), objects: objList, portals: L.portals, spawn: L.spawn };
   }
   writeJsonFile(LAYERS_FILE, out);
   layersDirty = false;
@@ -543,7 +610,11 @@ function tileAt(layer, col, row) {
 
 function isWalkable(layer, col, row) {
   const ch = tileAt(layer, col, row);
-  return ch === "." || ch === "P";
+  if (ch !== "." && ch !== "P") return false;
+  const L = layers[layer];
+  const obj = L ? L.objects[col + "," + row] : null;
+  if (obj && obj.solid) return false;
+  return true;
 }
 
 function layerSpawn(layer) {
@@ -673,21 +744,45 @@ function itemsInWindow(layer, c0, r0, w, h) {
   return out;
 }
 
+function objectsInWindow(layer, c0, r0, w, h) {
+  const out = [];
+  const L = layers[layer];
+  if (!L) return out;
+  for (let r = r0; r < r0 + h; r++) {
+    for (let c = c0; c < c0 + w; c++) {
+      const obj = L.objects[c + "," + r];
+      if (obj) out.push({ col: c, row: r, name: obj.name });
+    }
+  }
+  return out;
+}
+
+function artAt(layer, col, row) {
+  const L = layers[layer];
+  if (!L) return " ";
+  if (row < 0 || row >= LAYER_H || col < 0 || col >= LAYER_W) return " ";
+  return L.art[row][col];
+}
+
 function sendView(p) {
   const w = VIEW_HALF_W * 2 + 1;
   const h = VIEW_HALF_H * 2 + 1;
   const c0 = p.col - VIEW_HALF_W;
   const r0 = p.row - VIEW_HALF_H;
   const rows = [];
+  const artRows = [];
   for (let r = r0; r < r0 + h; r++) {
     let line = "";
+    let artLine = "";
     for (let c = c0; c < c0 + w; c++) {
       const ch = tileAt(p.layer, c, r);
       line += ch === "x" ? "." : ch;
+      artLine += ch === " " ? " " : artAt(p.layer, c, r);
     }
     rows.push(line);
+    artRows.push(artLine);
   }
-  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, items: itemsInWindow(p.layer, c0, r0, w, h) });
+  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, art: artRows, palette: tilePalette, objects: objectsInWindow(p.layer, c0, r0, w, h), items: itemsInWindow(p.layer, c0, r0, w, h) });
 }
 
 function notifyItem(layer, col, row, data) {
@@ -777,6 +872,10 @@ app.post("/api/world/join", (req, res) => {
   worldByUser[userId] = pass;
   writeJsonFile(PASSES_FILE, worldPasses);
   res.json({ pass: pass, link: "/?session=" + WORLD_SESSION + "&pass=" + pass });
+});
+
+app.get("/api/world/assets", (req, res) => {
+  res.json({ tiles: listAssetNames(TILE_ASSET_DIR), objects: listAssetNames(OBJECT_ASSET_DIR), blocking: BLOCKING_TILES });
 });
 
 app.post("/api/world/gm", (req, res) => {
@@ -934,6 +1033,8 @@ function refreshViewsForCells(layer, cells) {
 function applyCells(layer, cells) {
   const L = ensureLayer(layer);
   const changed = [];
+  const artCleared = [];
+  const objectsCleared = [];
   for (const cell of cells) {
     const c = cell[0];
     const r = cell[1];
@@ -945,14 +1046,101 @@ function applyCells(layer, cells) {
     if (old === ch) continue;
     L.rows[r] = L.rows[r].substring(0, c) + ch + L.rows[r].substring(c + 1);
     if (old === "P" && ch !== "P") delete L.portals[c + "," + r];
+    if (ch === " ") {
+      if (L.art[r][c] !== " ") {
+        L.art[r] = L.art[r].substring(0, c) + " " + L.art[r].substring(c + 1);
+        artCleared.push([c, r, ""]);
+      }
+      if (L.objects[c + "," + r]) {
+        delete L.objects[c + "," + r];
+        objectsCleared.push([c, r, "", 0]);
+      }
+    }
     changed.push([c, r, ch]);
   }
   if (changed.length > 0) {
     scheduleLayerSave();
     sendGms(layer, { type: "gm_tiles", layer: layer, cells: changed });
+    if (artCleared.length > 0) sendGms(layer, { type: "gm_art", layer: layer, cells: artCleared });
+    if (objectsCleared.length > 0) sendGms(layer, { type: "gm_objs", layer: layer, cells: objectsCleared });
     refreshViewsForCells(layer, changed);
   }
   return changed;
+}
+
+function applyArt(layer, ops) {
+  const L = ensureLayer(layer);
+  const names = listAssetNames(TILE_ASSET_DIR);
+  const changedArt = [];
+  const logicCells = [];
+  for (const op of ops) {
+    const c = op[0];
+    const r = op[1];
+    const name = typeof op[2] === "string" ? op[2] : "";
+    if (!Number.isInteger(c) || !Number.isInteger(r)) continue;
+    if (c < 0 || c >= LAYER_W || r < 0 || r >= LAYER_H) continue;
+    const oldCh = L.art[r][c];
+    const oldName = oldCh === " " ? "" : (tilePalette[oldCh] || "");
+    const logic = L.rows[r][c];
+    if (name === "") {
+      if (oldCh === " ") continue;
+      L.art[r] = L.art[r].substring(0, c) + " " + L.art[r].substring(c + 1);
+      if (logic === "x" && isBlockingTile(oldName)) logicCells.push([c, r, "."]);
+      changedArt.push([c, r, ""]);
+      continue;
+    }
+    if (names.indexOf(name) === -1) continue;
+    const ch = paletteChar(name);
+    if (!ch) continue;
+    if (oldCh === ch) continue;
+    L.art[r] = L.art[r].substring(0, c) + ch + L.art[r].substring(c + 1);
+    changedArt.push([c, r, name]);
+    if (logic === "P") continue;
+    if (isBlockingTile(name)) {
+      if (logic !== "x") logicCells.push([c, r, "x"]);
+    } else if (logic === " ") {
+      logicCells.push([c, r, "."]);
+    } else if (logic === "x" && isBlockingTile(oldName)) {
+      logicCells.push([c, r, "."]);
+    }
+  }
+  if (logicCells.length > 0) applyCells(layer, logicCells);
+  if (changedArt.length > 0) {
+    scheduleLayerSave();
+    sendGms(layer, { type: "gm_art", layer: layer, cells: changedArt });
+    refreshViewsForCells(layer, changedArt);
+  }
+}
+
+function applyObjects(layer, ops) {
+  const L = ensureLayer(layer);
+  const names = listAssetNames(OBJECT_ASSET_DIR);
+  const changedObjs = [];
+  for (const op of ops) {
+    const c = op[0];
+    const r = op[1];
+    const name = typeof op[2] === "string" ? op[2] : "";
+    const solid = op[3] === 0 || op[3] === false ? false : true;
+    if (!Number.isInteger(c) || !Number.isInteger(r)) continue;
+    if (c < 0 || c >= LAYER_W || r < 0 || r >= LAYER_H) continue;
+    const key = c + "," + r;
+    const old = L.objects[key];
+    if (name === "") {
+      if (!old) continue;
+      delete L.objects[key];
+      changedObjs.push([c, r, "", 0]);
+      continue;
+    }
+    if (names.indexOf(name) === -1) continue;
+    if (old && old.name === name && old.solid === solid) continue;
+    L.objects[key] = { name: name, solid: solid };
+    changedObjs.push([c, r, name, solid ? 1 : 0]);
+  }
+  if (changedObjs.length > 0) {
+    scheduleLayerSave();
+    sendGms(layer, { type: "gm_objs", layer: layer, cells: changedObjs });
+    refreshViewsForCells(layer, changedObjs);
+  }
 }
 
 function layerSummaries() {
@@ -988,7 +1176,12 @@ function sendGmLayer(gm) {
   for (const it of worldSession.floorItems) {
     if (it.layer === gm.layer) items.push({ col: it.col, row: it.row, name: it.name });
   }
-  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), portals: L.portals, spawn: L.spawn, floorItems: items, layers: layerSummaries() });
+  const objList = [];
+  for (const k of Object.keys(L.objects)) {
+    const parts = k.split(",");
+    objList.push([parseInt(parts[0], 10), parseInt(parts[1], 10), L.objects[k].name, L.objects[k].solid ? 1 : 0]);
+  }
+  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), palette: tilePalette, objects: objList, portals: L.portals, spawn: L.spawn, floorItems: items, layers: layerSummaries() });
 }
 
 function handleGmMessage(gm, data) {
@@ -1004,6 +1197,22 @@ function handleGmMessage(gm, data) {
     const n = parseInt(data.layer, 10);
     if (!validLayerNumber(n) || !Array.isArray(data.ops)) return;
     applyCells(n, data.ops.slice(0, MAX_EDIT_OPS));
+    sendLayerSummaries();
+    return;
+  }
+
+  if (data.type === "gm_art") {
+    const n = parseInt(data.layer, 10);
+    if (!validLayerNumber(n) || !Array.isArray(data.ops)) return;
+    applyArt(n, data.ops.slice(0, MAX_EDIT_OPS));
+    sendLayerSummaries();
+    return;
+  }
+
+  if (data.type === "gm_obj") {
+    const n = parseInt(data.layer, 10);
+    if (!validLayerNumber(n) || !Array.isArray(data.ops)) return;
+    applyObjects(n, data.ops.slice(0, MAX_EDIT_OPS));
     sendLayerSummaries();
     return;
   }

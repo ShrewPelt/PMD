@@ -2,7 +2,14 @@ const WORLD_COLS = 256;
 const WORLD_ROWS = 256;
 const CHUNK = 32;
 const TOOL_CHARS = { floor: ".", wall: "#", barrier: "x", void: " " };
-const TOOL_PREVIEW = { floor: 0x5a5a88, wall: 0x8a6a4a, barrier: 0xc0392b, void: 0x000000 };
+const TOOL_PREVIEW = { floor: 0x5a5a88, wall: 0x8a6a4a, barrier: 0xc0392b, void: 0x000000, tile: 0x4a9a4a, tileclear: 0x888888, object: 0xd8a840, objerase: 0xc0392b };
+const worldArtPool = {};
+const worldObjectPool = {};
+const worldAssetState = {};
+let worldAssetsDirty = false;
+let worldLastView = null;
+let worldViewOverGfx = null;
+let worldAssetList = { tiles: [], objects: [], blocking: [] };
 
 let worldPlayerMode = false;
 let worldGmMode = false;
@@ -26,6 +33,14 @@ const WG = {
   stroke: null,
   pan: null,
   chunks: {},
+  overlays: {},
+  art: [],
+  palette: {},
+  objects: {},
+  tileName: "",
+  objName: "",
+  viewKey: "",
+  artDirty: true,
   gridGfx: null,
   markerGfx: null,
   previewGfx: null,
@@ -41,10 +56,15 @@ function blankRows() {
   return rows;
 }
 
-function worldDrawTile(g, c, r, ch, forPlayers) {
+function worldDrawBase(g, c, r, ch) {
+  if (ch === " " || ch === "#") return;
+  g.fillStyle(0x3a3a55, 1);
+  g.fillRect(c * TILE, r * TILE, TILE - 2, TILE - 2);
+}
+
+function worldDrawOverlay(g, c, r, ch, forPlayers) {
   const x = c * TILE;
   const y = r * TILE;
-  if (ch === " ") return;
   if (ch === "#") {
     g.fillStyle(0x6b4f3a, 1);
     g.fillRect(x, y, TILE - 2, TILE - 2);
@@ -52,20 +72,73 @@ function worldDrawTile(g, c, r, ch, forPlayers) {
     g.strokeRect(x + 1, y + 1, TILE - 4, TILE - 4);
     return;
   }
-  g.fillStyle(0x3a3a55, 1);
-  g.fillRect(x, y, TILE - 2, TILE - 2);
   if (ch === "x" && !forPlayers) {
-    g.fillStyle(0xc0392b, 0.55);
+    g.fillStyle(0xc0392b, 0.45);
     g.fillRect(x, y, TILE - 2, TILE - 2);
     g.lineStyle(2, 0xff6b5b, 1);
     g.lineBetween(x + 6, y + 6, x + TILE - 8, y + TILE - 8);
     g.lineBetween(x + TILE - 8, y + 6, x + 6, y + TILE - 8);
+    return;
   }
   if (ch === "P") {
     g.fillStyle(0x9b59b6, 1);
     g.fillCircle(x + TILE / 2 - 1, y + TILE / 2 - 1, 15);
     g.fillStyle(0xd7b8ee, 1);
     g.fillCircle(x + TILE / 2 - 1, y + TILE / 2 - 1, 7);
+  }
+}
+
+function worldAssetUrl(kind, name) {
+  return "assets/" + (kind === "tile" ? "tilemap" : "objects") + "/" + encodeURIComponent(name) + ".png";
+}
+
+function worldEnsureAsset(scene, kind, name) {
+  const key = kind + "_" + name;
+  if (scene.textures.exists(key)) return key;
+  if (worldAssetState[key]) return null;
+  worldAssetState[key] = "loading";
+  scene.load.once("filecomplete-image-" + key, () => {
+    worldAssetState[key] = "ready";
+    worldAssetsDirty = true;
+  });
+  scene.load.image(key, worldAssetUrl(kind, name));
+  if (!scene.load.isLoading()) scene.load.start();
+  return null;
+}
+
+function worldSyncPool(scene, pool, wanted, kind) {
+  for (const key in pool) {
+    if (!wanted[key]) {
+      pool[key].destroy();
+      delete pool[key];
+    }
+  }
+  for (const key in wanted) {
+    const w = wanted[key];
+    const tex = worldEnsureAsset(scene, kind, w.name);
+    if (!tex) continue;
+    let sp = pool[key];
+    if (sp && sp.texKey !== tex) {
+      sp.destroy();
+      sp = null;
+      delete pool[key];
+    }
+    if (!sp) {
+      if (kind === "tile") {
+        sp = scene.add.image(w.c * TILE, w.r * TILE, tex);
+        sp.setOrigin(0, 0);
+        sp.setDisplaySize(TILE - 2, TILE - 2);
+        sp.setDepth(1);
+      } else {
+        sp = scene.add.image(w.c * TILE + TILE / 2 - 1, w.r * TILE + TILE / 2 - 1, tex);
+        const scale = (TILE - 2) / Math.max(sp.width, sp.height);
+        sp.setScale(scale);
+        sp.setDepth(3);
+      }
+      sp.texKey = tex;
+      pool[key] = sp;
+    }
+    sp.setAlpha(w.alpha === undefined ? 1 : w.alpha);
   }
 }
 
@@ -104,31 +177,58 @@ function drawPlayerView(scene, data) {
     worldViewGfx = scene.add.graphics();
     worldViewGfx.setDepth(0);
   }
+  if (!worldViewOverGfx) {
+    worldViewOverGfx = scene.add.graphics();
+    worldViewOverGfx.setDepth(2);
+  }
+  worldLastView = data;
   worldViewGfx.clear();
+  worldViewOverGfx.clear();
+  const wantedArt = {};
+  const wantedObjs = {};
   for (let r = 0; r < data.rows.length; r++) {
     const line = data.rows[r];
+    const artLine = data.art && data.art[r] ? data.art[r] : "";
     for (let c = 0; c < line.length; c++) {
-      worldDrawTile(worldViewGfx, data.c0 + c, data.r0 + r, line[c], true);
+      const col = data.c0 + c;
+      const row = data.r0 + r;
+      worldDrawBase(worldViewGfx, col, row, line[c]);
+      worldDrawOverlay(worldViewOverGfx, col, row, line[c], true);
+      const artChar = artLine[c];
+      if (artChar && artChar !== " " && line[c] !== " " && line[c] !== "#" && data.palette && data.palette[artChar]) {
+        wantedArt[col + "," + row] = { name: data.palette[artChar], c: col, r: row };
+      }
     }
   }
+  for (const o of data.objects || []) {
+    wantedObjs[o.col + "," + o.row] = { name: o.name, c: o.col, r: o.row };
+  }
+  worldSyncPool(scene, worldArtPool, wantedArt, "tile");
+  worldSyncPool(scene, worldObjectPool, wantedObjs, "object");
   worldSyncItems(scene, data.items);
 }
 
 function gmRedrawChunk(scene, cx, cy) {
   const key = cx + "," + cy;
   let g = WG.chunks[key];
+  let over = WG.overlays[key];
   if (!g) {
     g = scene.add.graphics();
     g.setDepth(0);
     WG.chunks[key] = g;
+    over = scene.add.graphics();
+    over.setDepth(2);
+    WG.overlays[key] = over;
   }
   g.clear();
+  over.clear();
   const rMax = Math.min(WORLD_ROWS, (cy + 1) * CHUNK);
   const cMax = Math.min(WORLD_COLS, (cx + 1) * CHUNK);
   for (let r = cy * CHUNK; r < rMax; r++) {
     const line = WG.rows[r];
     for (let c = cx * CHUNK; c < cMax; c++) {
-      worldDrawTile(g, c, r, line[c], false);
+      worldDrawBase(g, c, r, line[c]);
+      worldDrawOverlay(over, c, r, line[c], false);
     }
   }
 }
@@ -138,6 +238,47 @@ function gmRedrawAll(scene) {
     for (let cx = 0; cx < WORLD_COLS / CHUNK; cx++) {
       gmRedrawChunk(scene, cx, cy);
     }
+  }
+}
+
+function gmSyncArt(scene) {
+  const cam = scene.cameras.main;
+  const wv = cam.worldView;
+  const c0 = Math.max(0, Math.floor(wv.x / TILE) - 1);
+  const c1 = Math.min(WORLD_COLS - 1, Math.floor((wv.x + wv.width) / TILE) + 1);
+  const r0 = Math.max(0, Math.floor(wv.y / TILE) - 1);
+  const r1 = Math.min(WORLD_ROWS - 1, Math.floor((wv.y + wv.height) / TILE) + 1);
+  const key = c0 + "," + c1 + "," + r0 + "," + r1;
+  if (key === WG.viewKey && !WG.artDirty && !worldAssetsDirty) return;
+  WG.viewKey = key;
+  WG.artDirty = false;
+  worldAssetsDirty = false;
+  const wantedArt = {};
+  const wantedObjs = {};
+  for (let r = r0; r <= r1; r++) {
+    const artLine = WG.art[r];
+    const logicLine = WG.rows[r];
+    for (let c = c0; c <= c1; c++) {
+      const ch = artLine[c];
+      if (ch !== " " && logicLine[c] !== " " && logicLine[c] !== "#" && WG.palette[ch]) {
+        wantedArt[c + "," + r] = { name: WG.palette[ch], c: c, r: r };
+      }
+      const obj = WG.objects[c + "," + r];
+      if (obj) wantedObjs[c + "," + r] = { name: obj.name, c: c, r: r, alpha: obj.solid ? 1 : 0.7 };
+    }
+  }
+  worldSyncPool(scene, worldArtPool, wantedArt, "tile");
+  worldSyncPool(scene, worldObjectPool, wantedObjs, "object");
+}
+
+function worldFrame(scene) {
+  if (worldGmMode) {
+    gmSyncArt(scene);
+    return;
+  }
+  if (worldPlayerMode && worldAssetsDirty && worldLastView) {
+    worldAssetsDirty = false;
+    drawPlayerView(scene, worldLastView);
   }
 }
 
@@ -240,16 +381,41 @@ function gmSend(obj) {
   }
 }
 
-function gmSendEdit(cells, ch) {
-  const ops = [];
+function gmSnapshotCell(c, r) {
+  const key = c + "," + r;
+  if (!WG.strokeUndo || WG.strokeUndo.cells[key]) return;
+  const artChar = WG.art[r][c];
+  const obj = WG.objects[key];
+  WG.strokeUndo.cells[key] = {
+    c: c,
+    r: r,
+    logic: WG.rows[r][c],
+    art: artChar === " " ? "" : (WG.palette[artChar] || ""),
+    obj: obj ? obj.name : "",
+    solid: obj ? obj.solid : true
+  };
+}
+
+function gmSendEdit(cells) {
+  const tool = WG.tool;
+  const logicOps = [];
+  const artOps = [];
+  const objOps = [];
+  const solid = document.getElementById("wgSolid").checked ? 1 : 0;
   for (const cell of cells) {
-    if (!gmInBounds(cell[0], cell[1])) continue;
-    if (WG.strokeUndo && !WG.strokeUndo.cells[cell[0] + "," + cell[1]]) {
-      WG.strokeUndo.cells[cell[0] + "," + cell[1]] = [cell[0], cell[1], WG.rows[cell[1]][cell[0]]];
-    }
-    ops.push([cell[0], cell[1], ch]);
+    const c = cell[0];
+    const r = cell[1];
+    if (!gmInBounds(c, r)) continue;
+    gmSnapshotCell(c, r);
+    if (TOOL_CHARS[tool] !== undefined) logicOps.push([c, r, TOOL_CHARS[tool]]);
+    else if (tool === "tile") artOps.push([c, r, WG.tileName]);
+    else if (tool === "tileclear") artOps.push([c, r, ""]);
+    else if (tool === "object") objOps.push([c, r, WG.objName, solid]);
+    else if (tool === "objerase") objOps.push([c, r, "", 0]);
   }
-  if (ops.length > 0) gmSend({ type: "gm_edit", layer: WG.layer, ops: ops });
+  if (logicOps.length > 0) gmSend({ type: "gm_edit", layer: WG.layer, ops: logicOps });
+  if (artOps.length > 0 && (tool !== "tile" || WG.tileName)) gmSend({ type: "gm_art", layer: WG.layer, ops: artOps });
+  if (objOps.length > 0 && (tool !== "object" || WG.objName)) gmSend({ type: "gm_obj", layer: WG.layer, ops: objOps });
 }
 
 function gmApplyTiles(scene, cells) {
@@ -262,6 +428,37 @@ function gmApplyTiles(scene, cells) {
     touched[Math.floor(c / CHUNK) + "," + Math.floor(r / CHUNK)] = [Math.floor(c / CHUNK), Math.floor(r / CHUNK)];
   }
   for (const key in touched) gmRedrawChunk(scene, touched[key][0], touched[key][1]);
+}
+
+function gmApplyArt(scene, cells) {
+  for (const cell of cells) {
+    const c = cell[0];
+    const r = cell[1];
+    if (!gmInBounds(c, r)) continue;
+    let ch = " ";
+    if (cell[2]) {
+      for (const k in WG.palette) {
+        if (WG.palette[k] === cell[2]) { ch = k; break; }
+      }
+      if (ch === " ") {
+        for (let i = 0; i < 62; i++) {
+          const cand = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[i];
+          if (!WG.palette[cand]) { WG.palette[cand] = cell[2]; ch = cand; break; }
+        }
+      }
+    }
+    WG.art[r] = WG.art[r].substring(0, c) + ch + WG.art[r].substring(c + 1);
+  }
+  WG.artDirty = true;
+}
+
+function gmApplyObjs(scene, cells) {
+  for (const cell of cells) {
+    const key = cell[0] + "," + cell[1];
+    if (cell[2]) WG.objects[key] = { name: cell[2], solid: cell[3] !== 0 };
+    else delete WG.objects[key];
+  }
+  WG.artDirty = true;
 }
 
 function gmDrawPreview(scene, cells, color) {
@@ -291,6 +488,10 @@ function gmUpdateHoverStatus() {
   const ch = WG.rows[WG.hoverRow][WG.hoverCol];
   const names = { " ": "empty", ".": "floor", "#": "wall", "x": "barrier", "P": "portal" };
   let text = "Layer " + WG.layer + " | " + WG.hoverCol + ", " + WG.hoverRow + " | " + names[ch];
+  const hoverArt = WG.art[WG.hoverRow][WG.hoverCol];
+  if (hoverArt !== " " && WG.palette[hoverArt]) text += " | tile " + WG.palette[hoverArt];
+  const hoverObj = WG.objects[WG.hoverCol + "," + WG.hoverRow];
+  if (hoverObj) text += " | " + hoverObj.name + (hoverObj.solid ? " (solid)" : " (walk-through)");
   const portal = WG.portals[WG.hoverCol + "," + WG.hoverRow];
   if (portal) text += " to layer " + portal.layer + " (" + portal.col + ", " + portal.row + ")";
   if (WG.portalSource) text += "\nPortal start set on layer " + WG.portalSource.layer + ". Pick the destination.";
@@ -340,7 +541,7 @@ function gmPointerDown(scene, pointer) {
     return;
   }
   if (!pointer.leftButtonDown()) return;
-  const paintTool = TOOL_CHARS[WG.tool] !== undefined;
+  const paintTool = TOOL_PREVIEW[WG.tool] !== undefined;
   if (!paintTool) {
     gmHandleClickTool(scene, cell.c, cell.r);
     return;
@@ -348,7 +549,7 @@ function gmPointerDown(scene, pointer) {
   WG.strokeUndo = { layer: WG.layer, cells: {} };
   WG.stroke = { c0: cell.c, r0: cell.r, lastC: cell.c, lastR: cell.r };
   if (WG.shape === "pencil") {
-    gmSendEdit([[cell.c, cell.r]], TOOL_CHARS[WG.tool]);
+    gmSendEdit([[cell.c, cell.r]]);
   } else {
     gmDrawPreview(scene, gmShapeCells(WG.stroke, cell.c, cell.r, pointer.event.shiftKey), TOOL_PREVIEW[WG.tool]);
   }
@@ -367,7 +568,7 @@ function gmPointerMove(scene, pointer) {
   if (WG.stroke && pointer.leftButtonDown()) {
     if (WG.shape === "pencil") {
       if (cell.c !== WG.stroke.lastC || cell.r !== WG.stroke.lastR) {
-        gmSendEdit(lineCells(WG.stroke.lastC, WG.stroke.lastR, cell.c, cell.r), TOOL_CHARS[WG.tool]);
+        gmSendEdit(lineCells(WG.stroke.lastC, WG.stroke.lastR, cell.c, cell.r));
         WG.stroke.lastC = cell.c;
         WG.stroke.lastR = cell.r;
       }
@@ -389,7 +590,7 @@ function gmPointerUp(scene, pointer) {
   if (!WG.stroke) return;
   const cell = gmCellFromPointer(scene, pointer);
   if (WG.shape !== "pencil") {
-    gmSendEdit(gmShapeCells(WG.stroke, cell.c, cell.r, pointer.event.shiftKey), TOOL_CHARS[WG.tool]);
+    gmSendEdit(gmShapeCells(WG.stroke, cell.c, cell.r, pointer.event.shiftKey));
   }
   if (WG.strokeUndo && Object.keys(WG.strokeUndo.cells).length > 0) {
     WG.undo.push(WG.strokeUndo);
@@ -403,9 +604,18 @@ function gmPointerUp(scene, pointer) {
 function gmUndo() {
   const entry = WG.undo.pop();
   if (!entry) return;
-  const ops = [];
-  for (const key in entry.cells) ops.push(entry.cells[key]);
-  gmSend({ type: "gm_edit", layer: entry.layer, ops: ops });
+  const logicOps = [];
+  const artOps = [];
+  const objOps = [];
+  for (const key in entry.cells) {
+    const cell = entry.cells[key];
+    logicOps.push([cell.c, cell.r, cell.logic]);
+    artOps.push([cell.c, cell.r, cell.art]);
+    objOps.push([cell.c, cell.r, cell.obj, cell.solid ? 1 : 0]);
+  }
+  gmSend({ type: "gm_edit", layer: entry.layer, ops: logicOps });
+  gmSend({ type: "gm_art", layer: entry.layer, ops: artOps });
+  gmSend({ type: "gm_obj", layer: entry.layer, ops: objOps });
 }
 
 function gmGoLayer(n) {
@@ -501,10 +711,19 @@ function gmUpdatePlayer(scene, p) {
   sprite.maxMp = p.maxMp;
 }
 
+function gmRefreshAssetHighlight() {
+  document.querySelectorAll("[data-wgasset]").forEach((b) => {
+    const parts = b.getAttribute("data-wgasset").split(":");
+    const on = (parts[0] === "tile" && WG.tool === "tile" && WG.tileName === parts[1]) || (parts[0] === "object" && WG.tool === "object" && WG.objName === parts[1]);
+    b.classList.toggle("on", on);
+  });
+}
+
 function gmSetTool(tool) {
   WG.tool = tool;
   const buttons = document.querySelectorAll("[data-wgtool]");
   buttons.forEach((b) => b.classList.toggle("on", b.getAttribute("data-wgtool") === tool));
+  gmRefreshAssetHighlight();
   if (tool !== "portal") {
     WG.portalSource = null;
     gmDrawMarkers();
@@ -526,6 +745,9 @@ function gmBuildPanel() {
     + ".wgBtn.on{background:#4a6cff;border-color:#fff}"
     + "#wgPanel input[type=text],#wgPanel input[type=number]{background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;padding:5px;width:70px}"
     + "#wgPanel input#wgName,#wgPanel input#wgItem{width:150px}"
+    + ".wgAsset{display:inline-flex;flex-direction:column;align-items:center;width:62px;margin:2px;padding:4px 2px;background:#2d2d44;border:1px solid #55557a;border-radius:5px;color:#fff;font-size:10px;cursor:pointer}"
+    + ".wgAsset.on{background:#4a6cff;border-color:#fff}"
+    + ".wgAsset img{width:36px;height:36px;object-fit:contain;image-rendering:pixelated;margin-bottom:2px}"
     + ".wgPlayer{display:flex;gap:4px;align-items:center;margin:3px 0}.wgPlayer span{flex:1}"
     + "#wgStatus{white-space:pre-wrap;font-family:monospace;font-size:12px;color:#c8c8ff;margin-top:6px}"
     + "#wgHelp{color:#8888aa;font-size:11px;margin-top:6px;line-height:1.4}";
@@ -548,8 +770,13 @@ function gmBuildPanel() {
     + "<button class='wgBtn' data-wgtool='spawn'>Spawn</button>"
     + "<button class='wgBtn' data-wgtool='item'>Item</button>"
     + "<button class='wgBtn' data-wgtool='teleport'>Move player</button>"
+    + "<button class='wgBtn' data-wgtool='tileclear'>Clear tile art</button>"
+    + "<button class='wgBtn' data-wgtool='objerase'>Remove object</button>"
     + "<button class='wgBtn' data-wgtool='pan'>Pan</button>"
     + "</div>"
+    + "<h4>Tile art</h4><div id='wgTileList'>Loading...</div>"
+    + "<h4>Objects</h4><div id='wgObjList'>Loading...</div>"
+    + "<div style='margin-top:6px'><label><input type='checkbox' id='wgSolid' checked> Objects block movement</label></div>"
     + "<h4>Shape</h4>"
     + "<div>"
     + "<button class='wgBtn on' data-wgshape='pencil'>Pencil</button>"
@@ -582,6 +809,40 @@ function gmBuildPanel() {
   });
 }
 
+function gmBuildAssetButtons(list) {
+  worldAssetList = list;
+  const tileBox = document.getElementById("wgTileList");
+  const objBox = document.getElementById("wgObjList");
+  tileBox.innerHTML = "";
+  objBox.innerHTML = "";
+  const build = (box, kind, names) => {
+    if (names.length === 0) {
+      box.textContent = "No pictures found in assets/" + (kind === "tile" ? "tilemap" : "objects") + ".";
+      return;
+    }
+    for (const name of names) {
+      const btn = document.createElement("button");
+      btn.className = "wgAsset";
+      btn.setAttribute("data-wgasset", kind + ":" + name);
+      const img = document.createElement("img");
+      img.src = worldAssetUrl(kind, name);
+      const label = document.createElement("span");
+      label.textContent = name;
+      btn.appendChild(img);
+      btn.appendChild(label);
+      btn.addEventListener("click", () => {
+        if (kind === "tile") WG.tileName = name;
+        else WG.objName = name;
+        gmSetTool(kind);
+      });
+      box.appendChild(btn);
+    }
+  };
+  build(tileBox, "tile", list.tiles || []);
+  build(objBox, "object", list.objects || []);
+  gmRefreshAssetHighlight();
+}
+
 function enterGmWorld(scene) {
   worldGmMode = true;
   isGM = true;
@@ -593,12 +854,17 @@ function enterGmWorld(scene) {
   cam.setZoom(0.5);
   if (mapGraphics) mapGraphics.clear();
   WG.rows = blankRows();
+  WG.art = blankRows();
   WG.previewGfx = scene.add.graphics();
   WG.previewGfx.setDepth(60);
   WG.markerGfx = scene.add.graphics();
   WG.markerGfx.setDepth(55);
   gmDrawGrid(scene);
   gmBuildPanel();
+  fetch("/api/world/assets").then((r) => r.json()).then(gmBuildAssetButtons).catch(() => {
+    document.getElementById("wgTileList").textContent = "Could not load the picture list.";
+    document.getElementById("wgObjList").textContent = "";
+  });
   scene.input.mouse.disableContextMenu();
   scene.input.on("pointerdown", (pointer) => gmPointerDown(scene, pointer));
   scene.input.on("pointermove", (pointer) => gmPointerMove(scene, pointer));
@@ -635,6 +901,16 @@ function gmLoadLayer(scene, data) {
   for (let r = 0; r < WORLD_ROWS && r < data.rows.length; r++) {
     WG.rows[r] = String(data.rows[r]).padEnd(WORLD_COLS, " ").slice(0, WORLD_COLS);
   }
+  WG.art = blankRows();
+  for (let r = 0; r < WORLD_ROWS && data.art && r < data.art.length; r++) {
+    WG.art[r] = String(data.art[r]).padEnd(WORLD_COLS, " ").slice(0, WORLD_COLS);
+  }
+  WG.palette = data.palette || {};
+  WG.objects = {};
+  for (const o of data.objects || []) {
+    WG.objects[o[0] + "," + o[1]] = { name: o[2], solid: o[3] !== 0 };
+  }
+  WG.artDirty = true;
   WG.portals = data.portals || {};
   WG.spawn = data.spawn || null;
   WG.layers = data.layers || WG.layers;
@@ -694,6 +970,20 @@ window.worldHook = function (scene, data) {
     if (data.type === "gm_tiles") {
       if (data.layer === WG.layer) {
         gmApplyTiles(scene, data.cells);
+        gmUpdateHoverStatus();
+      }
+      return true;
+    }
+    if (data.type === "gm_art") {
+      if (data.layer === WG.layer) {
+        gmApplyArt(scene, data.cells);
+        gmUpdateHoverStatus();
+      }
+      return true;
+    }
+    if (data.type === "gm_objs") {
+      if (data.layer === WG.layer) {
+        gmApplyObjs(scene, data.cells);
         gmUpdateHoverStatus();
       }
       return true;
