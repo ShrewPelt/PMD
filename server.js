@@ -10,6 +10,7 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.static(path.join(__dirname, "public")));
 app.use("/items", express.static(path.join(__dirname, "StorageData", "Items")));
+app.use("/combaticons", express.static(path.join(__dirname, "StorageData", "CombatSprites")));
 app.use("/assets", express.static(path.join(__dirname, "assets")));
 
 app.use(express.json());
@@ -804,16 +805,190 @@ function queueWorldSave(p, final) {
     const d = (current[n] || 0) - (p._reported[n] || 0);
     if (d !== 0) delta[n] = d;
   }
-  if (!final && Object.keys(delta).length === 0) return;
-  pendingSaves.push({ id: makeToken(), userId: p.userId, name: p.name, slot: p._slot, pass: p._pass, delta: delta, hp: p.hp, mp: p.mp, layer: p.layer, col: p.col, row: p.row, final: final, ts: Date.now() });
+  const kills = Array.isArray(p._kills) ? p._kills.splice(0) : [];
+  const vitalsChanged = p.hp !== p._reportedHp || p.mp !== p._reportedMp;
+  if (!final && Object.keys(delta).length === 0 && kills.length === 0 && !vitalsChanged) return;
+  const ailments = p._sheet && Array.isArray(p._sheet.ailments) ? p._sheet.ailments : [];
+  pendingSaves.push({ id: makeToken(), userId: p.userId, name: p.name, slot: p._slot, pass: p._pass, delta: delta, kills: kills, hp: p.hp, mp: p.mp, ailments: ailments, layer: p.layer, col: p.col, row: p.row, final: final, ts: Date.now() });
   p._reported = current;
+  p._reportedHp = p.hp;
+  p._reportedMp = p.mp;
   writeJsonFile(PENDING_FILE, pendingSaves);
+}
+
+function queueCompanionSave(e, final) {
+  const kills = Array.isArray(e._kills) ? e._kills.splice(0) : [];
+  const vitalsChanged = e.hp !== e._reportedHp || e.mp !== e._reportedMp;
+  if (!final && kills.length === 0 && !vitalsChanged) return;
+  const ailments = e._sheet && Array.isArray(e._sheet.ailments) ? e._sheet.ailments : [];
+  pendingSaves.push({ id: makeToken(), kind: "npc", userId: e.userId, npcName: e.npcName, name: e.name, pass: e._pass, delta: {}, kills: kills, hp: e.hp, mp: e.mp, ailments: ailments, final: final, ts: Date.now() });
+  e._reportedHp = e.hp;
+  e._reportedMp = e.mp;
+  writeJsonFile(PENDING_FILE, pendingSaves);
+}
+
+function companionsOf(p) {
+  const list = [];
+  if (!p._companions) return list;
+  for (const id of p._companions) {
+    const e = entities[id];
+    if (e) list.push(e);
+  }
+  return list;
+}
+
+const COMPANION_FOLLOW_MS = 380;
+const COMPANION_NEAR = 2;
+const COMPANION_LEASH = 12;
+
+function cleanCompanion(src) {
+  if (!src || typeof src !== "object" || !src.npcName) return null;
+  const sheet = src.character || {};
+  return {
+    npcName: String(src.npcName).slice(0, 60),
+    name: String(src.name || src.npcName).slice(0, 40),
+    dex: src.dex ? String(src.dex) : "0004",
+    hp: Math.max(1, num(sheet.hp, 30)),
+    maxHp: Math.max(1, num(sheet.maxHp, num(sheet.hp, 30))),
+    mp: num(sheet.mp, 10),
+    maxMp: num(sheet.maxMp, num(sheet.mp, 10)),
+    inventory: Array.isArray(sheet.inventory) ? sheet.inventory.filter((x) => x && x.name).map((x) => ({ name: String(x.name), count: num(x.count, 1) })) : [],
+    sheet: cleanSheet(sheet)
+  };
+}
+
+function spawnCompanions(p, info) {
+  p._companions = [];
+  const list = Array.isArray(info.companions) ? info.companions : [];
+  for (const c of list) {
+    const id = "e" + entityNextId;
+    entityNextId = entityNextId + 1;
+    const spot = worldFreeSpot(p.layer, p.col, p.row, null);
+    const inv = c.inventory.map((x) => ({ name: x.name, count: x.count }));
+    const e = {
+      id: id,
+      kind: "companion",
+      name: c.name,
+      npcName: c.npcName,
+      species: c.sheet.species,
+      dex: c.dex,
+      level: c.sheet.level,
+      layer: p.layer,
+      col: spot.col,
+      row: spot.row,
+      homeCol: spot.col,
+      homeRow: spot.row,
+      direction: p.direction,
+      state: "idle",
+      lines: [],
+      wander: 0,
+      sensor: 0,
+      hp: c.hp,
+      maxHp: c.maxHp,
+      mp: c.mp,
+      maxMp: c.maxMp,
+      userId: p.userId,
+      ownerPlayerId: p.id,
+      _pass: p._pass,
+      _sheet: c.sheet,
+      _inv: inv,
+      _kills: [],
+      _fight: null,
+      _reportedHp: c.hp,
+      _reportedMp: c.mp,
+      down: false
+    };
+    entities[id] = e;
+    p._companions.push(id);
+    broadcastEntity(e, null, 0, 0);
+  }
+}
+
+function companionMoveTo(e, layer, col, row) {
+  const oldLayer = e.layer;
+  const oldCol = e.col;
+  const oldRow = e.row;
+  e.layer = layer;
+  e.col = col;
+  e.row = row;
+  broadcastEntity(e, oldLayer, oldCol, oldRow);
+}
+
+function companionSnap(p) {
+  for (const e of companionsOf(p)) {
+    if (e._fight || e.down) continue;
+    const spot = worldFreeSpot(p.layer, p.col, p.row, null);
+    companionMoveTo(e, p.layer, spot.col, spot.row);
+  }
+}
+
+function companionStepFree(e, c, r) {
+  if (!isWalkable(e.layer, c, r)) return false;
+  if (entityAt(e.layer, c, r, e.id)) return false;
+  if (playerAt(e.layer, c, r)) return false;
+  return true;
+}
+
+function companionFollowTick() {
+  for (const id in worldSession.players) {
+    const p = worldSession.players[id];
+    if (!p._companions || p._companions.length === 0) continue;
+    if (p._fight) continue;
+    for (const e of companionsOf(p)) {
+      if (e._fight || e.down) continue;
+      const dist = e.layer === p.layer ? Math.max(Math.abs(e.col - p.col), Math.abs(e.row - p.row)) : Infinity;
+      if (dist > COMPANION_LEASH) {
+        const spot = worldFreeSpot(p.layer, p.col, p.row, null);
+        companionMoveTo(e, p.layer, spot.col, spot.row);
+        continue;
+      }
+      if (dist <= COMPANION_NEAR) continue;
+      const steps = dist > 5 ? 2 : 1;
+      for (let s = 0; s < steps; s++) {
+        const dc = p.col - e.col;
+        const dr = p.row - e.row;
+        if (Math.max(Math.abs(dc), Math.abs(dr)) <= COMPANION_NEAR) break;
+        const tries = [];
+        const horizontal = dc === 0 ? null : (dc > 0 ? "right" : "left");
+        const vertical = dr === 0 ? null : (dr > 0 ? "down" : "up");
+        if (Math.abs(dc) >= Math.abs(dr)) tries.push(horizontal, vertical);
+        else tries.push(vertical, horizontal);
+        const sides = ["up", "down", "left", "right"];
+        for (const d of sides) tries.push(d);
+        let moved = false;
+        for (const dir of tries) {
+          if (!dir) continue;
+          const d = DELTAS[dir];
+          const nc = e.col + d.dc;
+          const nr = e.row + d.dr;
+          const before = Math.abs(p.col - e.col) + Math.abs(p.row - e.row);
+          const after = Math.abs(p.col - nc) + Math.abs(p.row - nr);
+          if (after >= before && dir !== horizontal && dir !== vertical) continue;
+          if (!companionStepFree(e, nc, nr)) continue;
+          const oc = e.col;
+          const or = e.row;
+          e.col = nc;
+          e.row = nr;
+          e.direction = dir;
+          broadcastEntity(e, e.layer, oc, or);
+          moved = true;
+          break;
+        }
+        if (!moved) break;
+      }
+    }
+  }
 }
 
 function leaveWorldPlayer(id) {
   const p = worldSession.players[id];
   if (!p) return false;
   worldCombat.onPlayerLeave(p);
+  for (const ce of companionsOf(p)) {
+    queueCompanionSave(ce, true);
+    removeEntity(ce.id);
+  }
+  p._companions = [];
   queueWorldSave(p, true);
   worldState.positions[p._key] = { layer: p.layer, col: p.col, row: p.row, direction: p.direction };
   for (const otherId in p._seen) {
@@ -909,7 +1084,8 @@ app.post("/api/world/join", (req, res) => {
     mp: num(sheet.mp, 10),
     maxMp: num(sheet.maxMp, num(sheet.mp, 10)),
     inventory: Array.isArray(sheet.inventory) ? sheet.inventory.filter((e) => e && e.name).map((e) => ({ name: String(e.name), count: num(e.count, 1) })) : [],
-    sheet: cleanSheet(sheet)
+    sheet: cleanSheet(sheet),
+    companions: (Array.isArray(body.companions) ? body.companions : []).map(cleanCompanion).filter((c) => c).slice(0, 5)
   };
   worldByUser[userId] = pass;
   writeJsonFile(PASSES_FILE, worldPasses);
@@ -989,7 +1165,7 @@ const ENTITY_SAVE_DELAY = 2000;
 const MAX_ENTITY_LINES = 12;
 const SPEECH_MIN_MS = 25000;
 const SPEECH_MAX_MS = 45000;
-const DEFAULT_SENSOR = 10;
+const DEFAULT_SENSOR = 5;
 const DEFAULT_WANDER = 4;
 const WANDER_CHANCE = 0.3;
 
@@ -1020,6 +1196,7 @@ function saveEntitiesNow() {
   const list = [];
   for (const id of Object.keys(entities)) {
     const e = entities[id];
+    if (e.kind === "companion") continue;
     list.push({ id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines });
   }
   writeJsonFile(ENTITIES_FILE, { nextId: entityNextId, list: list });
@@ -1157,6 +1334,7 @@ function entityTick() {
       if (now >= e._downUntil) reviveEntity(e);
       continue;
     }
+    if (e.kind === "companion") continue;
     if (!layerHasViewers(e.layer)) continue;
     if (e._fight) continue;
 
@@ -1231,6 +1409,7 @@ function handleGmEntitySet(gm, data) {
   if (col < 0 || col >= LAYER_W || row < 0 || row >= LAYER_H) return;
 
   let e = typeof src.id === "string" ? entities[src.id] : null;
+  if (e && e.kind === "companion") return;
   let oldLayer = null;
   let oldCol = 0;
   let oldRow = 0;
@@ -1247,7 +1426,7 @@ function handleGmEntitySet(gm, data) {
 
   const level = Math.max(1, Math.min(100, parseInt(src.level, 10) || 5));
   const wander = Math.max(0, Math.min(30, parseInt(src.wander, 10)));
-  const sensor = Math.max(1, Math.min(30, parseInt(src.sensor, 10)));
+  const sensor = Math.max(1, Math.min(5, parseInt(src.sensor, 10)));
   const moved = e.layer !== layer || e.col !== col || e.row !== row;
   e.kind = kind;
   e.species = found.name;
@@ -1334,6 +1513,7 @@ function teleportPlayer(p, layer, col, row) {
   sendPlayer(p, { type: "teleport", layer: p.layer, col: p.col, row: p.row, direction: p.direction, players: visiblePlayersOf(p) });
   sendView(p);
   sendGms(null, { type: "gm_player", player: publicPlayer(p) });
+  companionSnap(p);
 }
 
 function handleWorldMove(p, dir) {
@@ -1348,7 +1528,14 @@ function handleWorldMove(p, dir) {
   const nc = d ? p.col + d.dc : p.col;
   const nr = d ? p.row + d.dr : p.row;
   let blocked = !d || !isWalkable(p.layer, nc, nr);
-  if (!blocked && entityAt(p.layer, nc, nr)) blocked = true;
+  let swapWith = null;
+  if (!blocked) {
+    const hit = entityAt(p.layer, nc, nr);
+    if (hit) {
+      if (hit.kind === "companion" && hit.ownerPlayerId === p.id && !hit._fight) swapWith = hit;
+      else blocked = true;
+    }
+  }
   if (!blocked) {
     for (const id in worldSession.players) {
       const o = worldSession.players[id];
@@ -1376,8 +1563,17 @@ function handleWorldMove(p, dir) {
     return;
   }
 
+  const prevCol = p.col;
+  const prevRow = p.row;
   p.col = nc;
   p.row = nr;
+  if (swapWith) {
+    const oc = swapWith.col;
+    const or = swapWith.row;
+    swapWith.col = prevCol;
+    swapWith.row = prevRow;
+    broadcastEntity(swapWith, swapWith.layer, oc, or);
+  }
   refreshVisibility(p);
   const moved = { type: "moved", id: p.id, col: nc, row: nr, direction: p.direction };
   sendPlayer(p, moved);
@@ -1580,7 +1776,7 @@ function handleGmMessage(gm, data) {
   }
 
   if (data.type === "gm_entity_del") {
-    if (typeof data.id === "string") removeEntity(data.id);
+    if (typeof data.id === "string" && !(entities[data.id] && entities[data.id].kind === "companion")) removeEntity(data.id);
     return;
   }
 
@@ -1789,8 +1985,12 @@ function handleWorldConnection(socket, pass) {
   }
   players[id] = publicPlayer(p);
   sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W, p.row - VIEW_HALF_H, w, h), inventory: inventory, sheet: clientSheet(p._sheet) });
+  p._kills = [];
+  p._reportedHp = p.hp;
+  p._reportedMp = p.mp;
   sendView(p);
   sendGms(null, { type: "gm_player", player: publicPlayer(p) });
+  spawnCompanions(p, info);
   sendLayerSummaries();
 
   socket.on("message", (raw) => {
@@ -1907,16 +2107,22 @@ worldCombat.init({
   hideEntity: hideEntity,
   publicPlayer: publicPlayer,
   layerSpawn: layerSpawn,
-  teleportPlayer: teleportPlayer
+  teleportPlayer: teleportPlayer,
+  companionsOf: companionsOf,
+  queueCompanionSave: queueCompanionSave,
+  queueWorldSave: queueWorldSave
 });
 
 setInterval(saveWorldState, WORLD_SAVE_INTERVAL);
 setInterval(entityTick, ENTITY_TICK_MS);
+setInterval(companionFollowTick, COMPANION_FOLLOW_MS);
 setInterval(saveEntitiesNow, WORLD_SAVE_INTERVAL);
 
 setInterval(() => {
   for (const id in worldSession.players) {
-    queueWorldSave(worldSession.players[id], false);
+    const cp = worldSession.players[id];
+    queueWorldSave(cp, false);
+    for (const ce of companionsOf(cp)) queueCompanionSave(ce, false);
   }
 }, WORLD_CHECKPOINT_INTERVAL);
 

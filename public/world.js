@@ -77,7 +77,7 @@ function entityLabelsFrame(scene) {
       worldEntityLabels[id] = label;
     }
     label.setText((meta.state === "alert" ? "! " : "") + meta.name);
-    label.setColor(meta.state === "alert" ? "#ff5050" : (meta.kind === "enemy" ? "#ffb0b0" : "#9fe89f"));
+    label.setColor(meta.state === "alert" ? "#ff5050" : (meta.kind === "enemy" ? "#ffb0b0" : (meta.kind === "companion" ? "#8fd0ff" : "#9fe89f")));
     const off = (sp.feetOff !== undefined ? sp.feetOff : TILE / 2 - 2) + 12;
     label.setRotation(-viewRot);
     label.setPosition(sp.x + off * Math.sin(viewRot), sp.y + off * Math.cos(viewRot));
@@ -901,7 +901,7 @@ function gmBuildPanel() {
     + "<div style='margin-top:4px'>Species <input type='text' id='wgESpecies' list='wgSpeciesList' placeholder='e.g. Pikachu'><datalist id='wgSpeciesList'></datalist></div>"
     + "<div style='margin-top:4px'>Name <input type='text' id='wgEName' placeholder='optional'></div>"
     + "<div style='margin-top:4px'>Level <input type='number' id='wgELevel' value='5' min='1' max='100'> Wander <input type='number' id='wgEWander' value='4' min='0' max='30'></div>"
-    + "<div style='margin-top:4px'>Sensor range <input type='number' id='wgESensor' value='10' min='1' max='30'> (enemies)</div>"
+    + "<div style='margin-top:4px'>Sensor range <input type='number' id='wgESensor' value='5' min='1' max='5'> (enemies, max 5)</div>"
     + "<div style='margin-top:4px'>NPC lines, one per line:<br><textarea id='wgELines' rows='4' style='width:96%;background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px'></textarea></div>"
     + "<div style='margin-top:4px'>"
     + "<button class='wgBtn' data-wgtool='creature'>Place</button>"
@@ -1310,7 +1310,7 @@ function combatSelectMove(index) {
     const a = COMBAT.actors[id];
     if (a.dead) continue;
     if (wantEnemy && a.kind !== "enemy") continue;
-    if (!wantEnemy && a.kind !== "player") continue;
+    if (!wantEnemy && a.kind !== "player" && a.kind !== "ally") continue;
     const spr = combatSprite(a.id);
     const pos = spr && spr !== "loading" ? { col: Math.floor(spr.x / TILE), row: Math.floor(spr.y / TILE) } : { col: a.col, row: a.row };
     cands.push({ a: a, dist: combatDistance(pos, mine) });
@@ -1349,6 +1349,7 @@ function combatApplyActor(a) {
   spr.mp = a.mp;
   spr.maxMp = a.maxMp;
   spr.setAlpha(a.dead ? 0.35 : 1);
+  spr.stages = a.dead ? {} : (a.stages || {});
   if (spr === player) {
     playerHp = a.hp;
     playerMaxHp = a.maxHp;
@@ -1360,6 +1361,8 @@ function combatEnsureSprite(scene, a) {
   if (otherPlayers[a.id]) return;
   if (a.kind === "enemy") {
     worldEntityMeta[a.id] = { kind: "enemy", name: a.name, state: "alert", dex: a.dex };
+  } else if (a.kind === "ally") {
+    worldEntityMeta[a.id] = { kind: "companion", name: a.name, state: "idle", dex: a.dex };
   }
   addOtherPlayer(scene, { id: a.id, dex: a.dex, col: a.col, row: a.row, direction: a.direction || "down", hp: a.hp, maxHp: a.maxHp, mp: a.mp, maxMp: a.maxMp });
 }
@@ -1605,6 +1608,11 @@ function combatEnd(scene, d) {
   }
   const label = { win: "Victory!", over: "The battle ended.", fled: "You got away.", defeat: "You were defeated... you wake up back at the spawn point." }[d.result] || "The battle ended.";
   combatAddLog(label);
+  if (d.result === "win" && d.exp) combatAddLog("The team earned " + d.exp + " EXP" + (d.coins ? " and " + d.coins + " coins" : "") + " (counted on the bot).");
+  for (const id of Object.keys(COMBAT.actors)) {
+    const sp = String(id) === String(myId) ? player : otherPlayers[id];
+    if (sp && sp !== "loading") sp.stages = {};
+  }
   if (typeof d.hp === "number") {
     player.hp = d.hp;
     playerHp = d.hp;
@@ -1620,6 +1628,7 @@ function combatEnd(scene, d) {
     const far = spr !== "loading" && (Math.abs(Math.floor(spr.x / TILE) - mine.col) > 8 || Math.abs(Math.floor(spr.y / TILE) - mine.row) > 6);
     if (a.kind === "enemy" && (a.dead || far)) entityRemove(id);
     else if (a.kind === "player" && far) removeOtherPlayer(id);
+    else if (a.kind === "ally" && spr !== "loading") spr.maxHp = 0;
   }
   COMBAT.actors = {};
   COMBAT.order = [];

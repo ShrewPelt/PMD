@@ -393,7 +393,67 @@ function drawMap() {
   }
 }
 
+const STATUS_ICONS = { attack: ["PhysicalSword", "AttackDown"], spAtk: ["SpecialSword", "SpecialSwordDown"], defense: ["PhysicalShield", "DefenseDown"], spDef: ["SpecialShield", "SpecialShieldDown"], speed: ["SpeedUp", "SpeedDown"] };
+const STATUS_ICON_ORDER = ["attack", "spAtk", "defense", "spDef", "speed"];
+const statusPool = [];
+let statusUsed = 0;
+
+function statusSlot() {
+  let slot = statusPool[statusUsed];
+  if (!slot) {
+    const img = sceneRef.add.image(0, 0, "ico_PhysicalSword");
+    img.setOrigin(0.5, 0);
+    img.setDepth(150);
+    const txt = sceneRef.add.text(0, 0, "", { fontFamily: "sans-serif", fontSize: "9px", color: "#ffffff", stroke: "#000000", strokeThickness: 2 });
+    txt.setOrigin(1, 1);
+    txt.setDepth(151);
+    slot = { img: img, txt: txt };
+    statusPool[statusUsed] = slot;
+  }
+  statusUsed++;
+  return slot;
+}
+
+function drawStatusIcons(s) {
+  if (!s.stages || !sceneRef) return;
+  const keys = [];
+  for (const stat of STATUS_ICON_ORDER) {
+    if (s.stages[stat]) keys.push(stat);
+  }
+  if (keys.length === 0) return;
+  const gap = 17;
+  const total = keys.length * gap;
+  const off = s.feetOff !== undefined ? s.feetOff : TILE / 2 - 2;
+  const bx = s.x + off * Math.sin(viewRot);
+  const by = s.y + off * Math.cos(viewRot);
+  const cosr = Math.cos(viewRot);
+  const sinr = Math.sin(viewRot);
+  for (let i = 0; i < keys.length; i++) {
+    const stat = keys[i];
+    const val = s.stages[stat];
+    const slot = statusSlot();
+    const lx = -total / 2 + i * gap + gap / 2;
+    const ly = 29;
+    const wx = bx + lx * cosr + ly * sinr;
+    const wy = by - lx * sinr + ly * cosr;
+    slot.img.setTexture("ico_" + STATUS_ICONS[stat][val > 0 ? 0 : 1]);
+    slot.img.setDisplaySize(15, 15);
+    slot.img.setRotation(-viewRot);
+    slot.img.setPosition(wx, wy);
+    slot.img.setVisible(true);
+    const tx = lx + 8;
+    const ty = ly + 16;
+    slot.txt.setText(Math.abs(val) > 1 ? String(Math.abs(val)) : "");
+    slot.txt.setRotation(-viewRot);
+    slot.txt.setPosition(bx + tx * cosr + ty * sinr, by - tx * sinr + ty * cosr);
+    slot.txt.setVisible(true);
+  }
+}
+
 function preload() {
+  for (const stat in STATUS_ICONS) {
+    for (const nm of STATUS_ICONS[stat]) this.load.image("ico_" + nm, "combaticons/" + nm + ".png");
+  }
   for (const dex in SPECIES) {
     const s = SPECIES[dex];
     this.load.spritesheet(dex + "_walk", "sprites/" + dex + "/Walk-Anim.png", { frameWidth: s.walk.fw, frameHeight: s.walk.fh });
@@ -676,11 +736,13 @@ function drawEntityBars(s) {
   barsGfx.fillRect(x, y2, w * mpRatio, h);
 
   barsGfx.restore();
+  drawStatusIcons(s);
 }
 
 function drawBars() {
   if (!barsGfx) return;
   barsGfx.clear();
+  statusUsed = 0;
   if (!isGM && player.visible && player.maxHp) {
     drawEntityBars(player);
   }
@@ -689,6 +751,10 @@ function drawBars() {
     if (s && s !== "loading" && s.maxHp) {
       drawEntityBars(s);
     }
+  }
+  for (let i = statusUsed; i < statusPool.length; i++) {
+    statusPool[i].img.setVisible(false);
+    statusPool[i].txt.setVisible(false);
   }
 }
 

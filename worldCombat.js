@@ -1,5 +1,5 @@
 const engine = require("./Utils/combat");
-const { getMoveRestriction } = require("./Utils/Combat/applyMove");
+const { getMoveRestriction, SUPPORT_EFFECTS } = require("./Utils/Combat/applyMove");
 const { effectiveSpeed } = require("./Utils/Combat/turnOrder");
 const { registerMove } = require("./Utils/Combat/moveData");
 
@@ -10,8 +10,13 @@ const ENEMY_THINK_MS = 700;
 const ACTION_MS = 1500;
 const BETWEEN_TURNS_MS = 500;
 const MELEE_RANGE = 1;
-const RANGED_RANGE = 5;
+const RANGED_RANGE = 3;
+const WIDE_RANGE = 5;
+const WIDE_POWER = 100;
 const FLEE_COOLDOWN_MS = 20000;
+const FLEE_CHANCE = 0.2;
+const FLEE_DISTANCE = 10;
+const ENGAGE_MAX = 5;
 const DEFEAT_COOLDOWN_MS = 12000;
 const WIN_COOLDOWN_MS = 3000;
 const RESPAWN_MS = 90000;
@@ -47,6 +52,7 @@ function rangeOf(moveData) {
   const target = moveData.target || "enemy";
   if (target === "self" || target === "all-allies") return 0;
   if (moveData.category === "physical" && moveData.power > 0) return MELEE_RANGE;
+  if (moveData.category === "special" && (moveData.power >= WIDE_POWER || moveData.recharge || moveData.ohko)) return WIDE_RANGE;
   return RANGED_RANGE;
 }
 
@@ -74,7 +80,11 @@ function actorDistance(A, B) {
 }
 
 function sideOf(A) {
-  return A.kind === "player" ? "players" : "enemies";
+  return A.kind === "enemy" ? "enemies" : "players";
+}
+
+function livingSide(f, side) {
+  return livingActors(f).filter((A) => sideOf(A) === side);
 }
 
 function livingActors(f) {
@@ -88,6 +98,15 @@ function livingActors(f) {
 
 function livingOfKind(f, kind) {
   return livingActors(f).filter((A) => A.kind === kind);
+}
+
+function nonZeroStages(c) {
+  const out = {};
+  if (!c.stages) return out;
+  for (const stat of ["attack", "defense", "spAtk", "spDef", "speed"]) {
+    if (c.stages[stat]) out[stat] = c.stages[stat];
+  }
+  return out;
 }
 
 function publicActor(A) {
@@ -108,6 +127,9 @@ function publicActor(A) {
     mp: Math.max(0, c.mp),
     maxMp: c.maxMp,
     ailments: ailNames,
+    stages: nonZeroStages(c),
+    stageTurns: c.stageTurns || null,
+    hydrophobic: c.hydrophobic || 0,
     dead: c.hp <= 0
   };
 }
@@ -167,7 +189,7 @@ function pushLog(f, lines) {
 }
 
 function syncPlayerVitals(A) {
-  if (A.kind !== "player") return;
+  if (A.kind === "enemy") return;
   A.ref.hp = Math.max(0, A.c.hp);
   A.ref.mp = Math.max(0, A.c.mp);
   A.ref._sheet.ailments = JSON.parse(JSON.stringify(A.c.ailments || []));
@@ -197,6 +219,7 @@ function buildPlayerCombatant(p) {
     immunities: Array.isArray(sheet.immunities) ? sheet.immunities.slice() : [],
     gender: sheet.gender || null,
     userId: p.userId,
+    isNpc: p.kind === "companion" ? true : undefined,
     inventory: p._inv,
     accessories: sheet.accessories || {},
     variation: sheet.variation || null,
@@ -226,15 +249,11 @@ function buildEnemyCombatant(e) {
 function addActor(f, kind, ref) {
   const id = String(ref.id);
   if (f.actors[id] && !f.actors[id].gone) return f.actors[id];
-  const c = kind === "player" ? buildPlayerCombatant(ref) : buildEnemyCombatant(ref);
+  const c = kind === "enemy" ? buildEnemyCombatant(ref) : buildPlayerCombatant(ref);
   const A = { id: ref.id, kind: kind, ref: ref, c: c, steps: 0, gone: false };
   f.actors[id] = A;
-  if (kind === "player") {
-    ref._fight = f.id;
-  } else {
-    ref._fight = f.id;
-    ref.state = "alert";
-  }
+  ref._fight = f.id;
+  if (kind === "enemy") ref.state = "alert";
   return A;
 }
 
@@ -244,7 +263,33 @@ function actorById(f, id) {
 }
 
 function sensorOf(e) {
-  return typeof e.sensor === "number" ? e.sensor : 10;
+  const own = typeof e.sensor === "number" ? e.sensor : ENGAGE_MAX;
+  return Math.min(own, ENGAGE_MAX);
+}
+
+function findFleeSpot(f, p) {
+  const foes = livingOfKind(f, "enemy");
+  let best = null;
+  let bestScore = Infinity;
+  const reach = FLEE_DISTANCE + 12;
+  for (let dc = -reach; dc <= reach; dc++) {
+    for (let dr = -reach; dr <= reach; dr++) {
+      const col = p.col + dc;
+      const row = p.row + dr;
+      if (!ctx.isWalkable(p.layer, col, row)) continue;
+      if (ctx.entityAt(p.layer, col, row)) continue;
+      if (ctx.playerAt(p.layer, col, row)) continue;
+      let nearest = Infinity;
+      for (const E of foes) nearest = Math.min(nearest, chebyshev(col, row, E.ref.col, E.ref.row));
+      if (nearest < FLEE_DISTANCE) continue;
+      const score = Math.max(Math.abs(dc), Math.abs(dr)) * 100 + Math.abs(dc) + Math.abs(dr);
+      if (score < bestScore) {
+        bestScore = score;
+        best = { col: col, row: row };
+      }
+    }
+  }
+  return best;
 }
 
 function expand(f) {
@@ -267,6 +312,14 @@ function expand(f) {
           changed = true;
           break;
         }
+      }
+    }
+    for (const P of livingOfKind(f, "player")) {
+      for (const e of ctx.companionsOf(P.ref)) {
+        if (e._fight || e.down || e.hp <= 0 || e.layer !== f.layer) continue;
+        addActor(f, "ally", e);
+        grew = true;
+        changed = true;
       }
     }
     const playerActors = livingOfKind(f, "player");
@@ -337,17 +390,30 @@ function checkEnd(f) {
   return false;
 }
 
+function releaseAllies(f, ownerRef) {
+  for (const id in f.actors) {
+    const B = f.actors[id];
+    if (B.kind !== "ally" || B.gone || B.ref.ownerPlayerId !== ownerRef.id) continue;
+    B.gone = true;
+    syncPlayerVitals(B);
+    B.ref._fight = null;
+    ctx.queueCompanionSave(B.ref, false);
+  }
+}
+
 function releasePlayer(f, A, cooldownMs) {
   A.gone = true;
   syncPlayerVitals(A);
   A.ref._fight = null;
   A.ref._noFightUntil = Date.now() + cooldownMs;
+  releaseAllies(f, A.ref);
 }
 
 function defeatPlayer(f, A) {
   const p = A.ref;
   A.gone = true;
   p._fight = null;
+  releaseAllies(f, p);
   p._noFightUntil = Date.now() + DEFEAT_COOLDOWN_MS;
   p._sheet.ailments = [];
   p.hp = Math.max(1, Math.floor(p.maxHp * DEFEAT_HP_PERCENT / 100));
@@ -381,11 +447,33 @@ function endFight(f, result) {
     f.timer = null;
   }
   delete fights[f.id];
+  const kills = [];
+  const gains = { exp: 0, coins: 0 };
+  if (result === "win") {
+    for (const id in f.actors) {
+      const E = f.actors[id];
+      if (E.kind === "enemy" && E.c.hp <= 0) kills.push({ species: E.c.species || E.c.name, level: E.c.level });
+    }
+    for (const k of kills) {
+      gains.exp += k.level * 12;
+      gains.coins += k.level * 3;
+    }
+  }
   for (const id in f.actors) {
     const A = f.actors[id];
     if (A.kind === "enemy") {
       if (A.c.hp <= 0) downEnemy(f, A);
       else resetEnemy(A);
+    } else if (A.kind === "ally") {
+      if (A.gone) continue;
+      syncPlayerVitals(A);
+      A.ref._fight = null;
+      if (A.c.hp <= 0) {
+        A.ref.hp = Math.max(1, Math.floor(A.ref.maxHp * DEFEAT_HP_PERCENT / 100));
+        A.ref._sheet.ailments = [];
+      }
+      if (kills.length > 0) A.ref._kills = A.ref._kills.concat(kills);
+      ctx.queueCompanionSave(A.ref, false);
     } else if (!A.gone) {
       syncPlayerVitals(A);
       A.ref._fight = null;
@@ -394,8 +482,10 @@ function endFight(f, result) {
         A.gone = false;
         defeatPlayer(f, A);
       } else {
-        ctx.sendPlayer(A.ref, { type: "c_end", fight: f.id, result: result === "win" ? "win" : "over", hp: A.ref.hp, mp: A.ref.mp });
+        if (kills.length > 0) A.ref._kills = A.ref._kills.concat(kills);
+        ctx.sendPlayer(A.ref, { type: "c_end", fight: f.id, result: result === "win" ? "win" : "over", hp: A.ref.hp, mp: A.ref.mp, exp: gains.exp, coins: gains.coins });
         ctx.sendGms(null, { type: "gm_player", player: ctx.publicPlayer(A.ref) });
+        if (kills.length > 0) ctx.queueWorldSave(A.ref, false);
       }
     }
   }
@@ -466,7 +556,8 @@ function nextTurn(f) {
     });
   } else {
     ctx.sendGms(f.layer, { type: "c_turn", fight: f.id, actor: A.id });
-    schedule(f, ENEMY_THINK_MS, () => runEnemyTurn(f, A));
+    if (A.kind === "ally") schedule(f, ENEMY_THINK_MS, () => runAllyTurn(f, A));
+    else schedule(f, ENEMY_THINK_MS, () => runEnemyTurn(f, A));
   }
 }
 
@@ -510,11 +601,11 @@ function finishTurn(f, A, skipTicks) {
 }
 
 function teamOf(f, A) {
-  return livingOfKind(f, A.kind);
+  return livingSide(f, sideOf(A));
 }
 
 function foesOf(f, A) {
-  return livingOfKind(f, A.kind === "player" ? "enemy" : "player");
+  return livingSide(f, sideOf(A) === "players" ? "enemies" : "players");
 }
 
 function animKind(md) {
@@ -675,7 +766,7 @@ function stepToward(f, A, T) {
   e.row = best.row;
   e.direction = best.name;
   ctx.broadcastEntity(e, e.layer, oldCol, oldRow);
-  emit(f, { type: "c_pos", id: e.id, kind: "enemy", col: e.col, row: e.row, direction: e.direction });
+  emit(f, { type: "c_pos", id: e.id, kind: A.kind, col: e.col, row: e.row, direction: e.direction });
   return true;
 }
 
@@ -762,6 +853,284 @@ function runEnemyTurn(f, A) {
   walk();
 }
 
+
+function hitCount(md) {
+  if (Array.isArray(md.multihit)) return (md.multihit[0] + md.multihit[1]) / 2;
+  if (typeof md.multihit === "number") return md.multihit;
+  return 1;
+}
+
+function effectList(md) {
+  const list = [];
+  if (md.effect) list.push(md.effect);
+  if (Array.isArray(md.effects)) {
+    for (const e of md.effects) list.push(e);
+  }
+  return list;
+}
+
+function offenseCounts(A) {
+  let physical = 0;
+  let special = 0;
+  for (const m of A.c.moves) {
+    const d = engine.getMoveData(m);
+    if (!d || !(d.power > 0)) continue;
+    if (d.category === "physical") physical++;
+    else if (d.category === "special") special++;
+  }
+  return { physical: physical, special: special };
+}
+
+function buffValue(A, ef) {
+  const stage = (A.c.stages && A.c.stages[ef.stat]) || 0;
+  if (stage >= 3) return 0;
+  const counts = offenseCounts(A);
+  let relevance = 1;
+  if (ef.stat === "attack") relevance = counts.physical > 0 ? 1.25 : 0.2;
+  else if (ef.stat === "spAtk") relevance = counts.special > 0 ? 1.25 : 0.2;
+  let value = (22 + 8 * Math.min(ef.stages, 3)) * relevance - stage * 10;
+  if (A.c.hp / A.c.maxHp < 0.35) value = value * 0.4;
+  return Math.max(0, value);
+}
+
+function scoreOnEnemy(f, A, moveName, md, T) {
+  const accuracy = Math.min(1, (md.accuracy || 100) / 100);
+  const selfFrac = A.c.hp / A.c.maxHp;
+  const damaging = md.power > 0 || md.fixedDamage || md.ohko;
+  if (damaging) {
+    const calc = engine.calcDamage(A.c, T.c, moveName);
+    if (md.power > 0 && calc.effectiveness === 0) return null;
+    let est = calc.damage * hitCount(md);
+    if (md.ohko) est = T.c.hp;
+    else if (typeof md.fixedDamage === "number") est = md.fixedDamage;
+    else if (md.fixedDamage === "level") est = A.c.level;
+    else if (md.fixedDamage === "halfTarget") est = Math.floor(T.c.hp / 2);
+    else if (md.fixedDamage === "userHp") est = A.c.hp;
+    let score = Math.min(1, est / Math.max(1, T.c.hp)) * 100 * accuracy;
+    if (est >= T.c.hp) score += 45;
+    score += 12 * (1 - T.c.hp / T.c.maxHp);
+    if (md.recoil) score -= md.recoil * 0.3;
+    if (md.recharge) score -= 18;
+    if (md.userFaints && selfFrac > 0.25) score -= 200;
+    if (md.drain && selfFrac < 0.6) score += 12;
+    for (const ef of effectList(md)) {
+      if ((ef.chance || 0) > 0) score += Math.min(10, ef.chance * 0.1);
+    }
+    return score;
+  }
+  let score = 0;
+  let recognised = false;
+  for (const ef of effectList(md)) {
+    const chance = (ef.chance === undefined ? 100 : ef.chance) / 100;
+    if (ef.status) {
+      recognised = true;
+      if (engine.isImmuneTo(T.c, ef.status)) continue;
+      if (engine.hasAilment(T.c, ef.status)) continue;
+      const busy = Array.isArray(T.c.ailments) && T.c.ailments.length > 0;
+      score += 40 * chance * (busy ? 0.3 : 1);
+    } else if (ef.stat && ef.target === "enemy" && ef.stages < 0) {
+      recognised = true;
+      const stage = (T.c.stages && T.c.stages[ef.stat]) || 0;
+      if (stage <= -2) continue;
+      score += 24 * Math.min(2, Math.abs(ef.stages)) * chance;
+    } else if (ef.stat && ef.target === "self" && ef.stages > 0) {
+      recognised = true;
+      score += buffValue(A, ef) * chance;
+    }
+  }
+  if (md.leechSeed) {
+    recognised = true;
+    if (!T.c.leechSeededBy) score += 28;
+  }
+  if (md.restrict) {
+    recognised = true;
+    score += 10;
+  }
+  if (!recognised) score = 5;
+  return score * accuracy;
+}
+
+function scoreOnSelf(f, A, moveName, md) {
+  const selfFrac = A.c.hp / A.c.maxHp;
+  const foes = foesOf(f, A);
+  if (md.healSelf) {
+    if (!engine.canHeal(A.c)) return null;
+    const need = 1 - selfFrac;
+    if (need < 0.35) return null;
+    return need * 115 + (selfFrac < 0.2 ? 30 : 0);
+  }
+  if (md.protect) {
+    if (A.c.lastMoveUsed && (engine.getMoveData(A.c.lastMoveUsed) || {}).protect) return null;
+    if (selfFrac < 0.4 && foes.length > 0) return 36;
+    return null;
+  }
+  let score = 0;
+  let recognised = false;
+  for (const ef of effectList(md)) {
+    if (ef.stat && ef.stages > 0 && (ef.target === "self" || ef.target === undefined)) {
+      recognised = true;
+      score += buffValue(A, ef);
+    }
+  }
+  if (md.weather || md.terrain) {
+    recognised = true;
+    const kind = md.weather || md.terrain;
+    const current = md.weather ? A.c.weather : A.c.terrain;
+    if (current && current.kind === kind) return null;
+    let synergy = 0;
+    for (const m of A.c.moves) {
+      const d = engine.getMoveData(m);
+      if (!d || !(d.power > 0)) continue;
+      if (kind === "rain" && d.type === "Water") synergy += 8;
+      if (kind === "sun" && d.type === "Fire") synergy += 8;
+    }
+    score += 12 + synergy;
+  }
+  if (md.aquaRing) {
+    recognised = true;
+    if (!A.c.aquaRing) score += 22;
+  }
+  if (!recognised) score = 6;
+  return score;
+}
+
+function scoreOnAlly(f, A, moveName, md, T) {
+  const support = SUPPORT_EFFECTS[moveName];
+  const need = 1 - T.c.hp / T.c.maxHp;
+  if (support && support.kind === "heal") {
+    if (!engine.canHeal(T.c)) return null;
+    if (need < 0.3) return null;
+    return need * 105;
+  }
+  if (support && support.kind === "cure") {
+    const count = Array.isArray(T.c.ailments) ? T.c.ailments.length : 0;
+    return count > 0 ? 55 : null;
+  }
+  if (support && support.kind === "boost") return 18;
+  return 6;
+}
+
+function scoreOnTeam(f, A, moveName, md) {
+  const support = SUPPORT_EFFECTS[moveName];
+  const team = teamOf(f, A);
+  if (support && support.kind === "cure") {
+    let count = 0;
+    for (const m of team) count += Array.isArray(m.c.ailments) && m.c.ailments.length > 0 ? 1 : 0;
+    return count > 0 ? 45 + 12 * count : null;
+  }
+  if (support && support.kind === "heal") {
+    let missing = 0;
+    for (const m of team) missing += 1 - m.c.hp / m.c.maxHp;
+    const avg = missing / Math.max(1, team.length);
+    if (avg < 0.25) return null;
+    return avg * 100 * Math.min(2, team.length * 0.7);
+  }
+  if (md.screen) {
+    let uncovered = 0;
+    for (const m of team) {
+      if (!m.c.screens || !(m.c.screens[md.screen] > 0)) uncovered++;
+    }
+    return uncovered > 0 ? 34 : null;
+  }
+  let score = 0;
+  let recognised = false;
+  for (const ef of effectList(md)) {
+    if (ef.stat && ef.stages > 0) {
+      recognised = true;
+      score += buffValue(A, ef) * 0.8 * Math.min(3, team.length);
+    }
+  }
+  if (!recognised) score = 6;
+  return score;
+}
+
+function planAlly(f, A) {
+  const options = [];
+  const team = teamOf(f, A);
+  const foes = foesOf(f, A);
+  for (const moveName of affordableMoves(A)) {
+    const md = engine.getMoveData(moveName);
+    const targetType = md.target || "enemy";
+    const range = rangeOf(md);
+    const candidates = [];
+    if (targetType === "enemy") {
+      for (const T of foes) candidates.push({ T: T, score: scoreOnEnemy(f, A, moveName, md, T) });
+    } else if (targetType === "self") {
+      candidates.push({ T: A, score: scoreOnSelf(f, A, moveName, md) });
+    } else if (targetType === "all-allies") {
+      candidates.push({ T: A, score: scoreOnTeam(f, A, moveName, md) });
+    } else if (targetType === "ally") {
+      for (const T of team) {
+        if (T === A) continue;
+        candidates.push({ T: T, score: scoreOnAlly(f, A, moveName, md, T) });
+      }
+    }
+    for (const cand of candidates) {
+      if (cand.score === null || cand.score === undefined) continue;
+      const dist = cand.T === A ? 0 : actorDistance(A, cand.T);
+      const gap = Math.max(0, dist - range);
+      const reachable = gap <= A.steps;
+      let score = cand.score - (md.mpCost || 0) * 1.2 + Math.random() * 3;
+      if (!reachable) score -= 6 + 5 * gap;
+      options.push({ moveName: moveName, T: cand.T, score: score, reachable: reachable, range: range, self: cand.T === A });
+    }
+  }
+  options.sort((a, b) => b.score - a.score);
+  return options;
+}
+
+function walkThenAct(f, A, moveName, T, selfCast, range) {
+  const walk = () => {
+    if (f.ended) return;
+    const dist = selfCast ? 0 : actorDistance(A, T);
+    if (selfCast || dist <= range) {
+      if (!selfCast) faceToward(A, T);
+      performAction(f, A, "move", moveName, selfCast ? A : T);
+      return;
+    }
+    if (A.steps > 0 && stepToward(f, A, T)) {
+      A.steps = A.steps - 1;
+      schedule(f, ENEMY_STEP_MS, walk);
+      return;
+    }
+    finishTurn(f, A, false);
+  };
+  walk();
+}
+
+function runAllyTurn(f, A) {
+  const options = planAlly(f, A);
+  if (options.length === 0) {
+    const foe = nearestFoe(f, A);
+    if (foe && A.c.mp >= A.c.maxMp) {
+      const closer = () => {
+        if (f.ended) return;
+        if (A.steps > 0 && actorDistance(A, foe) > 1 && stepToward(f, A, foe)) {
+          A.steps = A.steps - 1;
+          schedule(f, ENEMY_STEP_MS, closer);
+          return;
+        }
+        finishTurn(f, A, false);
+      };
+      closer();
+      return;
+    }
+    performAction(f, A, "rest", null, null);
+    return;
+  }
+  const best = options[0];
+  let pick = best;
+  if (!best.reachable) {
+    const alt = options.find((o) => o.reachable && o.score > 0 && o.score >= best.score * 0.55);
+    if (alt) pick = alt;
+  }
+  if (pick.score <= 3 && A.c.mp < A.c.maxMp * 0.6) {
+    performAction(f, A, "rest", null, null);
+    return;
+  }
+  walkThenAct(f, A, pick.moveName, pick.T, pick.self, pick.range);
+}
+
 function notice(p, text) {
   ctx.sendPlayer(p, { type: "c_notice", text: text });
 }
@@ -804,11 +1173,11 @@ function handleAttack(f, A, data) {
       return;
     }
     if (targetType === "ally") {
-      if (T.kind !== A.kind) {
+      if (sideOf(T) !== sideOf(A)) {
         notice(A.ref, "That move needs an ally as the target.");
         return;
       }
-    } else if (T.kind === A.kind) {
+    } else if (sideOf(T) === sideOf(A)) {
       notice(A.ref, "That move needs an enemy as the target.");
       return;
     }
@@ -835,25 +1204,35 @@ function handleMessage(p, data) {
   if (!A) return true;
 
   if (data.type === "c_flee") {
-    if (f.busy && f.turnActor !== A) {
-      notice(p, "Wait for the current action to finish.");
+    if (f.turnActor !== A || f.busy) {
+      notice(p, "You can only try to flee on your turn.");
       return true;
     }
-    const wasTurn = f.turnActor === A;
-    pushLog(f, `${A.c.name} fled from battle!`);
+    if (f.timer) {
+      clearTimeout(f.timer);
+      f.timer = null;
+    }
+    if (Math.random() >= FLEE_CHANCE) {
+      pushLog(f, `${A.c.name} tried to flee, but couldn't get away!`);
+      finishTurn(f, A, false);
+      return true;
+    }
+    pushLog(f, `${A.c.name} got away!`);
+    const spot = findFleeSpot(f, p);
     releasePlayer(f, A, FLEE_COOLDOWN_MS);
     ctx.sendPlayer(p, { type: "c_end", fight: f.id, result: "fled", hp: p.hp, mp: p.mp });
-    ctx.sendGms(null, { type: "gm_player", player: ctx.publicPlayer(p) });
+    if (spot) {
+      ctx.teleportPlayer(p, p.layer, spot.col, spot.row);
+    } else {
+      ctx.sendGms(null, { type: "gm_player", player: ctx.publicPlayer(p) });
+    }
+    f.turnActor = null;
     if (livingOfKind(f, "player").length === 0) {
       endFight(f, "fled");
       return true;
     }
     emitState(f);
-    if (wasTurn && !f.busy) {
-      if (f.timer) clearTimeout(f.timer);
-      f.turnActor = null;
-      schedule(f, BETWEEN_TURNS_MS, () => nextTurn(f));
-    }
+    schedule(f, BETWEEN_TURNS_MS, () => nextTurn(f));
     return true;
   }
 
@@ -906,6 +1285,7 @@ function onPlayerLeave(p) {
   if (!A || A.gone) return;
   syncPlayerVitals(A);
   A.gone = true;
+  releaseAllies(f, p);
   pushLog(f, `${A.c.name} left the battle.`);
   if (livingOfKind(f, "player").length === 0) {
     endFight(f, "fled");
@@ -929,7 +1309,7 @@ function onEntityRemoved(e) {
   if (!A || A.gone) return;
   A.gone = true;
   pushLog(f, `${A.c.name} vanished!`);
-  if (livingOfKind(f, "enemy").length === 0) {
+  if (A.kind === "enemy" && livingOfKind(f, "enemy").length === 0) {
     endFight(f, "win");
     return;
   }
