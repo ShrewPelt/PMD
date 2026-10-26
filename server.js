@@ -10,6 +10,42 @@ const ITEM_FX = worldItems.allInfo();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const ITEMS_DIR = path.join(__dirname, "StorageData", "Items");
+let itemIndexCache = { at: 0, data: null };
+
+function scanItemIcons(dir, root, out) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (e) {
+    return;
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      scanItemIcons(full, root, out);
+    } else if (entry.name.toLowerCase().endsWith(".png")) {
+      const rel = path.relative(root, full).split(path.sep).join("/");
+      out[entry.name.slice(0, -4)] = "/items/" + rel;
+    }
+  }
+}
+
+app.get("/items-index.json", (req, res) => {
+  const now = Date.now();
+  if (!itemIndexCache.data || now - itemIndexCache.at > 10000) {
+    const fresh = {};
+    try {
+      const old = JSON.parse(fs.readFileSync(path.join(__dirname, "public", "items-index.json"), "utf8"));
+      for (const k of Object.keys(old)) fresh[k] = old[k];
+    } catch (e) {}
+    scanItemIcons(ITEMS_DIR, ITEMS_DIR, fresh);
+    itemIndexCache = { at: now, data: fresh };
+  }
+  res.set("Cache-Control", "no-cache");
+  res.json(itemIndexCache.data);
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 app.use("/items", express.static(path.join(__dirname, "StorageData", "Items")));
 app.use("/combaticons", express.static(path.join(__dirname, "StorageData", "CombatSprites")));
