@@ -1460,7 +1460,7 @@ function combatPrefetch(scene, dex, name) {
 
 function combatAnimName(d) {
   const n = String(d.move || "").toLowerCase();
-  if (d.anim === "self") return null;
+  if (d.anim === "self" || d.kind === "item") return null;
   if (d.anim === "ranged") return "Shoot";
   if (/kick|stomp|stamp|trample/.test(n)) return "Kick";
   if (/scratch|slash|cut|claw|bite|crunch|peck|fang|slice|fury/.test(n)) return "Strike";
@@ -1494,7 +1494,17 @@ function combatFlash(scene, spr) {
   scene.time.delayedCall(300, () => { if (spr.active) spr.clearTint(); });
 }
 
+function combatConeFlash(scene, tiles, fire) {
+  const color = fire ? 0xff7a1a : 0xb06aff;
+  for (const t of tiles) {
+    const rect = scene.add.rectangle(t.col * TILE + TILE / 2, t.row * TILE + TILE / 2, TILE - 2, TILE - 2, color, 0.55);
+    rect.setDepth(60);
+    scene.tweens.add({ targets: rect, alpha: 0, duration: 750, onComplete: () => rect.destroy() });
+  }
+}
+
 function combatImpact(scene, d) {
+  if (Array.isArray(d.cone)) combatConeFlash(scene, d.cone, d.moveType === "Fire");
   for (const ch of d.changes || []) {
     const spr = combatSprite(ch.id);
     const a = COMBAT.actors[ch.id];
@@ -1762,8 +1772,187 @@ if (document.readyState === "loading") document.addEventListener("DOMContentLoad
 else combatInitUi();
 
 
+let itemFx = {};
+const ITEM_RANGE = 3;
+
+function itemEl() {
+  return document.getElementById("itemMenu");
+}
+
+function itemToast(text) {
+  let el = document.getElementById("itemToast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "itemToast";
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.classList.add("show");
+  if (el._timer) clearTimeout(el._timer);
+  el._timer = setTimeout(() => el.classList.remove("show"), 4200);
+}
+
+function itemMenuClose() {
+  const el = itemEl();
+  if (el) el.classList.add("hidden");
+}
+
+function itemMenuOpenNow() {
+  const el = itemEl();
+  return !!el && !el.classList.contains("hidden");
+}
+
+function itemSpriteCell(spr) {
+  return { col: Math.floor(spr.x / TILE), row: Math.floor(spr.y / TILE) };
+}
+
+function itemCandidates(fx) {
+  const mine = { col: player.col, row: player.row };
+  const list = [];
+  if (COMBAT.active) {
+    for (const id in COMBAT.actors) {
+      const a = COMBAT.actors[id];
+      if (a.dead || String(a.id) === String(myId)) continue;
+      const isFoe = a.kind === "enemy";
+      if (fx.rule === "enemy" && !isFoe) continue;
+      if ((fx.rule === "ally" || fx.rule === "self") && isFoe) continue;
+      const spr = combatSprite(a.id);
+      const pos = spr && spr !== "loading" ? itemSpriteCell(spr) : { col: a.col, row: a.row };
+      list.push({ id: a.id, name: a.name, dist: combatDistance(pos, mine), foe: isFoe });
+    }
+  } else {
+    for (const id in otherPlayers) {
+      const spr = otherPlayers[id];
+      if (!spr || spr === "loading") continue;
+      const meta = worldEntityMeta[id];
+      if (meta && meta.kind !== "companion") continue;
+      const name = meta ? meta.name : "Player " + id;
+      list.push({ id: id, name: name, dist: combatDistance(itemSpriteCell(spr), mine), foe: false });
+    }
+  }
+  return list.filter((c) => c.dist <= ITEM_RANGE).sort((a, b) => a.dist - b.dist);
+}
+
+function itemConeCells(col, row, dir) {
+  const vec = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }[dir] || [0, 1];
+  const pc = Math.abs(vec[1]);
+  const pr = Math.abs(vec[0]);
+  const cells = {};
+  for (let d = 1; d <= 3; d++) {
+    for (let l = -(d - 1); l <= d - 1; l++) cells[(col + vec[0] * d + pc * l) + "," + (row + vec[1] * d + pr * l)] = true;
+  }
+  return cells;
+}
+
+function itemConeOptions() {
+  const mine = { col: player.col, row: player.row };
+  const foes = [];
+  if (COMBAT.active) {
+    for (const id in COMBAT.actors) {
+      const a = COMBAT.actors[id];
+      if (a.dead || a.kind !== "enemy") continue;
+      const spr = combatSprite(a.id);
+      const pos = spr && spr !== "loading" ? itemSpriteCell(spr) : { col: a.col, row: a.row };
+      foes.push({ name: a.name, pos: pos, dist: combatDistance(pos, mine) });
+    }
+  }
+  const options = [];
+  for (const f of foes) {
+    if (f.dist > 3) continue;
+    const dc = f.pos.col - mine.col;
+    const dr = f.pos.row - mine.row;
+    const dir = Math.abs(dc) >= Math.abs(dr) ? (dc > 0 ? "right" : "left") : (dr > 0 ? "down" : "up");
+    const cells = itemConeCells(mine.col, mine.row, dir);
+    let caught = 0;
+    for (const g of foes) {
+      if (cells[g.pos.col + "," + g.pos.row]) caught++;
+    }
+    options.push({ label: "Use: cone toward " + f.name + " (" + caught + " foe" + (caught === 1 ? "" : "s") + " in the cone)", dir: dir });
+  }
+  return options;
+}
+
+function itemSend(name, mode, target, dir) {
+  if (COMBAT.active) {
+    gmSend({ type: "c_item", name: name, mode: mode, target: target, dir: dir || null });
+    COMBAT.myTurn = false;
+    combatSetMenu(false);
+    combatRenderBanner();
+  } else {
+    gmSend({ type: "item_use", name: name, mode: mode, target: target });
+  }
+  itemMenuClose();
+}
+
+function itemMenuTry() {
+  if (!worldPlayerMode) return false;
+  if (itemMenuOpenNow()) {
+    itemMenuClose();
+    return true;
+  }
+  if (!inventoryOpen || selectedSlot < 0 || !inventoryItems[selectedSlot]) return false;
+  const name = inventoryItems[selectedSlot].name;
+  const fx = itemFx[name];
+  if (!fx) {
+    itemToast(name + " has no use right now.");
+    return true;
+  }
+  if (fx.bad) {
+    itemToast(fx.bad);
+    return true;
+  }
+  if (COMBAT.active && !COMBAT.myTurn) {
+    itemToast("Wait for your turn to use items.");
+    return true;
+  }
+  if (!COMBAT.active && !fx.x) {
+    itemToast(name + " can only be used in battle.");
+    return true;
+  }
+  const el = itemEl();
+  el.innerHTML = "";
+  const title = document.createElement("div");
+  title.className = "imtitle";
+  title.textContent = name + (fx.r ? " (relic: not used up)" : "");
+  el.appendChild(title);
+  const addButton = (label, cls, fn) => {
+    const b = document.createElement("button");
+    b.className = "imbtn " + cls;
+    b.textContent = label;
+    b.addEventListener("click", fn);
+    el.appendChild(b);
+  };
+  if (fx.u && fx.k) {
+    const opts = itemConeOptions();
+    for (const o of opts) addButton(o.label, "use", () => itemSend(name, "use", null, o.dir));
+    if (opts.length === 0) addButton("Use: unleash a cone in front of you", "use", () => itemSend(name, "use", null, null));
+  } else if (fx.u) {
+    addButton("Use on yourself", "use", () => itemSend(name, "use", null, null));
+  }
+  if (fx.t) {
+    const cands = itemCandidates(fx);
+    if (cands.length === 0) {
+      const none = document.createElement("div");
+      none.className = "imnone";
+      none.textContent = "Nobody within " + ITEM_RANGE + " tiles to throw it at.";
+      el.appendChild(none);
+    }
+    for (const c of cands) {
+      addButton("Throw at " + c.name + " (" + c.dist + " tile" + (c.dist === 1 ? "" : "s") + ")", c.foe ? "foe" : "ally", () => itemSend(name, "throw", c.id));
+    }
+  }
+  addButton("Cancel", "cancel", itemMenuClose);
+  el.classList.remove("hidden");
+  return true;
+}
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && itemMenuOpenNow()) itemMenuClose();
+});
+
 window.worldHook = function (scene, data) {
   if (data.type === "init" && data.world) {
+    if (data.itemFx) itemFx = data.itemFx;
     if (data.role === "gm") {
       enterGmWorld(scene);
       return true;
@@ -1774,6 +1963,28 @@ window.worldHook = function (scene, data) {
 
   if (typeof data.type === "string" && data.type.indexOf("c_") === 0) {
     return combatMessage(scene, data);
+  }
+
+  if (data.type === "itemused") {
+    if (data.consumed) removeFromInventory(data.name);
+    else if (inventoryOpen) refreshInventoryPanel();
+    return true;
+  }
+  if (data.type === "item_result") {
+    itemToast(data.text);
+    if (COMBAT.active) combatAddLog(data.text);
+    updateReadout(data.text);
+    return true;
+  }
+  if (data.type === "vitals") {
+    player.hp = data.hp;
+    player.mp = data.mp;
+    player.maxHp = data.maxHp;
+    player.maxMp = data.maxMp;
+    playerHp = data.hp;
+    playerMaxHp = data.maxHp;
+    if (inventoryOpen) refreshInventoryPanel();
+    return true;
   }
 
   if (worldPlayerMode) {

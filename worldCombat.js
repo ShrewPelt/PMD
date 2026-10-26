@@ -2,6 +2,8 @@ const engine = require("./Utils/combat");
 const { getMoveRestriction, SUPPORT_EFFECTS } = require("./Utils/Combat/applyMove");
 const { effectiveSpeed } = require("./Utils/Combat/turnOrder");
 const { registerMove } = require("./Utils/Combat/moveData");
+const worldItems = require("./worldItems");
+const battleItems = require("./Utils/battleItems");
 
 const MOVE_STEPS = 3;
 const PLAYER_TURN_MS = 30000;
@@ -426,10 +428,8 @@ function defeatPlayer(f, A) {
 function downEnemy(f, A) {
   const e = A.ref;
   e._fight = null;
-  e.down = true;
-  e._downUntil = Date.now() + RESPAWN_MS;
   e.state = "idle";
-  ctx.hideEntity(e);
+  ctx.removeEntity(e.id);
 }
 
 function resetEnemy(A) {
@@ -492,11 +492,43 @@ function endFight(f, result) {
   ctx.sendGms(f.layer, { type: "c_end", fight: f.id, result: result });
 }
 
+function tryAutoRevive(A) {
+  if (A.kind === "enemy" || A.c.hp > 0) return null;
+  const inv = Array.isArray(A.ref._inv) ? A.ref._inv : [];
+  const norm = (n) => String(n).toLowerCase().replace(/\s+/g, "");
+  if (inv.some((s) => s && norm(s.name) === "theshade")) {
+    A.c.hp = A.c.maxHp;
+    engine.clearAilmentsKeepToxin(A.c);
+    return `The Shade prevents ${A.c.name} from fainting and forced them back up again!`;
+  }
+  if (inv.some((s) => s && norm(s.name) === "shadeling")) {
+    A.c.hp = Math.min(1, A.c.maxHp);
+    engine.clearAilmentsKeepToxin(A.c);
+    return `The Shadeling clings to ${A.c.name} and refuses to let them fall | they cling on with 1 HP!`;
+  }
+  for (const slot of inv) {
+    if (!slot || !battleItems.reviveInfoFor(slot.name)) continue;
+    const seed = slot.name;
+    const amount = battleItems.reviveAmount(battleItems.reviveInfoFor(seed), A.c.maxHp);
+    A.c.hp = amount;
+    engine.clearAilmentsKeepToxin(A.c);
+    removeOneFromInventory(A.ref, seed);
+    if (A.kind === "player") ctx.sendPlayer(A.ref, { type: "itemused", name: seed, consumed: true });
+    return `${A.c.name}'s ${seed} activated! It sprang back with ${amount} HP!`;
+  }
+  return null;
+}
+
 function removeFainted(f) {
   const lines = [];
   for (const id in f.actors) {
     const A = f.actors[id];
     if (A.gone || A.c.hp > 0 || A.fainted) continue;
+    const revived = tryAutoRevive(A);
+    if (revived) {
+      lines.push(revived);
+      continue;
+    }
     A.fainted = true;
     const already = f.log.slice(-8).some((line) => line.indexOf(A.c.name + " fainted") !== -1);
     if (!already) lines.push(`${A.c.name} fainted!`);
@@ -582,6 +614,7 @@ function finishTurn(f, A, skipTicks) {
   if (A.c.hp > 0 && !skipTicks) {
     lines.push(...tickAllActors(f));
   }
+  if (A.kind === "player") worldItems.tickCooldowns(A.ref._sheet);
   if (A.c.hp > 0) {
     const stageMsg = engine.tickStages(A.c);
     if (stageMsg) lines.push(stageMsg);
@@ -1192,6 +1225,227 @@ function handleAttack(f, A, data) {
   performAction(f, A, "move", moveName, T);
 }
 
+function removeOneFromInventory(ref, name) {
+  for (let i = 0; i < ref._inv.length; i++) {
+    if (ref._inv[i].name !== name) continue;
+    ref._inv[i].count = ref._inv[i].count - 1;
+    if (ref._inv[i].count <= 0) ref._inv.splice(i, 1);
+    return true;
+  }
+  return false;
+}
+
+function inventoryHas(ref, name) {
+  for (const entry of ref._inv) {
+    if (entry.name === name && entry.count > 0) return true;
+  }
+  return false;
+}
+
+function arenaFor(f, A) {
+  return {
+    foes: foesOf(f, A),
+    allies: teamOf(f, A),
+    pos: (X) => actorPos(X),
+    direction: (X) => X.ref.direction || "down",
+    sameSideAs: (X) => livingSide(f, sideOf(X))
+  };
+}
+
+function handleItem(f, A, data) {
+  if (A.kind !== "player") return;
+  const name = String(data.name || "");
+  if (!inventoryHas(A.ref, name)) {
+    notice(A.ref, "You don't have that item.");
+    return;
+  }
+  const cls = worldItems.classify(name);
+  if (!cls) {
+    notice(A.ref, `${name} can't be used.`);
+    return;
+  }
+  if (cls.unsupported) {
+    notice(A.ref, cls.unsupported);
+    return;
+  }
+  const mode = data.mode === "throw" ? "throw" : "use";
+  if (mode === "use" && !cls.canUse) {
+    notice(A.ref, `${name} has to be thrown at a target.`);
+    return;
+  }
+  if (mode === "throw" && !cls.canThrow) {
+    notice(A.ref, `${name} can only be used on yourself.`);
+    return;
+  }
+  if (worldItems.getCooldown(A.ref._sheet, name) > 0) {
+    notice(A.ref, `${name} is on cooldown | ${worldItems.getCooldown(A.ref._sheet, name)} more turn(s).`);
+    return;
+  }
+  if (mode === "use" && cls.cone && typeof data.dir === "string" && ctx.DELTAS[data.dir]) {
+    A.ref.direction = data.dir;
+    ctx.broadcastFacing(A.ref);
+  }
+  let T = null;
+  if (mode === "throw") {
+    T = actorById(f, data.target);
+    if (!T || T.c.hp <= 0 || T.gone) {
+      notice(A.ref, "Pick a valid target.");
+      return;
+    }
+    const sameSide = sideOf(T) === sideOf(A);
+    if (cls.rule === "enemy" && sameSide) {
+      notice(A.ref, `${name} has to be thrown at an enemy.`);
+      return;
+    }
+    if ((cls.rule === "ally" || cls.rule === "self") && !sameSide) {
+      notice(A.ref, `${name} has to be thrown at an ally.`);
+      return;
+    }
+    const dist = actorDistance(A, T);
+    if (dist > worldItems.THROW_RANGE) {
+      notice(A.ref, `${T.c.name} is too far to throw at (${dist} tiles, max ${worldItems.THROW_RANGE}).`);
+      return;
+    }
+    if (T !== A) {
+      faceToward(A, T);
+      ctx.broadcastFacing(A.ref);
+    }
+  }
+
+  const before = {};
+  for (const id in f.actors) {
+    const X = f.actors[id];
+    before[id] = { hp: X.c.hp, mp: X.c.mp };
+  }
+  const res = worldItems.resolveInCombat(cls, A, mode, T, arenaFor(f, A));
+  if (!res.success) {
+    notice(A.ref, res.log);
+    return;
+  }
+  if (!cls.relic) removeOneFromInventory(A.ref, name);
+  if (cls.cooldown) worldItems.setCooldown(A.ref._sheet, name, cls.cooldown);
+  if (cls.userMp) A.c.mp = Math.min(A.c.maxMp, A.c.mp + cls.userMp);
+  ctx.sendPlayer(A.ref, { type: "itemused", name: name, consumed: !cls.relic });
+
+  const changes = [];
+  for (const id in f.actors) {
+    const X = f.actors[id];
+    const b = before[id];
+    if (!b) continue;
+    if (X.c.hp !== b.hp || X.c.mp !== b.mp) changes.push({ id: X.id, hp: Math.max(0, X.c.hp), mp: Math.max(0, X.c.mp), dhp: X.c.hp - b.hp });
+  }
+
+  f.busy = true;
+  if (f.timer) {
+    clearTimeout(f.timer);
+    f.timer = null;
+  }
+  A.acted = true;
+  syncAllVitals(f);
+  const fireType = /blast|firebomb|bomb/i.test(name) ? "Fire" : null;
+  const payload = {
+    type: "c_act",
+    fight: f.id,
+    actor: A.id,
+    target: T ? T.id : A.id,
+    kind: "item",
+    move: null,
+    item: name,
+    moveType: fireType,
+    category: null,
+    anim: mode === "throw" && T && T !== A ? "ranged" : "self",
+    lines: [res.log],
+    changes: changes,
+    cone: res.cone || null,
+    ms: ACTION_MS
+  };
+  f.log.push(res.log);
+  while (f.log.length > LOG_KEEP) f.log.shift();
+  emit(f, payload);
+  schedule(f, ACTION_MS, () => {
+    f.busy = false;
+    emitState(f);
+    finishTurn(f, A, false);
+  });
+}
+
+function itemResult(p, ok, text) {
+  ctx.sendPlayer(p, { type: "item_result", ok: ok, text: text });
+}
+
+function useItemOutside(p, data) {
+  if (p._fight) {
+    itemResult(p, false, "Use items from the battle menu during a fight.");
+    return;
+  }
+  const name = String(data.name || "");
+  if (!inventoryHas(p, name)) {
+    itemResult(p, false, "You don't have that item.");
+    return;
+  }
+  const cls = worldItems.classify(name);
+  if (!cls) {
+    itemResult(p, false, `${name} can't be used.`);
+    return;
+  }
+  if (cls.unsupported) {
+    itemResult(p, false, cls.unsupported);
+    return;
+  }
+  if (!cls.outside) {
+    itemResult(p, false, `${name} can only be used in battle.`);
+    return;
+  }
+  const mode = data.mode === "throw" ? "throw" : "use";
+  if (mode === "use" && !cls.canUse) {
+    itemResult(p, false, `${name} has to be thrown at someone.`);
+    return;
+  }
+  if (mode === "throw" && !cls.canThrow) {
+    itemResult(p, false, `${name} can only be used on yourself.`);
+    return;
+  }
+  if (worldItems.getCooldown(p._sheet, name) > 0) {
+    itemResult(p, false, `${name} is on cooldown | ${worldItems.getCooldown(p._sheet, name)} more battle turn(s).`);
+    return;
+  }
+  let targetRef = p;
+  if (mode === "throw") {
+    targetRef = null;
+    const wanted = String(data.target === undefined || data.target === null ? "" : data.target);
+    if (ctx.worldSession.players[wanted]) targetRef = ctx.worldSession.players[wanted];
+    else if (ctx.entities[wanted] && ctx.entities[wanted].kind === "companion") targetRef = ctx.entities[wanted];
+    if (!targetRef || targetRef.layer !== p.layer || targetRef.down) {
+      itemResult(p, false, "Pick a valid target.");
+      return;
+    }
+    if (chebyshev(p.col, p.row, targetRef.col, targetRef.row) > worldItems.THROW_RANGE) {
+      itemResult(p, false, `${targetRef.name} is too far to throw at (max ${worldItems.THROW_RANGE} tiles).`);
+      return;
+    }
+  }
+  const c = buildPlayerCombatant(targetRef);
+  const res = worldItems.resolveOutside(cls, name, c, p.name);
+  if (!res.success) {
+    itemResult(p, false, res.log);
+    return;
+  }
+  targetRef.hp = Math.max(1, Math.min(targetRef.maxHp, c.hp));
+  targetRef.mp = Math.max(0, Math.min(targetRef.maxMp, c.mp));
+  targetRef._sheet.ailments = JSON.parse(JSON.stringify(c.ailments || []));
+  if (!cls.relic) removeOneFromInventory(p, name);
+  if (cls.cooldown) worldItems.setCooldown(p._sheet, name, cls.cooldown);
+  if (cls.userMp) p.mp = Math.min(p.maxMp, p.mp + cls.userMp);
+  ctx.sendPlayer(p, { type: "itemused", name: name, consumed: !cls.relic });
+  const intro = mode === "throw" && targetRef !== p ? `${p.name} tossed the ${name} to ${targetRef.name}. ` : "";
+  itemResult(p, true, intro + res.log);
+  if (targetRef.kind !== "companion") {
+    ctx.sendPlayer(targetRef, { type: "vitals", hp: targetRef.hp, mp: targetRef.mp, maxHp: targetRef.maxHp, maxMp: targetRef.maxMp });
+    if (targetRef !== p) ctx.sendPlayer(targetRef, { type: "item_result", ok: true, text: `${p.name} tossed you a ${name}. ${res.log}` });
+    ctx.sendGms(null, { type: "gm_player", player: ctx.publicPlayer(targetRef) });
+  }
+}
+
 function handleMessage(p, data) {
   if (!data || typeof data.type !== "string" || data.type.charAt(0) !== "c") return false;
   if (data.type.indexOf("c_") !== 0) return false;
@@ -1243,6 +1497,8 @@ function handleMessage(p, data) {
 
   if (data.type === "c_attack") {
     handleAttack(f, A, data);
+  } else if (data.type === "c_item") {
+    handleItem(f, A, data);
   } else if (data.type === "c_rest") {
     performAction(f, A, "rest", null, null);
   } else if (data.type === "c_end") {
@@ -1355,4 +1611,4 @@ function shutdown() {
   for (const id of Object.keys(fights)) endFight(fights[id], "shutdown");
 }
 
-module.exports = { init, tick, handleMessage, canPlayerMove, afterPlayerMove, onPlayerLeave, onEntityRemoved, fightOf, isInFight, shutdown, RESPAWN_MS };
+module.exports = { init, tick, handleMessage, canPlayerMove, afterPlayerMove, onPlayerLeave, onEntityRemoved, fightOf, isInFight, shutdown, useItemOutside, RESPAWN_MS };

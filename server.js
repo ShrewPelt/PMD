@@ -4,6 +4,8 @@ const http = require("http");
 const WebSocket = require("ws");
 const fs = require("fs");
 const worldCombat = require("./worldCombat");
+const worldItems = require("./worldItems");
+const ITEM_FX = worldItems.allInfo();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -809,7 +811,7 @@ function queueWorldSave(p, final) {
   const vitalsChanged = p.hp !== p._reportedHp || p.mp !== p._reportedMp;
   if (!final && Object.keys(delta).length === 0 && kills.length === 0 && !vitalsChanged) return;
   const ailments = p._sheet && Array.isArray(p._sheet.ailments) ? p._sheet.ailments : [];
-  pendingSaves.push({ id: makeToken(), userId: p.userId, name: p.name, slot: p._slot, pass: p._pass, delta: delta, kills: kills, hp: p.hp, mp: p.mp, ailments: ailments, layer: p.layer, col: p.col, row: p.row, final: final, ts: Date.now() });
+  pendingSaves.push({ id: makeToken(), kind: p._npcName ? "npc" : undefined, npcName: p._npcName || undefined, userId: p.userId, name: p.name, slot: p._slot, pass: p._pass, delta: delta, kills: kills, hp: p.hp, mp: p.mp, ailments: ailments, layer: p.layer, col: p.col, row: p.row, final: final, ts: Date.now() });
   p._reported = current;
   p._reportedHp = p.hp;
   p._reportedMp = p.mp;
@@ -1085,6 +1087,7 @@ app.post("/api/world/join", (req, res) => {
     maxMp: num(sheet.maxMp, num(sheet.mp, 10)),
     inventory: Array.isArray(sheet.inventory) ? sheet.inventory.filter((e) => e && e.name).map((e) => ({ name: String(e.name), count: num(e.count, 1) })) : [],
     sheet: cleanSheet(sheet),
+    npcName: body.npcName ? String(body.npcName).slice(0, 60) : null,
     companions: (Array.isArray(body.companions) ? body.companions : []).map(cleanCompanion).filter((c) => c).slice(0, 5)
   };
   worldByUser[userId] = pass;
@@ -1966,6 +1969,7 @@ function handleWorldConnection(socket, pass) {
     maxMp: info.maxMp,
     _key: key,
     _slot: info.slot,
+    _npcName: info.npcName || null,
     _pass: pass,
     _sheet: info.sheet || cleanSheet({}),
     _inv: inventory,
@@ -1984,7 +1988,7 @@ function handleWorldConnection(socket, pass) {
     if (q) players[seenId] = publicPlayer(q);
   }
   players[id] = publicPlayer(p);
-  sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W, p.row - VIEW_HALF_H, w, h), inventory: inventory, sheet: clientSheet(p._sheet) });
+  sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W, p.row - VIEW_HALF_H, w, h), inventory: inventory, sheet: clientSheet(p._sheet), itemFx: ITEM_FX });
   p._kills = [];
   p._reportedHp = p.hp;
   p._reportedMp = p.mp;
@@ -2016,6 +2020,8 @@ function handleWorldConnection(socket, pass) {
       }
     } else if (data.type === "interact") {
       handleInteract(me);
+    } else if (data.type === "item_use") {
+      worldCombat.useItemOutside(me, data);
     } else if (data.type === "exit") {
       const exitUser = me.userId;
       forceLeaveUser(exitUser, "You left the world. Your character is saved.");
@@ -2105,6 +2111,7 @@ worldCombat.init({
   broadcastEntity: broadcastEntity,
   broadcastFacing: broadcastFacing,
   hideEntity: hideEntity,
+  removeEntity: removeEntity,
   publicPlayer: publicPlayer,
   layerSpawn: layerSpawn,
   teleportPlayer: teleportPlayer,

@@ -117,6 +117,27 @@
   .cbtlabel { font-size: 12px; color: #c0c0d8; }
   #cbLog { max-height: 150px; overflow-y: auto; font-size: 12px; line-height: 1.4; color: #d8d8ec; border-top: 1px solid #3a3a55; padding-top: 6px; }
 
+  #itemMenu {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 60;
+    min-width: 280px; max-width: 420px; padding: 12px; border-radius: 8px;
+    background: rgba(18,18,32,0.96); border: 2px solid #ffffff; color: #ffffff;
+  }
+  #itemMenu.hidden { display: none; }
+  .imtitle { font-weight: bold; margin-bottom: 8px; }
+  .imbtn { display: block; width: 100%; margin-top: 5px; padding: 7px 9px; text-align: left; border-radius: 6px; cursor: pointer; font-size: 13px; color: #ffffff; background: rgba(255,255,255,0.08); border: 1px solid #55557a; }
+  .imbtn:hover { background: rgba(255,255,255,0.2); }
+  .imbtn.use { border-color: #5fd06f; }
+  .imbtn.ally { border-color: #5aa8ff; }
+  .imbtn.foe { border-color: #d65151; }
+  .imbtn.cancel { border-color: #888888; }
+  .imnone { font-size: 12px; color: #c0c0d8; margin-top: 6px; }
+  #itemToast {
+    position: fixed; left: 50%; bottom: 70px; transform: translateX(-50%); z-index: 70; max-width: 520px;
+    padding: 8px 12px; border-radius: 6px; background: rgba(18,18,32,0.95); border: 1px solid #ffffff; color: #ffffff; font-size: 13px;
+    opacity: 0; pointer-events: none; transition: opacity 0.25s;
+  }
+  #itemToast.show { opacity: 1; }
+
   #inventory {
     width: 664px;
     margin: 0 auto 24px auto;
@@ -188,10 +209,12 @@
   <div id="cbMenu" class="hidden">
     <div id="cbMoves"></div>
     <div id="cbActions"><button id="cbRest">Rest</button><button id="cbWait">Wait</button><button id="cbFlee">Flee</button></div>
+    <div class="cbtlabel" style="margin-top:6px">Items: press I, highlight an item, then press T.</div>
   </div>
   <div id="cbTargets" class="hidden"></div>
   <div id="cbLog"></div>
 </div>
+<div id="itemMenu" class="hidden"></div>
 <div id="game"></div>
 <div id="chat">
   <input id="chatInput" type="text" autocomplete="off" placeholder="Say something... add an expression like [Happy], [Angry], [Pain]" />
@@ -537,7 +560,7 @@ function create() {
   kb.on("keydown-J", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 2 }); });
   kb.on("keydown-K", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 3 }); });
   kb.on("keydown-L", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 4 }); });
-  kb.on("keydown-T", (e) => { if (e.repeat || chatActive || isGM) return; if (typeof worldInteract === "function") worldInteract(); });
+  kb.on("keydown-T", (e) => { if (e.repeat || chatActive || isGM) return; if (typeof itemMenuTry === "function" && itemMenuTry()) return; if (typeof worldInteract === "function") worldInteract(); });
   kb.on("keydown-I", (e) => { if (e.repeat || chatActive) return; toggleInventory(); });
   kb.on("keydown-F", (e) => { if (e.repeat || chatActive || isGM) return; attemptPickup(); });
   kb.on("keydown-G", (e) => { if (e.repeat || chatActive || isGM) return; attemptDrop(); });
