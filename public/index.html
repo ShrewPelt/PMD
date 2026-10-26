@@ -74,6 +74,49 @@
   .gmline { margin: 4px 0; line-height: 1.35; }
   .gmts { color: #8888aa; font-size: 11px; }
 
+  #cbOrder {
+    position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 6px; align-items: center; z-index: 12;
+    background: rgba(20,20,34,0.88); border: 1px solid #3a3a55; border-radius: 8px;
+    padding: 6px 10px; color: #ffffff; font-size: 12px;
+    max-width: 60vw; flex-wrap: wrap; justify-content: center;
+  }
+  #cbOrder.hidden { display: none; }
+  .cbohead { color: #8888aa; margin-right: 4px; }
+  .cbo { padding: 2px 8px; border-radius: 10px; border: 1px solid #55557a; }
+  .cbo.ally { background: rgba(60,140,255,0.22); }
+  .cbo.foe { background: rgba(230,70,70,0.25); }
+  .cbo.cur { border: 2px solid #ffd23f; font-weight: bold; }
+  #combat {
+    position: fixed; right: 12px; top: 60px; width: 310px; z-index: 11;
+    background: rgba(20,20,34,0.92); border: 1px solid #3a3a55; border-radius: 8px;
+    color: #ffffff; font-size: 13px; padding: 10px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  #combat.hidden { display: none; }
+  #cbTurn { font-weight: bold; color: #ffd23f; }
+  #cbMenu.hidden, #cbTargets.hidden { display: none; }
+  #cbMoves { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .cbmove {
+    text-align: left; padding: 6px 8px; border-radius: 6px; cursor: pointer;
+    background: rgba(255,255,255,0.06); color: #ffffff; border: 2px solid #888888;
+  }
+  .cbmove:disabled { opacity: 0.4; cursor: not-allowed; }
+  .cbmove:hover:not(:disabled) { background: rgba(255,255,255,0.16); }
+  .cbmname { font-weight: bold; font-size: 13px; }
+  .cbminfo { font-size: 10px; color: #c0c0d8; margin-top: 2px; }
+  #cbActions { display: flex; gap: 6px; margin-top: 6px; }
+  #cbActions button, .cbtarget {
+    flex: 1; padding: 6px 8px; border-radius: 6px; border: 1px solid #55557a;
+    background: rgba(255,255,255,0.08); color: #ffffff; cursor: pointer; font-size: 12px;
+  }
+  #cbActions button:hover, .cbtarget:hover:not(:disabled) { background: rgba(255,255,255,0.18); }
+  #cbFlee { border-color: #c0392b !important; }
+  .cbtarget { display: block; width: 100%; margin-top: 4px; text-align: left; }
+  .cbtarget:disabled { opacity: 0.4; cursor: not-allowed; }
+  .cbtlabel { font-size: 12px; color: #c0c0d8; }
+  #cbLog { max-height: 150px; overflow-y: auto; font-size: 12px; line-height: 1.4; color: #d8d8ec; border-top: 1px solid #3a3a55; padding-top: 6px; }
+
   #inventory {
     width: 664px;
     margin: 0 auto 24px auto;
@@ -138,6 +181,16 @@
     <div id="gmloghead">Game Master</div>
     <div id="gmlogbody"></div>
   </div>
+</div>
+<div id="cbOrder" class="hidden"></div>
+<div id="combat" class="hidden">
+  <div id="cbTurn">Battle</div>
+  <div id="cbMenu" class="hidden">
+    <div id="cbMoves"></div>
+    <div id="cbActions"><button id="cbRest">Rest</button><button id="cbWait">Wait</button><button id="cbFlee">Flee</button></div>
+  </div>
+  <div id="cbTargets" class="hidden"></div>
+  <div id="cbLog"></div>
 </div>
 <div id="game"></div>
 <div id="chat">
@@ -276,13 +329,8 @@ for (let i = 0; i < EMOTIONS.length; i++) {
 }
 
 const BASE_SLOTS = 10;
-const BAG_BONUS = {
-  none: 0,
-  RescueBag: 5,
-  WhiteBackpack: 10,
-  MerchantSache: 30
-};
-let carriedBag = "none";
+let invCapacity = BASE_SLOTS;
+let invSheet = { coins: 0, accessories: { back: null, neck: null, head: null }, capacity: BASE_SLOTS };
 
 const config = {
   type: Phaser.AUTO,
@@ -436,7 +484,6 @@ function create() {
   kb.on("keydown-R", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "use" }); });
   kb.on("keydown-O", (e) => { if (e.repeat || chatActive) return; debugHp(-8); });
   kb.on("keydown-P", (e) => { if (e.repeat || chatActive) return; debugHp(8); });
-  kb.on("keydown-B", (e) => { if (e.repeat || chatActive) return; cycleBag(); });
   kb.on("keydown-SPACE", (e) => {
     if (chatActive) return;
     e.preventDefault();
@@ -522,14 +569,14 @@ function updateViewRotation() {
   const counter = -viewRot;
   if (player) {
     player.feetOff = (TILE / 2 - 2) - (hasFloorItemAt(player.col, player.row) ? ITEM_LIFT : 0);
-    player.setOrigin(0.5, 1 - player.feetOff / (player.height * player.scaleY));
+    player.setOrigin(0.5, player.atkAnim ? 0.5 + (24 - player.feetOff) / (player.height * player.scaleY) : 1 - player.feetOff / (player.height * player.scaleY));
     player.setRotation(counter);
   }
   for (const id in otherPlayers) {
     const sp = otherPlayers[id];
     if (sp && sp !== "loading") {
       sp.feetOff = TILE / 2 - 2;
-      sp.setOrigin(0.5, 1 - sp.feetOff / (sp.height * sp.scaleY));
+      sp.setOrigin(0.5, sp.atkAnim ? 0.5 + (24 - sp.feetOff) / (sp.height * sp.scaleY) : 1 - sp.feetOff / (sp.height * sp.scaleY));
       sp.setRotation(counter);
     }
   }
@@ -544,6 +591,7 @@ function updateViewRotation() {
 function syncSpriteFacing(sp) {
   if (!sp || !sp.anims || !sp.anims.currentAnim || !sp.direction) return;
   const current = sp.anims.currentAnim.key;
+  if (current.indexOf("_a_") !== -1) return;
   const kind = current.indexOf("_walk_") !== -1 ? "walk" : "idle";
   const dex = current.split("_")[0];
   const want = dex + "_" + kind + "_" + worldToScreenDir(sp.direction);
@@ -571,6 +619,7 @@ function pollMovement() {
   if (now - comboSince < 45) return;
   const dir = screenToWorldDir([sx, sy]);
   if (!dir) return;
+  if (typeof combatBlocksMove === "function" && combatBlocksMove()) return;
   player.direction = dir;
   sendMove(dir);
   state = "moving";
@@ -668,12 +717,14 @@ function onDirection(scene, dir) {
     return;
   }
 
+  if (typeof combatBlocksMove === "function" && combatBlocksMove()) return;
   sendMove(dir);
   state = "moving";
 }
 
 function lockAction(scene, action) {
   if (isGM || state !== "input") return;
+  if (typeof worldPlayerMode !== "undefined" && worldPlayerMode) return;
 
   lockedAction = action;
   state = "locked";
@@ -940,7 +991,7 @@ function portraitUrl(emotion) {
 }
 
 function slotCount() {
-  return BASE_SLOTS + BAG_BONUS[carriedBag];
+  return invCapacity;
 }
 
 function buildInventoryGrid() {
@@ -982,11 +1033,11 @@ function buildInventoryGrid() {
 function refreshInventoryPanel() {
   const ratio = playerMaxHp > 0 ? playerHp / playerMaxHp : 0;
   document.getElementById("invPortraitImg").src = portraitUrl(emotionForHp(ratio));
-  document.getElementById("invCoins").textContent = "0";
-  document.getElementById("invBag").textContent = carriedBag + " | " + inventoryItems.length + "/" + slotCount() + " slots";
-  document.getElementById("invHead").textContent = "-";
-  document.getElementById("invNeck").textContent = "-";
-  document.getElementById("invBack").textContent = "-";
+  document.getElementById("invCoins").textContent = String(invSheet.coins || 0);
+  document.getElementById("invBag").textContent = (invSheet.accessories.back || "none") + " | " + inventoryItems.length + "/" + slotCount() + " slots";
+  document.getElementById("invHead").textContent = invSheet.accessories.head || "-";
+  document.getElementById("invNeck").textContent = invSheet.accessories.neck || "-";
+  document.getElementById("invBack").textContent = invSheet.accessories.back || "-";
   buildInventoryGrid();
 }
 
@@ -1012,14 +1063,6 @@ function toggleInventory() {
     panel.classList.add("hidden");
     updateReadout("inventory closed");
   }
-}
-
-function cycleBag() {
-  const order = ["none", "RescueBag", "WhiteBackpack", "MerchantSache"];
-  const idx = order.indexOf(carriedBag);
-  carriedBag = order[(idx + 1) % order.length];
-  if (inventoryOpen) refreshInventoryPanel();
-  updateReadout("bag: " + carriedBag + " (" + slotCount() + " slots)");
 }
 
 function debugHp(amount) {
@@ -1085,6 +1128,11 @@ function connectMultiplayer(scene) {
         MAP = data.map;
         drawMap();
         scene.cameras.main.setBounds(0, 0, MAP[0].length * TILE, MAP.length * TILE);
+      }
+      if (data.sheet) {
+        invSheet = data.sheet;
+        invSheet.accessories = invSheet.accessories || { back: null, neck: null, head: null };
+        invCapacity = Math.max(1, data.sheet.capacity || BASE_SLOTS);
       }
       if (Array.isArray(data.inventory)) {
         inventoryItems.length = 0;
@@ -1229,6 +1277,7 @@ function connectMultiplayer(scene) {
         window.alert(data.reason);
       }
     } else if (data.type === "leave") {
+      if (typeof combatHolds === "function" && combatHolds(data.id)) return;
       removeOtherPlayer(data.id);
     }
   });

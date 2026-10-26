@@ -3,6 +3,7 @@ const path = require("path");
 const http = require("http");
 const WebSocket = require("ws");
 const fs = require("fs");
+const worldCombat = require("./worldCombat");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -812,6 +813,7 @@ function queueWorldSave(p, final) {
 function leaveWorldPlayer(id) {
   const p = worldSession.players[id];
   if (!p) return false;
+  worldCombat.onPlayerLeave(p);
   queueWorldSave(p, true);
   worldState.positions[p._key] = { layer: p.layer, col: p.col, row: p.row, direction: p.direction };
   for (const otherId in p._seen) {
@@ -844,6 +846,45 @@ function forceLeaveUser(userId, reason) {
   return left;
 }
 
+function clientSheet(sh) {
+  return { species: sh.species, level: sh.level, types: sh.types, coins: sh.coins, capacity: sh.capacity, accessories: sh.accessories, moves: sh.moves.map((m) => m.name) };
+}
+
+function cleanSheet(sheet) {
+  const acc = sheet.accessories || {};
+  const accName = (v) => (v ? String(v).slice(0, 80) : null);
+  const out = {
+    species: sheet.species ? String(sheet.species) : "",
+    level: num(sheet.level, 1),
+    exp: num(sheet.exp, 0),
+    types: Array.isArray(sheet.types) ? sheet.types.map(String) : [],
+    attack: num(sheet.attack, 1),
+    defense: num(sheet.defense, 1),
+    spAtk: num(sheet.spAtk, 1),
+    spDef: num(sheet.spDef, 1),
+    speed: num(sheet.speed, 1),
+    moves: Array.isArray(sheet.moves) ? sheet.moves.filter((m) => m && m.name).slice(0, 4).map((m) => ({ name: String(m.name), data: m.data && typeof m.data === "object" ? m.data : null })) : [],
+    ailments: Array.isArray(sheet.ailments) ? sheet.ailments : [],
+    immunities: Array.isArray(sheet.immunities) ? sheet.immunities.map(String) : [],
+    gender: sheet.gender ? String(sheet.gender) : null,
+    mood: sheet.mood ? String(sheet.mood) : "Neutral",
+    badge: sheet.badge ? String(sheet.badge) : "Normal",
+    coins: num(sheet.coins, 0),
+    capacity: Math.max(1, Math.min(200, num(sheet.capacity, 10))),
+    variation: sheet.variation ? String(sheet.variation) : null,
+    region: sheet.region ? String(sheet.region) : null,
+    ivs: sheet.ivs && typeof sheet.ivs === "object" ? sheet.ivs : undefined,
+    evs: sheet.evs && typeof sheet.evs === "object" ? sheet.evs : undefined,
+    boosts: sheet.boosts && typeof sheet.boosts === "object" ? sheet.boosts : undefined,
+    nature: sheet.nature ? String(sheet.nature) : null,
+    moveBoosts: sheet.moveBoosts && typeof sheet.moveBoosts === "object" ? sheet.moveBoosts : {},
+    hydrophobic: num(sheet.hydrophobic, 0),
+    shield: num(sheet.shield, 0),
+    accessories: { back: accName(acc.back), neck: accName(acc.neck), head: accName(acc.head) }
+  };
+  return out;
+}
+
 app.post("/api/world/join", (req, res) => {
   if (!checkSecret(req, res)) return;
   const body = req.body || {};
@@ -867,7 +908,8 @@ app.post("/api/world/join", (req, res) => {
     maxHp: num(sheet.maxHp, num(sheet.hp, 30)),
     mp: num(sheet.mp, 10),
     maxMp: num(sheet.maxMp, num(sheet.mp, 10)),
-    inventory: Array.isArray(sheet.inventory) ? sheet.inventory.filter((e) => e && e.name).map((e) => ({ name: String(e.name), count: num(e.count, 1) })) : []
+    inventory: Array.isArray(sheet.inventory) ? sheet.inventory.filter((e) => e && e.name).map((e) => ({ name: String(e.name), count: num(e.count, 1) })) : [],
+    sheet: cleanSheet(sheet)
   };
   worldByUser[userId] = pass;
   writeJsonFile(PASSES_FILE, worldPasses);
@@ -999,6 +1041,7 @@ function gmEntity(e) {
 function entityAt(layer, col, row, ignoreId) {
   for (const id in entities) {
     const e = entities[id];
+    if (e.down) continue;
     if (e.id !== ignoreId && e.layer === layer && e.col === col && e.row === row) return e;
   }
   return null;
@@ -1016,7 +1059,7 @@ function entitiesInWindow(layer, c0, r0, w, h) {
   const out = [];
   for (const id in entities) {
     const e = entities[id];
-    if (e.layer === layer && e.col >= c0 && e.col < c0 + w && e.row >= r0 && e.row < r0 + h) out.push(publicEntity(e));
+    if (!e.down && e.layer === layer && e.col >= c0 && e.col < c0 + w && e.row >= r0 && e.row < r0 + h) out.push(publicEntity(e));
   }
   return out;
 }
@@ -1033,9 +1076,36 @@ function broadcastEntity(e, oldLayer, oldCol, oldRow) {
   if (oldLayer !== null && oldLayer !== e.layer) sendGms(oldLayer, { type: "gm_entity_del", id: e.id });
 }
 
+function hideEntity(e) {
+  for (const pid in worldSession.players) {
+    const q = worldSession.players[pid];
+    if (cellInView(q, e.layer, e.col, e.row)) sendPlayer(q, { type: "e_del", id: e.id });
+  }
+  sendGms(e.layer, { type: "gm_entity_del", id: e.id });
+}
+
+function reviveEntity(e) {
+  e.down = false;
+  e._downUntil = 0;
+  e._fight = null;
+  e.state = "idle";
+  const spot = worldFreeSpot(e.layer, e.homeCol, e.homeRow, e.id);
+  e.col = spot.col;
+  e.row = spot.row;
+  broadcastEntity(e, null, 0, 0);
+}
+
+function broadcastFacing(p) {
+  for (const id in p._seen) {
+    const q = worldSession.players[id];
+    if (q) sendPlayer(q, { type: "face", id: p.id, direction: p.direction });
+  }
+}
+
 function removeEntity(id) {
   const e = entities[id];
   if (!e) return;
+  worldCombat.onEntityRemoved(e);
   for (const pid in worldSession.players) {
     const q = worldSession.players[pid];
     if (cellInView(q, e.layer, e.col, e.row)) sendPlayer(q, { type: "e_del", id: id });
@@ -1083,7 +1153,12 @@ function entityTick() {
   const now = Date.now();
   for (const id in entities) {
     const e = entities[id];
+    if (e.down) {
+      if (now >= e._downUntil) reviveEntity(e);
+      continue;
+    }
     if (!layerHasViewers(e.layer)) continue;
+    if (e._fight) continue;
 
     if (e.kind === "enemy") {
       const near = nearestPlayerTo(e);
@@ -1124,6 +1199,7 @@ function entityTick() {
     broadcastEntity(e, e.layer, oldCol, oldRow);
     scheduleEntitySave();
   }
+  worldCombat.tick();
 }
 
 function cleanLines(value) {
@@ -1261,6 +1337,12 @@ function teleportPlayer(p, layer, col, row) {
 }
 
 function handleWorldMove(p, dir) {
+  const gate = worldCombat.canPlayerMove(p);
+  if (!gate.ok) {
+    sendPlayer(p, { type: "c_notice", text: gate.reason });
+    sendPlayer(p, { type: "moveblocked", direction: p.direction });
+    return;
+  }
   const d = DELTAS[dir];
   if (d) p.direction = dir;
   const nc = d ? p.col + d.dc : p.col;
@@ -1285,6 +1367,11 @@ function handleWorldMove(p, dir) {
   const L = layers[p.layer];
   const portal = tileAt(p.layer, nc, nr) === "P" && L ? L.portals[nc + "," + nr] : null;
   if (portal && validLayerNumber(portal.layer)) {
+    if (worldCombat.isInFight(p)) {
+      sendPlayer(p, { type: "c_notice", text: "You can't leave through a portal during battle." });
+      sendPlayer(p, { type: "moveblocked", direction: p.direction });
+      return;
+    }
     teleportPlayer(p, portal.layer, portal.col, portal.row);
     return;
   }
@@ -1300,6 +1387,7 @@ function handleWorldMove(p, dir) {
   }
   sendGms(null, { type: "gm_player", player: publicPlayer(p) });
   sendView(p);
+  worldCombat.afterPlayerMove(p);
 }
 
 function refreshViewsForCells(layer, cells) {
@@ -1466,7 +1554,7 @@ function sendGmLayer(gm) {
     const parts = k.split(",");
     objList.push([parseInt(parts[0], 10), parseInt(parts[1], 10), L.objects[k].name, L.objects[k].solid ? 1 : 0]);
   }
-  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: L.spawn, floorItems: items, layers: layerSummaries() });
+  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer && !entities[id].down).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: L.spawn, floorItems: items, layers: layerSummaries() });
 }
 
 function handleGmMessage(gm, data) {
@@ -1683,6 +1771,7 @@ function handleWorldConnection(socket, pass) {
     _key: key,
     _slot: info.slot,
     _pass: pass,
+    _sheet: info.sheet || cleanSheet({}),
     _inv: inventory,
     _reported: countInventory(inventory),
     _seen: {},
@@ -1699,7 +1788,7 @@ function handleWorldConnection(socket, pass) {
     if (q) players[seenId] = publicPlayer(q);
   }
   players[id] = publicPlayer(p);
-  sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W, p.row - VIEW_HALF_H, w, h), inventory: inventory });
+  sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W, p.row - VIEW_HALF_H, w, h), inventory: inventory, sheet: clientSheet(p._sheet) });
   sendView(p);
   sendGms(null, { type: "gm_player", player: publicPlayer(p) });
   sendLayerSummaries();
@@ -1713,6 +1802,11 @@ function handleWorldConnection(socket, pass) {
     }
     const me = worldSession.players[socket.playerId];
     if (!me || socket.playerId === null) return;
+
+    if (typeof data.type === "string" && data.type.indexOf("c_") === 0) {
+      worldCombat.handleMessage(me, data);
+      return;
+    }
 
     if (data.type === "face") {
       if (DELTAS[data.direction]) me.direction = data.direction;
@@ -1729,6 +1823,10 @@ function handleWorldConnection(socket, pass) {
     } else if (data.type === "move") {
       handleWorldMove(me, data.dir);
     } else if (data.type === "pickup") {
+      if (worldCombat.isInFight(me)) {
+        sendPlayer(me, { type: "c_notice", text: "You can't pick things up during battle." });
+        return;
+      }
       let idx = -1;
       for (let i = 0; i < worldSession.floorItems.length; i++) {
         const it = worldSession.floorItems[i];
@@ -1750,6 +1848,11 @@ function handleWorldConnection(socket, pass) {
         sendPlayer(me, { type: "pickedup", name: it.name });
       }
     } else if (data.type === "drop") {
+      if (worldCombat.isInFight(me)) {
+        sendPlayer(me, { type: "c_notice", text: "You can't drop things during battle." });
+        sendPlayer(me, { type: "dropfail" });
+        return;
+      }
       const name = String(data.name || "");
       let stackIndex = -1;
       for (let i = 0; i < me._inv.length; i++) {
@@ -1790,6 +1893,23 @@ function handleWorldConnection(socket, pass) {
   });
 }
 
+worldCombat.init({
+  worldSession: worldSession,
+  entities: entities,
+  DELTAS: DELTAS,
+  isWalkable: isWalkable,
+  entityAt: entityAt,
+  playerAt: playerAt,
+  sendPlayer: sendPlayer,
+  sendGms: sendGms,
+  broadcastEntity: broadcastEntity,
+  broadcastFacing: broadcastFacing,
+  hideEntity: hideEntity,
+  publicPlayer: publicPlayer,
+  layerSpawn: layerSpawn,
+  teleportPlayer: teleportPlayer
+});
+
 setInterval(saveWorldState, WORLD_SAVE_INTERVAL);
 setInterval(entityTick, ENTITY_TICK_MS);
 setInterval(saveEntitiesNow, WORLD_SAVE_INTERVAL);
@@ -1801,6 +1921,7 @@ setInterval(() => {
 }, WORLD_CHECKPOINT_INTERVAL);
 
 function shutdownWorld() {
+  worldCombat.shutdown();
   for (const id of Object.keys(worldSession.players)) {
     leaveWorldPlayer(worldSession.players[id].id);
   }

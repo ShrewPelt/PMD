@@ -45,7 +45,7 @@ function entitiesReconcile(scene, list) {
   const wanted = {};
   for (const e of list) wanted[e.id] = true;
   for (const id of Object.keys(otherPlayers)) {
-    if (id.charAt(0) === "e" && !wanted[id]) entityRemove(id);
+    if (id.charAt(0) === "e" && !wanted[id] && !combatHolds(id)) entityRemove(id);
   }
   for (const e of list) entityUpsert(scene, e);
 }
@@ -1120,6 +1120,639 @@ function gmLoadLayer(scene, data) {
   gmUpdateHoverStatus();
 }
 
+const COMBAT = { active: false, id: null, actors: {}, order: [], turn: null, steps: 0, moves: [], myTurn: false, pending: -1, mp: 0, maxMp: 0, turnEndsAt: 0, timerHandle: null, hideHandle: null };
+const COMBAT_TYPE_COLORS = { Normal: 0xc8c8b0, Fire: 0xff7a2a, Water: 0x4a90ff, Electric: 0xffe030, Grass: 0x4ec24e, Ice: 0x9be8ff, Fighting: 0xc03028, Poison: 0xa040c0, Ground: 0xd8b860, Flying: 0xa8b8ff, Psychic: 0xff5a9a, Bug: 0xa8c020, Rock: 0xb8a038, Ghost: 0x7058a0, Dragon: 0x7038f8, Dark: 0x604838, Steel: 0xb8b8d0, Fairy: 0xffaadd };
+const COMBAT_PREFETCH = ["Attack", "Shoot", "Strike"];
+const combatXml = {};
+const combatAnimState = {};
+let combatRangeGfx = null;
+
+function combatEl(id) {
+  return document.getElementById(id);
+}
+
+function combatSprite(id) {
+  if (String(id) === String(myId)) return player;
+  return otherPlayers[id];
+}
+
+function combatHolds(id) {
+  const a = COMBAT.actors[id];
+  return COMBAT.active && !!a && !a.dead;
+}
+
+function combatBlocksMove() {
+  if (!COMBAT.active || worldGmMode) return false;
+  return !(COMBAT.myTurn && COMBAT.steps > 0);
+}
+
+function combatAddLog(lines) {
+  const body = combatEl("cbLog");
+  if (!body) return;
+  const list = Array.isArray(lines) ? lines : [lines];
+  for (const line of list) {
+    if (typeof line !== "string") continue;
+    for (const part of line.split("\n")) {
+      if (!part.trim()) continue;
+      const div = document.createElement("div");
+      div.textContent = part;
+      body.appendChild(div);
+    }
+  }
+  while (body.childNodes.length > 60) body.removeChild(body.firstChild);
+  body.scrollTop = body.scrollHeight;
+}
+
+function combatShowPanel(show) {
+  const panel = combatEl("combat");
+  const order = combatEl("cbOrder");
+  if (!panel || !order) return;
+  if (show) {
+    panel.classList.remove("hidden");
+    order.classList.remove("hidden");
+  } else {
+    panel.classList.add("hidden");
+    order.classList.add("hidden");
+  }
+}
+
+function combatRenderOrder() {
+  const el = combatEl("cbOrder");
+  if (!el) return;
+  el.innerHTML = "";
+  const head = document.createElement("span");
+  head.className = "cbohead";
+  head.textContent = "Turn order";
+  el.appendChild(head);
+  const ids = [];
+  if (COMBAT.turn !== null && COMBAT.turn !== undefined) ids.push(COMBAT.turn);
+  for (const id of COMBAT.order) ids.push(id);
+  let shown = 0;
+  for (let i = 0; i < ids.length && shown < 9; i++) {
+    const a = COMBAT.actors[ids[i]];
+    if (!a || a.dead) continue;
+    const chip = document.createElement("span");
+    chip.className = "cbo " + (a.kind === "enemy" ? "foe" : "ally") + (i === 0 && COMBAT.turn !== null ? " cur" : "");
+    chip.textContent = a.name;
+    el.appendChild(chip);
+    shown++;
+  }
+}
+
+function combatRenderBanner() {
+  const el = combatEl("cbTurn");
+  if (!el) return;
+  const a = COMBAT.turn !== null ? COMBAT.actors[COMBAT.turn] : null;
+  if (!a) {
+    el.textContent = "Battle";
+    return;
+  }
+  if (COMBAT.myTurn) {
+    const left = Math.max(0, Math.ceil((COMBAT.turnEndsAt - Date.now()) / 1000));
+    el.textContent = "Your turn | steps " + COMBAT.steps + " | " + left + "s";
+  } else {
+    el.textContent = a.name + "'s turn";
+  }
+}
+
+function combatSetMenu(show) {
+  combatEl("cbMenu").classList.toggle("hidden", !show);
+  if (!show) {
+    combatEl("cbTargets").classList.add("hidden");
+    COMBAT.pending = -1;
+    combatClearRange();
+  }
+}
+
+function combatRenderMoves() {
+  const box = combatEl("cbMoves");
+  box.innerHTML = "";
+  for (let i = 0; i < COMBAT.moves.length; i++) {
+    const m = COMBAT.moves[i];
+    const btn = document.createElement("button");
+    btn.className = "cbmove";
+    const name = document.createElement("div");
+    name.className = "cbmname";
+    name.textContent = (i + 1) + ". " + m.name;
+    const info = document.createElement("div");
+    info.className = "cbminfo";
+    const power = m.power > 0 ? " P" + m.power : "";
+    info.textContent = m.type + " " + m.category + power + " | MP " + m.mpCost + " | R" + m.range;
+    btn.appendChild(name);
+    btn.appendChild(info);
+    if (m.unsupported || COMBAT.mp < m.mpCost) btn.disabled = true;
+    btn.style.borderColor = "#" + (COMBAT_TYPE_COLORS[m.type] || 0x888888).toString(16).padStart(6, "0");
+    btn.addEventListener("click", () => combatSelectMove(i));
+    box.appendChild(btn);
+  }
+}
+
+function combatMe() {
+  return COMBAT.actors[myId];
+}
+
+function combatDistance(a, b) {
+  return Math.max(Math.abs(a.col - b.col), Math.abs(a.row - b.row));
+}
+
+function combatClearRange() {
+  if (combatRangeGfx) combatRangeGfx.clear();
+}
+
+function combatShowRange(range) {
+  if (!sceneRef) return;
+  if (!combatRangeGfx) {
+    combatRangeGfx = sceneRef.add.graphics();
+    combatRangeGfx.setDepth(5);
+  }
+  combatRangeGfx.clear();
+  const me = combatMe();
+  if (!me || range <= 0) return;
+  const mine = { col: player.col, row: player.row };
+  combatRangeGfx.fillStyle(0xffd23f, 0.16);
+  for (let dc = -range; dc <= range; dc++) {
+    for (let dr = -range; dr <= range; dr++) {
+      if (dc === 0 && dr === 0) continue;
+      combatRangeGfx.fillRect((mine.col + dc) * TILE + 1, (mine.row + dr) * TILE + 1, TILE - 2, TILE - 2);
+    }
+  }
+  combatRangeGfx.lineStyle(2, 0xff5050, 0.9);
+  for (const id in COMBAT.actors) {
+    const a = COMBAT.actors[id];
+    if (a.dead || a.kind !== "enemy") continue;
+    const spr = combatSprite(a.id);
+    if (!spr || spr === "loading") continue;
+    const c = Math.floor(spr.x / TILE);
+    const r = Math.floor(spr.y / TILE);
+    if (combatDistance({ col: c, row: r }, mine) <= range) combatRangeGfx.strokeRect(c * TILE + 2, r * TILE + 2, TILE - 4, TILE - 4);
+  }
+}
+
+function combatSendAttack(index, targetId) {
+  gmSend({ type: "c_attack", move: index, target: targetId });
+  COMBAT.myTurn = false;
+  combatSetMenu(false);
+  combatRenderBanner();
+}
+
+function combatSelectMove(index) {
+  if (!COMBAT.myTurn) return;
+  const m = COMBAT.moves[index];
+  if (!m || m.unsupported || COMBAT.mp < m.mpCost) return;
+  if (m.target === "self" || m.target === "all-allies") {
+    combatSendAttack(index, null);
+    return;
+  }
+  const wantEnemy = m.target !== "ally";
+  const mine = { col: player.col, row: player.row };
+  const cands = [];
+  for (const id in COMBAT.actors) {
+    const a = COMBAT.actors[id];
+    if (a.dead) continue;
+    if (wantEnemy && a.kind !== "enemy") continue;
+    if (!wantEnemy && a.kind !== "player") continue;
+    const spr = combatSprite(a.id);
+    const pos = spr && spr !== "loading" ? { col: Math.floor(spr.x / TILE), row: Math.floor(spr.y / TILE) } : { col: a.col, row: a.row };
+    cands.push({ a: a, dist: combatDistance(pos, mine) });
+  }
+  if (cands.length === 0) return;
+  if (cands.length === 1) {
+    combatSendAttack(index, cands[0].a.id);
+    return;
+  }
+  COMBAT.pending = index;
+  cands.sort((x, y) => x.dist - y.dist);
+  const box = combatEl("cbTargets");
+  box.innerHTML = "";
+  const label = document.createElement("div");
+  label.className = "cbtlabel";
+  label.textContent = "Target for " + m.name + " (range " + m.range + ")";
+  box.appendChild(label);
+  for (const c of cands) {
+    const btn = document.createElement("button");
+    btn.className = "cbtarget";
+    const inRange = c.dist <= m.range;
+    btn.textContent = c.a.name + " Lv" + c.a.level + " | " + c.a.hp + "/" + c.a.maxHp + " | " + c.dist + " tiles" + (inRange ? "" : " (too far)");
+    if (!inRange) btn.disabled = true;
+    btn.addEventListener("click", () => combatSendAttack(index, c.a.id));
+    box.appendChild(btn);
+  }
+  box.classList.remove("hidden");
+  combatShowRange(m.range);
+}
+
+function combatApplyActor(a) {
+  const spr = combatSprite(a.id);
+  if (!spr || spr === "loading") return;
+  spr.hp = a.hp;
+  spr.maxHp = a.maxHp;
+  spr.mp = a.mp;
+  spr.maxMp = a.maxMp;
+  spr.setAlpha(a.dead ? 0.35 : 1);
+  if (spr === player) {
+    playerHp = a.hp;
+    playerMaxHp = a.maxHp;
+  }
+}
+
+function combatEnsureSprite(scene, a) {
+  if (String(a.id) === String(myId)) return;
+  if (otherPlayers[a.id]) return;
+  if (a.kind === "enemy") {
+    worldEntityMeta[a.id] = { kind: "enemy", name: a.name, state: "alert", dex: a.dex };
+  }
+  addOtherPlayer(scene, { id: a.id, dex: a.dex, col: a.col, row: a.row, direction: a.direction || "down", hp: a.hp, maxHp: a.maxHp, mp: a.mp, maxMp: a.maxMp });
+}
+
+function combatFetchXml(dex, cb) {
+  const cached = combatXml[dex];
+  if (cached && cached.done) { cb(cached.info); return; }
+  if (cached) { cached.cbs.push(cb); return; }
+  combatXml[dex] = { done: false, info: null, cbs: [cb] };
+  const finish = (info) => {
+    const entry = combatXml[dex];
+    entry.done = true;
+    entry.info = info;
+    const list = entry.cbs;
+    entry.cbs = [];
+    for (const fn of list) fn(info);
+  };
+  fetch(SPECIES_BASE + dex + "/AnimData.xml").then((r) => {
+    if (!r.ok) throw new Error("no anim data");
+    return r.text();
+  }).then((xml) => {
+    const doc = new DOMParser().parseFromString(xml, "text/xml");
+    const anims = doc.getElementsByTagName("Anim");
+    const info = {};
+    for (let i = 0; i < anims.length; i++) {
+      const nameEl = anims[i].getElementsByTagName("Name")[0];
+      const fwEl = anims[i].getElementsByTagName("FrameWidth")[0];
+      const fhEl = anims[i].getElementsByTagName("FrameHeight")[0];
+      const durEls = anims[i].getElementsByTagName("Duration");
+      if (!nameEl || !fwEl || !fhEl || durEls.length === 0) continue;
+      const durs = [];
+      let total = 0;
+      for (let k = 0; k < durEls.length; k++) {
+        const v = parseInt(durEls[k].textContent, 10) || 2;
+        durs.push(v);
+        total += v;
+      }
+      const readIndex = (tag) => {
+        const el = anims[i].getElementsByTagName(tag)[0];
+        return el ? parseInt(el.textContent, 10) : -1;
+      };
+      let hitTicks = total * 0.5;
+      const hitIdx = readIndex("HitFrame");
+      if (hitIdx >= 0) {
+        hitTicks = 0;
+        for (let k = 0; k < Math.min(hitIdx, durs.length); k++) hitTicks += durs[k];
+      }
+      info[nameEl.textContent] = { fw: parseInt(fwEl.textContent, 10), fh: parseInt(fhEl.textContent, 10), cols: durs.length, totalTicks: total, hitTicks: hitTicks };
+    }
+    finish(info);
+  }).catch(() => finish(null));
+}
+
+function combatAnimKey(dex, name) {
+  return dex + "_a_" + name;
+}
+
+function combatAnimReady(dex, name) {
+  const st = combatAnimState[combatAnimKey(dex, name)];
+  return !!st && st.ready === true;
+}
+
+function combatPrefetch(scene, dex, name) {
+  const key = combatAnimKey(dex, name);
+  if (combatAnimState[key]) return;
+  const st = { ready: false, failed: false };
+  combatAnimState[key] = st;
+  combatFetchXml(dex, (info) => {
+    const a = info ? info[name] : null;
+    if (!a) {
+      st.failed = true;
+      return;
+    }
+    st.info = a;
+    scene.load.spritesheet(key, SPECIES_BASE + dex + "/" + name + "-Anim.png", { frameWidth: a.fw, frameHeight: a.fh });
+    scene.load.once("complete", () => {
+      if (!scene.textures.exists(key)) {
+        st.failed = true;
+        return;
+      }
+      const totalMs = Math.max(250, Math.round(a.totalTicks * 1000 / 60));
+      for (let d = 0; d < 8; d++) {
+        const dir = DIR_ORDER[d];
+        const animKey = key + "_" + dir;
+        if (scene.anims.exists(animKey)) continue;
+        scene.anims.create({ key: animKey, frames: scene.anims.generateFrameNumbers(key, { start: d * a.cols, end: d * a.cols + a.cols - 1 }), duration: totalMs, repeat: 0 });
+      }
+      st.totalMs = totalMs;
+      st.hitMs = Math.round(a.hitTicks * 1000 / 60);
+      st.ready = true;
+    });
+    scene.load.start();
+  });
+}
+
+function combatAnimName(d) {
+  const n = String(d.move || "").toLowerCase();
+  if (d.anim === "self") return null;
+  if (d.anim === "ranged") return "Shoot";
+  if (/kick|stomp|stamp|trample/.test(n)) return "Kick";
+  if (/scratch|slash|cut|claw|bite|crunch|peck|fang|slice|fury/.test(n)) return "Strike";
+  return "Attack";
+}
+
+function combatDirTo(from, to) {
+  const dx = Math.sign(Math.round((to.x - from.x) / (TILE / 2)));
+  const dy = Math.sign(Math.round((to.y - from.y) / (TILE / 2)));
+  for (const name in VIEW_VEC) {
+    const v = VIEW_VEC[name];
+    if (v[0] === dx && v[1] === dy) return name;
+  }
+  return null;
+}
+
+function combatFloat(scene, spr, text, color) {
+  const t = scene.add.text(spr.x, spr.y, text, { fontFamily: "sans-serif", fontSize: "18px", fontStyle: "bold", color: color, stroke: "#000000", strokeThickness: 4 });
+  t.setOrigin(0.5, 1);
+  t.setDepth(300);
+  t.setRotation(-viewRot);
+  const up = 46;
+  scene.tweens.add({ targets: t, x: spr.x - up * Math.sin(viewRot), y: spr.y - up * Math.cos(viewRot), alpha: 0, duration: 900, delay: 150, onComplete: () => t.destroy() });
+}
+
+function combatFlash(scene, spr) {
+  if (!spr || spr === "loading" || !spr.active) return;
+  spr.setTintFill(0xffffff);
+  scene.time.delayedCall(90, () => { if (spr.active) spr.clearTint(); });
+  scene.time.delayedCall(180, () => { if (spr.active) spr.setTintFill(0xff6060); });
+  scene.time.delayedCall(300, () => { if (spr.active) spr.clearTint(); });
+}
+
+function combatImpact(scene, d) {
+  for (const ch of d.changes || []) {
+    const spr = combatSprite(ch.id);
+    const a = COMBAT.actors[ch.id];
+    if (a) {
+      a.hp = ch.hp;
+      a.mp = ch.mp;
+      combatApplyActor(a);
+    }
+    if (!spr || spr === "loading") continue;
+    if (ch.dhp < 0) {
+      combatFlash(scene, spr);
+      combatFloat(scene, spr, String(ch.dhp), "#ff6a6a");
+    } else if (ch.dhp > 0) {
+      combatFloat(scene, spr, "+" + ch.dhp, "#7dff7d");
+    }
+  }
+  combatAddLog(d.lines || []);
+}
+
+function combatBackToIdle(spr) {
+  if (!spr || !spr.active) return;
+  spr.atkAnim = false;
+  const dex = spr === player ? DEX : spr.dex;
+  spr.setTexture(dex + "_idle");
+  spr.play(dex + "_idle_" + worldToScreenDir(spr.direction), true);
+}
+
+function combatAct(scene, d) {
+  const actor = combatSprite(d.actor);
+  const target = combatSprite(d.target);
+  const ready = actor && actor !== "loading" && actor.active;
+  if (!ready) {
+    combatImpact(scene, d);
+    return;
+  }
+  const tReady = target && target !== "loading" && target.active && target !== actor;
+  if (tReady) {
+    const dir = combatDirTo(actor, target);
+    if (dir) actor.direction = dir;
+  }
+  const dex = actor === player ? DEX : actor.dex;
+  const animName = combatAnimName(d);
+  const isSelf = d.anim === "self" || !tReady;
+  let impactAt = 250;
+  let usedAnim = false;
+
+  if (animName && !isSelf) {
+    if (combatAnimReady(dex, animName)) {
+      const st = combatAnimState[combatAnimKey(dex, animName)];
+      actor.atkAnim = true;
+      actor.setTexture(combatAnimKey(dex, animName));
+      actor.play(combatAnimKey(dex, animName) + "_" + worldToScreenDir(actor.direction), true);
+      actor.once("animationcomplete", () => combatBackToIdle(actor));
+      scene.time.delayedCall(st.totalMs + 120, () => { if (actor.atkAnim) combatBackToIdle(actor); });
+      impactAt = Math.max(120, st.hitMs);
+      usedAnim = true;
+    } else {
+      combatPrefetch(scene, dex, animName);
+    }
+  }
+
+  const ox = actor.x;
+  const oy = actor.y;
+  if (!isSelf && !usedAnim) {
+    const dx = target.x - actor.x;
+    const dy = target.y - actor.y;
+    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+    const lunge = d.anim === "ranged" ? 12 : Math.max(10, Math.min(len - TILE * 0.55, TILE * 0.7));
+    scene.tweens.add({ targets: actor, x: ox + dx / len * lunge, y: oy + dy / len * lunge, duration: 140, yoyo: true, ease: "Quad.easeOut" });
+    impactAt = 150;
+  } else if (!isSelf && usedAnim && d.anim === "melee") {
+    const dx = target.x - actor.x;
+    const dy = target.y - actor.y;
+    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+    scene.tweens.add({ targets: actor, x: ox + dx / len * 10, y: oy + dy / len * 10, duration: Math.max(80, impactAt * 0.7), yoyo: true, ease: "Quad.easeOut" });
+  } else if (isSelf) {
+    const sx = actor.scaleX;
+    const sy = actor.scaleY;
+    scene.tweens.add({ targets: actor, scaleX: sx * 1.18, scaleY: sy * 1.18, duration: 160, yoyo: true });
+    impactAt = 260;
+  }
+
+  if (!isSelf && d.anim === "ranged") {
+    const color = COMBAT_TYPE_COLORS[d.moveType] || 0xffffff;
+    scene.time.delayedCall(impactAt, () => {
+      if (!actor.active || !target.active) {
+        combatImpact(scene, d);
+        return;
+      }
+      const orb = scene.add.circle(actor.x, actor.y - 12, 7, color, 1);
+      orb.setStrokeStyle(2, 0xffffff, 0.9);
+      orb.setDepth(250);
+      scene.tweens.add({ targets: orb, x: target.x, y: target.y - 12, duration: 260, onComplete: () => {
+        orb.destroy();
+        combatImpact(scene, d);
+      } });
+    });
+  } else {
+    scene.time.delayedCall(impactAt, () => combatImpact(scene, d));
+  }
+}
+
+function combatEnd(scene, d) {
+  COMBAT.active = false;
+  COMBAT.myTurn = false;
+  COMBAT.turn = null;
+  combatSetMenu(false);
+  if (COMBAT.timerHandle) {
+    clearInterval(COMBAT.timerHandle);
+    COMBAT.timerHandle = null;
+  }
+  const label = { win: "Victory!", over: "The battle ended.", fled: "You got away.", defeat: "You were defeated... you wake up back at the spawn point." }[d.result] || "The battle ended.";
+  combatAddLog(label);
+  if (typeof d.hp === "number") {
+    player.hp = d.hp;
+    playerHp = d.hp;
+  }
+  if (typeof d.mp === "number") player.mp = d.mp;
+  state = "input";
+  const mine = { col: player.col, row: player.row };
+  for (const id of Object.keys(COMBAT.actors)) {
+    if (String(id) === String(myId)) continue;
+    const a = COMBAT.actors[id];
+    const spr = otherPlayers[id];
+    if (!spr) continue;
+    const far = spr !== "loading" && (Math.abs(Math.floor(spr.x / TILE) - mine.col) > 8 || Math.abs(Math.floor(spr.y / TILE) - mine.row) > 6);
+    if (a.kind === "enemy" && (a.dead || far)) entityRemove(id);
+    else if (a.kind === "player" && far) removeOtherPlayer(id);
+  }
+  COMBAT.actors = {};
+  COMBAT.order = [];
+  if (COMBAT.hideHandle) clearTimeout(COMBAT.hideHandle);
+  COMBAT.hideHandle = setTimeout(() => {
+    if (!COMBAT.active) combatShowPanel(false);
+  }, 3500);
+}
+
+function combatMessage(scene, d) {
+  if (worldGmMode) {
+    if (d.type === "c_act") combatAct(scene, d);
+    else if (d.type === "c_log") for (const line of d.lines) addGmLine(line, Date.now());
+    return true;
+  }
+  if (!worldPlayerMode) return true;
+
+  if (d.type === "c_start") {
+    if (COMBAT.hideHandle) clearTimeout(COMBAT.hideHandle);
+    COMBAT.active = true;
+    COMBAT.id = d.fight;
+    COMBAT.actors = {};
+    COMBAT.order = [];
+    COMBAT.turn = null;
+    COMBAT.myTurn = false;
+    combatEl("cbLog").innerHTML = "";
+    combatAddLog(d.log || []);
+    combatShowPanel(true);
+    combatSetMenu(false);
+    combatRenderBanner();
+    if (!COMBAT.timerHandle) COMBAT.timerHandle = setInterval(combatRenderBanner, 250);
+    updateReadout("battle!");
+  } else if (d.type === "c_state") {
+    if (!COMBAT.active) return true;
+    const next = {};
+    for (const a of d.actors) {
+      next[a.id] = a;
+      combatEnsureSprite(scene, a);
+      combatApplyActor(a);
+      if (a.kind === "enemy" || String(a.id) !== String(myId)) {
+        for (const nm of COMBAT_PREFETCH) combatPrefetch(scene, a.dex || "0004", nm);
+      } else {
+        for (const nm of COMBAT_PREFETCH) combatPrefetch(scene, DEX, nm);
+      }
+    }
+    COMBAT.actors = next;
+    COMBAT.order = d.order || [];
+    COMBAT.turn = d.turn;
+    if (String(d.turn) === String(myId)) COMBAT.steps = d.steps;
+    else {
+      COMBAT.myTurn = false;
+      combatSetMenu(false);
+    }
+    combatRenderOrder();
+    combatRenderBanner();
+  } else if (d.type === "c_turn") {
+    if (!d.moves) return true;
+    COMBAT.myTurn = true;
+    COMBAT.steps = d.steps;
+    COMBAT.moves = d.moves;
+    COMBAT.mp = d.mp;
+    COMBAT.maxMp = d.maxMp;
+    COMBAT.turnEndsAt = Date.now() + d.ms;
+    combatRenderMoves();
+    combatSetMenu(true);
+    combatRenderBanner();
+    updateReadout("your turn");
+  } else if (d.type === "c_steps") {
+    if (String(d.actor) === String(myId)) {
+      COMBAT.steps = d.steps;
+      combatRenderBanner();
+    }
+  } else if (d.type === "c_pos") {
+    if (String(d.id) === String(myId)) return true;
+    const a = COMBAT.actors[d.id];
+    if (a) {
+      a.col = d.col;
+      a.row = d.row;
+      combatEnsureSprite(scene, a);
+    }
+    const spr = otherPlayers[d.id];
+    if (spr && spr !== "loading") {
+      spr.direction = d.direction;
+      const dex = spr.dex;
+      spr.play(dex + "_walk_" + worldToScreenDir(d.direction), true);
+      scene.tweens.add({ targets: spr, x: tilePixelX(d.col), y: tilePixelY(d.row), duration: 160, onComplete: () => { if (spr.active && !spr.atkAnim) spr.play(dex + "_idle_" + worldToScreenDir(spr.direction), true); } });
+    }
+  } else if (d.type === "c_act") {
+    combatAct(scene, d);
+  } else if (d.type === "c_log") {
+    combatAddLog(d.lines);
+  } else if (d.type === "c_notice") {
+    combatAddLog("! " + d.text);
+    updateReadout(d.text);
+    state = "input";
+  } else if (d.type === "c_end") {
+    combatEnd(scene, d);
+  }
+  return true;
+}
+
+function combatInitUi() {
+  combatEl("cbRest").addEventListener("click", () => {
+    if (!COMBAT.myTurn) return;
+    gmSend({ type: "c_rest" });
+    COMBAT.myTurn = false;
+    combatSetMenu(false);
+  });
+  combatEl("cbWait").addEventListener("click", () => {
+    if (!COMBAT.myTurn) return;
+    gmSend({ type: "c_end" });
+    COMBAT.myTurn = false;
+    combatSetMenu(false);
+  });
+  combatEl("cbFlee").addEventListener("click", () => {
+    if (!COMBAT.active) return;
+    gmSend({ type: "c_flee" });
+  });
+  window.addEventListener("keydown", (e) => {
+    if (!COMBAT.active || !COMBAT.myTurn || chatActive) return;
+    if (e.key >= "1" && e.key <= "4") combatSelectMove(parseInt(e.key, 10) - 1);
+    else if (e.key === "Escape") {
+      combatEl("cbTargets").classList.add("hidden");
+      COMBAT.pending = -1;
+      combatClearRange();
+    }
+  });
+}
+
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", combatInitUi);
+else combatInitUi();
+
+
 window.worldHook = function (scene, data) {
   if (data.type === "init" && data.world) {
     if (data.role === "gm") {
@@ -1128,6 +1761,10 @@ window.worldHook = function (scene, data) {
     }
     enterPlayerWorld(scene);
     return false;
+  }
+
+  if (typeof data.type === "string" && data.type.indexOf("c_") === 0) {
+    return combatMessage(scene, data);
   }
 
   if (worldPlayerMode) {
@@ -1141,7 +1778,7 @@ window.worldHook = function (scene, data) {
       return true;
     }
     if (data.type === "e_del") {
-      entityRemove(data.id);
+      if (!combatHolds(data.id)) entityRemove(data.id);
       return true;
     }
     if (data.type === "npc_say") {
