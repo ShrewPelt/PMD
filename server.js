@@ -75,6 +75,11 @@ app.get("/assets/tilemap/:file", (req, res, next) => {
   if (!file) return next();
   res.sendFile(file);
 });
+app.get("/assets/objects/:file", (req, res, next) => {
+  const file = findObjectFile(req.params.file);
+  if (!file) return next();
+  res.sendFile(file);
+});
 app.use("/assets", express.static(path.join(__dirname, "assets")));
 
 app.use(express.json());
@@ -571,6 +576,95 @@ function scanTiles(force) {
   return tileScanCache.data;
 }
 
+let objectScanCache = { at: 0, data: null };
+
+function scanObjects(force) {
+  const now = Date.now();
+  if (!force && objectScanCache.data && now - objectScanCache.at < TILE_SCAN_TTL) return objectScanCache.data;
+  const files = {};
+  const taken = {};
+  const claim = (found) => {
+    let name = found.base;
+    if (taken[name.toLowerCase()]) name = found.parent + " - " + found.base;
+    let n = 2;
+    const root = name;
+    while (taken[name.toLowerCase()]) {
+      name = root + " (" + n + ")";
+      n++;
+    }
+    taken[name.toLowerCase()] = true;
+    files[name] = found.file;
+    return name;
+  };
+  const categories = [];
+  const rootLoose = [];
+  const rootDirs = [];
+  try {
+    const entries = fs.readdirSync(OBJECT_ASSET_DIR, { withFileTypes: true });
+    entries.sort((x, y) => x.name.localeCompare(y.name));
+    for (const entry of entries) {
+      if (entry.isFile() && /\.png$/i.test(entry.name)) rootLoose.push({ file: path.join(OBJECT_ASSET_DIR, entry.name), base: entry.name.replace(/\.png$/i, ""), parent: path.basename(OBJECT_ASSET_DIR) });
+      else if (entry.isDirectory()) rootDirs.push(entry.name);
+    }
+  } catch (e) {}
+  const defaultGroups = [];
+  if (rootLoose.length > 0) defaultGroups.push({ name: "", objects: rootLoose.map(claim).sort() });
+  categories.push({ name: "Default", groups: defaultGroups });
+  for (const folder of rootDirs) {
+    if (folder.toLowerCase() === "default") {
+      const extra = [];
+      walkTileFolder(path.join(OBJECT_ASSET_DIR, folder), 0, extra);
+      if (extra.length > 0) categories[0].groups.push({ name: "", objects: extra.map(claim).sort() });
+      continue;
+    }
+    const catDir = path.join(OBJECT_ASSET_DIR, folder);
+    const groups = [];
+    let entries = [];
+    try {
+      entries = fs.readdirSync(catDir, { withFileTypes: true });
+    } catch (e) {}
+    entries.sort((x, y) => x.name.localeCompare(y.name));
+    const direct = [];
+    for (const entry of entries) {
+      if (entry.isFile() && /\.png$/i.test(entry.name)) direct.push({ file: path.join(catDir, entry.name), base: entry.name.replace(/\.png$/i, ""), parent: folder });
+    }
+    if (direct.length > 0) groups.push({ name: "", objects: direct.map(claim).sort() });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const found = [];
+      walkTileFolder(path.join(catDir, entry.name), 0, found);
+      if (found.length > 0) groups.push({ name: entry.name, objects: found.map(claim).sort() });
+    }
+    categories.push({ name: folder, groups: groups });
+  }
+  objectScanCache = { at: now, data: { categories: categories, files: files } };
+  return objectScanCache.data;
+}
+
+function allObjectNames() {
+  return Object.keys(scanObjects(false).files).sort();
+}
+
+function findObjectFile(name) {
+  const wanted = String(name).replace(/\.png$/i, "");
+  if (!wanted) return null;
+  let data = scanObjects(false);
+  if (!data.files[wanted]) data = scanObjects(true);
+  return data.files[wanted] || null;
+}
+
+function berryItemForObject(name) {
+  const text = String(name || "");
+  const cut = text.lastIndexOf(" - ");
+  const base = cut >= 0 ? text.substring(cut + 3) : text;
+  const m = base.match(/^([A-Za-z]+)[ _]Berry[ _]Bush/i);
+  if (!m) return null;
+  const wanted = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase() + " Berry";
+  const canon = canonItemName(wanted);
+  if (!canon || !itemIndexCache.lower || !itemIndexCache.lower[canon.toLowerCase()]) return null;
+  return canon;
+}
+
 function tileCategoryList() {
   return scanTiles(false).categories;
 }
@@ -999,7 +1093,7 @@ function objectsInWindow(layer, c0, r0, w, h) {
   for (let r = r0; r < r0 + h; r++) {
     for (let c = c0; c < c0 + w; c++) {
       const obj = L.objects[c + "," + r];
-      if (obj) out.push({ col: c, row: r, name: obj.name, rot: obj.rot || 0, flip: obj.flip ? 1 : 0 });
+      if (obj) out.push({ col: c, row: r, name: harvestedShownName(layer, c, r, obj), rot: obj.rot || 0, flip: obj.flip ? 1 : 0 });
     }
   }
   return out;
@@ -1351,7 +1445,7 @@ app.get("/api/world/species", (req, res) => {
 });
 
 app.get("/api/world/assets", (req, res) => {
-  res.json({ tiles: allTileNames(), tileCategories: tileCategoryList(), objects: listAssetNames(OBJECT_ASSET_DIR), blocking: BLOCKING_TILES });
+  res.json({ tiles: allTileNames(), tileCategories: tileCategoryList(), objects: allObjectNames(), objectCategories: scanObjects(false).categories, blocking: BLOCKING_TILES });
 });
 
 app.post("/api/world/gm", (req, res) => {
@@ -1894,6 +1988,128 @@ function sendLoot(p, e) {
   sendPlayer(p, { type: "loot_open", id: e.id, name: e.name, items: e.loot.map((stack) => ({ name: stack.name, count: stack.count })) });
 }
 
+const BUSH_SEARCH_MS = Number(process.env.PMD_BUSH_SEARCH_MS) || 2000;
+const BUSH_WOBBLE_MS = 1000;
+const BUSH_SOUND = "Bush Rustle.mp3";
+const BUSH_REGROW_MS = Number(process.env.PMD_BUSH_REGROW_MS) || 300000;
+const bushStates = {};
+
+function plainBushName() {
+  const files = scanObjects(false).files;
+  if (files["Bush"]) return "Bush";
+  const names = Object.keys(files).sort();
+  for (const name of names) {
+    if (/ - Bush$/.test(name)) return name;
+  }
+  return null;
+}
+
+function harvestedShownName(layer, col, row, obj) {
+  const st = bushStates[layer + "," + col + "," + row];
+  if (!st || !st.harvested || st.name !== obj.name) return obj.name;
+  return plainBushName() || obj.name;
+}
+
+function handleObjectInteract(p) {
+  const L = layers[p.layer];
+  if (!L) return false;
+  const facing = DELTAS[p.direction] || null;
+  const candidates = [];
+  if (facing) candidates.push([p.col + facing.dc, p.row + facing.dr]);
+  for (let dr = -1; dr <= 1; dr++) {
+    for (let dc = -1; dc <= 1; dc++) {
+      if (dc === 0 && dr === 0) continue;
+      candidates.push([p.col + dc, p.row + dr]);
+    }
+  }
+  candidates.push([p.col, p.row]);
+  for (const cell of candidates) {
+    const obj = L.objects[cell[0] + "," + cell[1]];
+    if (!obj) continue;
+    const item = berryItemForObject(obj.name);
+    if (!item) continue;
+    startBushSearch(p, cell[0], cell[1], obj, item);
+    return true;
+  }
+  return false;
+}
+
+function startBushSearch(p, col, row, obj, item) {
+  if (worldCombat.isInFight(p)) {
+    sendPlayer(p, { type: "item_result", ok: false, text: "You can't search a bush during battle." });
+    return;
+  }
+  if (p._bushSearch) return;
+  const layer = p.layer;
+  const cdKey = layer + "," + col + "," + row;
+  const existing = bushStates[cdKey];
+  if (existing && existing.name === obj.name) return;
+  bushStates[cdKey] = { name: obj.name, harvested: false };
+  p._bushSearch = true;
+  const wobble = { type: "obj_wobble", layer: layer, col: col, row: row, ms: BUSH_WOBBLE_MS, sound: BUSH_SOUND, volume: 0.5 };
+  for (const id in worldSession.players) {
+    const q = worldSession.players[id];
+    if (cellInView(q, layer, col, row)) sendPlayer(q, wobble);
+  }
+  sendGms(layer, wobble);
+  sendPlayer(p, { type: "item_result", ok: true, text: "You search the " + item.replace(/ Berry$/, "") + " berry bush..." });
+  setTimeout(() => {
+    p._bushSearch = false;
+    const release = () => {
+      const st = bushStates[cdKey];
+      if (st && !st.harvested) delete bushStates[cdKey];
+    };
+    if (worldSession.players[p.id] !== p || p.layer !== layer) {
+      release();
+      return;
+    }
+    if (Math.max(Math.abs(p.col - col), Math.abs(p.row - row)) > 1) {
+      release();
+      sendPlayer(p, { type: "item_result", ok: false, text: "You moved away and stopped searching." });
+      return;
+    }
+    if (worldCombat.isInFight(p)) {
+      release();
+      return;
+    }
+    const current = layers[layer] && layers[layer].objects[col + "," + row];
+    if (!current || current.name !== obj.name) {
+      release();
+      return;
+    }
+    const amount = 1 + Math.floor(Math.random() * 3);
+    let got = 0;
+    let bagFull = false;
+    for (let i = 0; i < amount; i++) {
+      let mine = null;
+      for (const entry of p._inv) {
+        if (entry.name === item) { mine = entry; break; }
+      }
+      if (!mine && p._inv.length >= capacityOf(p)) {
+        bagFull = true;
+        break;
+      }
+      if (mine) mine.count = mine.count + 1;
+      else p._inv.push({ name: item, count: 1 });
+      got++;
+    }
+    if (got > 0) {
+      bushStates[cdKey].harvested = true;
+      refreshViewsForCells(layer, [[col, row]]);
+      setTimeout(() => {
+        const st = bushStates[cdKey];
+        if (st) delete bushStates[cdKey];
+        refreshViewsForCells(layer, [[col, row]]);
+      }, BUSH_REGROW_MS);
+      syncPlayerInventory(p);
+      sendPlayer(p, { type: "item_result", ok: true, text: "You found " + got + " " + (got > 1 ? item.replace(/Berry$/, "Berries") : item) + "!" + (bagFull ? " Your bag is full." : "") });
+    } else {
+      release();
+      sendPlayer(p, { type: "item_result", ok: false, text: "Your bag is full." });
+    }
+  }, BUSH_SEARCH_MS);
+}
+
 function handleInteract(p) {
   let best = null;
   let bestDist = Infinity;
@@ -1907,7 +2123,7 @@ function handleInteract(p) {
     }
   }
   if (!best) {
-    sendPlayer(p, { type: "interact_none" });
+    if (!handleObjectInteract(p)) sendPlayer(p, { type: "interact_none" });
     return;
   }
   if (best.kind === "corpse") {
@@ -2187,7 +2403,7 @@ function applyArt(layer, ops) {
 
 function applyObjects(layer, ops) {
   const L = ensureLayer(layer);
-  const names = listAssetNames(OBJECT_ASSET_DIR);
+  const names = allObjectNames();
   const changedObjs = [];
   for (const op of ops) {
     const c = op[0];

@@ -1338,6 +1338,54 @@ function gmShowSelection() {
   document.getElementById("wgEMoves").value = (picked.moves || []).join(", ");
 }
 
+let wgObjCategory = "Default";
+
+function buildObjectPicker(objBox, list, addButtons) {
+  const cats = (Array.isArray(list.objectCategories) ? list.objectCategories : []).filter((c) => c.groups.some((g) => g.objects.length > 0));
+  if (cats.length === 0) {
+    if ((list.objects || []).length === 0) objBox.textContent = "No pictures found in assets/objects.";
+    else addButtons(objBox, "object", list.objects);
+    return;
+  }
+  if (!cats.some((c) => c.name === wgObjCategory)) wgObjCategory = cats[0].name;
+  const tabs = document.createElement("div");
+  tabs.className = "wgCatTabs";
+  const grid = document.createElement("div");
+  const fill = () => {
+    grid.innerHTML = "";
+    const cat = cats.find((c) => c.name === wgObjCategory);
+    if (!cat) return;
+    for (const group of cat.groups) {
+      if (group.objects.length === 0) continue;
+      if (group.name) {
+        const head = document.createElement("div");
+        head.className = "wgCatEmpty";
+        head.style.cssText = "color:#ffd23f;margin:6px 0 2px 0;font-weight:bold";
+        head.textContent = group.name;
+        grid.appendChild(head);
+      }
+      const box = document.createElement("div");
+      grid.appendChild(box);
+      addButtons(box, "object", group.objects);
+    }
+    gmRefreshAssetHighlight();
+  };
+  for (const cat of cats) {
+    const tab = document.createElement("button");
+    tab.className = "wgCatTab" + (cat.name === wgObjCategory ? " on" : "");
+    tab.textContent = cat.name;
+    tab.addEventListener("click", () => {
+      wgObjCategory = cat.name;
+      for (const t of tabs.children) t.classList.toggle("on", t === tab);
+      fill();
+    });
+    tabs.appendChild(tab);
+  }
+  objBox.appendChild(tabs);
+  objBox.appendChild(grid);
+  fill();
+}
+
 function gmBuildAssetButtons(list) {
   worldAssetList = list;
   const tileBox = document.getElementById("wgTileList");
@@ -1395,8 +1443,7 @@ function gmBuildAssetButtons(list) {
   tileBox.appendChild(tabs);
   tileBox.appendChild(grid);
   fillGrid();
-  if ((list.objects || []).length === 0) objBox.textContent = "No pictures found in assets/objects.";
-  else addButtons(objBox, "object", list.objects);
+  buildObjectPicker(objBox, list, addButtons);
   gmRefreshAssetHighlight();
 }
 
@@ -2903,7 +2950,58 @@ setInterval(() => {
   if (busy) gmSend({ type: "active" });
 }, 20000);
 
+const bushAudioCache = {};
+
+function bushPlaySound(file, volume) {
+  try {
+    let base = bushAudioCache[file];
+    if (!base) {
+      base = new Audio("assets/music/" + encodeURIComponent(file));
+      base.preload = "auto";
+      bushAudioCache[file] = base;
+    }
+    const a = base.cloneNode();
+    a.volume = volume;
+    const p = a.play();
+    if (p && p.catch) p.catch(() => {});
+  } catch (e) {}
+}
+
+function bushWobble(scene, data) {
+  const sp = worldObjectPool[data.col + "," + data.row];
+  if (data.sound) bushPlaySound(data.sound, typeof data.volume === "number" ? data.volume : 0.5);
+  if (!sp || sp.wobbling) return;
+  sp.wobbling = true;
+  const baseX = sp.x;
+  const baseScaleX = sp.scaleX;
+  const baseScaleY = sp.scaleY;
+  const ms = data.ms || 1000;
+  scene.tweens.addCounter({
+    from: 0,
+    to: 1,
+    duration: ms,
+    onUpdate: (tween) => {
+      const t = tween.getValue();
+      const fade = 1 - t;
+      const wave = Math.sin(t * Math.PI * 10);
+      sp.x = baseX + wave * 3 * fade;
+      sp.scaleX = baseScaleX * (1 + wave * 0.08 * fade);
+      sp.scaleY = baseScaleY * (1 - wave * 0.06 * fade);
+    },
+    onComplete: () => {
+      sp.x = baseX;
+      sp.scaleX = baseScaleX;
+      sp.scaleY = baseScaleY;
+      sp.wobbling = false;
+    }
+  });
+}
+
 window.worldHook = function (scene, data) {
+  if (data.type === "obj_wobble") {
+    bushWobble(scene, data);
+    return true;
+  }
   if (data.type === "spawn_select") {
     spawnSelectShow(data);
     return true;
