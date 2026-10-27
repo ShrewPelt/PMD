@@ -695,6 +695,11 @@ function buildSeedMap() {
   return grid.map((row) => row.join(""));
 }
 
+function cleanRot(value) {
+  const n = parseInt(value, 10);
+  return n === 90 || n === 180 || n === 270 ? n : 0;
+}
+
 function makeLayer(name) {
   const rows = [];
   const blank = " ".repeat(LAYER_W);
@@ -730,7 +735,7 @@ function loadLayers() {
       }
       const objList = Array.isArray(saved.objects) ? saved.objects : [];
       for (const o of objList) {
-        if (Array.isArray(o) && o.length >= 3) L.objects[o[0] + "," + o[1]] = { name: String(o[2]), solid: o[3] !== 0 };
+        if (Array.isArray(o) && o.length >= 3) L.objects[o[0] + "," + o[1]] = { name: String(o[2]), solid: o[3] !== 0, rot: cleanRot(o[4]), flip: o[5] === 1 };
       }
       const passList = Array.isArray(saved.passable) ? saved.passable : [];
       for (const pc of passList) {
@@ -754,6 +759,51 @@ function loadLayers() {
 loadPalette();
 loadLayers();
 
+const SPAWNS_FILE = path.join(WORLD_DIR, "spawns.json");
+let spawnPoints = [];
+let spawnNextId = 1;
+
+function saveSpawns() {
+  writeJsonFile(SPAWNS_FILE, { nextId: spawnNextId, list: spawnPoints });
+}
+
+function validSpawnSpot(layer, col, row) {
+  return validLayerNumber(layer) && Number.isInteger(col) && Number.isInteger(row) && col >= 0 && col < LAYER_W && row >= 0 && row < LAYER_H;
+}
+
+function loadSpawns() {
+  const data = readJsonFile(SPAWNS_FILE, null);
+  if (data && Array.isArray(data.list)) {
+    for (const sp of data.list) {
+      if (sp && typeof sp.id === "string" && validSpawnSpot(sp.layer, sp.col, sp.row)) {
+        spawnPoints.push({ id: sp.id, name: String(sp.name || "Spawn").slice(0, 40), layer: sp.layer, col: sp.col, row: sp.row });
+      }
+    }
+    spawnNextId = Number.isInteger(data.nextId) ? data.nextId : spawnPoints.length + 1;
+    return;
+  }
+  const keys = Object.keys(layers).map((k) => parseInt(k, 10)).sort((a, b) => a - b);
+  for (const n of keys) {
+    const L = layers[n];
+    if (L.spawn && validSpawnSpot(n, L.spawn.col, L.spawn.row)) {
+      spawnPoints.push({ id: "s" + spawnNextId, name: n === 0 ? "Main spawn" : "Layer " + n + " spawn", layer: n, col: L.spawn.col, row: L.spawn.row });
+      spawnNextId = spawnNextId + 1;
+    }
+    L.spawn = null;
+  }
+  saveSpawns();
+}
+
+loadSpawns();
+
+function spawnList() {
+  return spawnPoints.map((sp) => ({ id: sp.id, name: sp.name, layer: sp.layer, col: sp.col, row: sp.row, layerName: layers[sp.layer] ? layers[sp.layer].name : "" }));
+}
+
+function broadcastSpawns() {
+  sendGms(null, { type: "gm_spawns", spawns: spawnList() });
+}
+
 let layersDirty = false;
 let layerSaveTimer = null;
 
@@ -769,7 +819,7 @@ function saveLayersNow() {
     const objList = [];
     for (const k of Object.keys(L.objects)) {
       const parts = k.split(",");
-      objList.push([parseInt(parts[0], 10), parseInt(parts[1], 10), L.objects[k].name, L.objects[k].solid ? 1 : 0]);
+      objList.push([parseInt(parts[0], 10), parseInt(parts[1], 10), L.objects[k].name, L.objects[k].solid ? 1 : 0, L.objects[k].rot || 0, L.objects[k].flip ? 1 : 0]);
     }
     const passOut = [];
     for (const k of Object.keys(L.passable)) {
@@ -815,7 +865,9 @@ function isWalkable(layer, col, row) {
 
 function layerSpawn(layer) {
   const L = layers[layer];
-  if (L && L.spawn) return { col: L.spawn.col, row: L.spawn.row };
+  for (const sp of spawnPoints) {
+    if (sp.layer === layer) return { col: sp.col, row: sp.row };
+  }
   if (L) {
     for (let r = 0; r < LAYER_H; r++) {
       const c = L.rows[r].search(/[.P]/);
@@ -947,7 +999,7 @@ function objectsInWindow(layer, c0, r0, w, h) {
   for (let r = r0; r < r0 + h; r++) {
     for (let c = c0; c < c0 + w; c++) {
       const obj = L.objects[c + "," + r];
-      if (obj) out.push({ col: c, row: r, name: obj.name });
+      if (obj) out.push({ col: c, row: r, name: obj.name, rot: obj.rot || 0, flip: obj.flip ? 1 : 0 });
     }
   }
   return out;
@@ -2142,6 +2194,8 @@ function applyObjects(layer, ops) {
     const r = op[1];
     const name = typeof op[2] === "string" ? op[2] : "";
     const solid = op[3] === 0 || op[3] === false ? false : true;
+    const rot = cleanRot(op[4]);
+    const flip = op[5] === 1 || op[5] === true;
     if (!Number.isInteger(c) || !Number.isInteger(r)) continue;
     if (c < 0 || c >= LAYER_W || r < 0 || r >= LAYER_H) continue;
     const key = c + "," + r;
@@ -2149,13 +2203,13 @@ function applyObjects(layer, ops) {
     if (name === "") {
       if (!old) continue;
       delete L.objects[key];
-      changedObjs.push([c, r, "", 0]);
+      changedObjs.push([c, r, "", 0, 0, 0]);
       continue;
     }
     if (names.indexOf(name) === -1) continue;
-    if (old && old.name === name && old.solid === solid) continue;
-    L.objects[key] = { name: name, solid: solid };
-    changedObjs.push([c, r, name, solid ? 1 : 0]);
+    if (old && old.name === name && old.solid === solid && (old.rot || 0) === rot && !!old.flip === flip) continue;
+    L.objects[key] = { name: name, solid: solid, rot: rot, flip: flip };
+    changedObjs.push([c, r, name, solid ? 1 : 0, rot, flip ? 1 : 0]);
   }
   if (changedObjs.length > 0) {
     scheduleLayerSave();
@@ -2200,10 +2254,10 @@ function sendGmLayer(gm) {
   const objList = [];
   for (const k of Object.keys(L.objects)) {
     const parts = k.split(",");
-    objList.push([parseInt(parts[0], 10), parseInt(parts[1], 10), L.objects[k].name, L.objects[k].solid ? 1 : 0]);
+    objList.push([parseInt(parts[0], 10), parseInt(parts[1], 10), L.objects[k].name, L.objects[k].solid ? 1 : 0, L.objects[k].rot || 0, L.objects[k].flip ? 1 : 0]);
   }
   const passList = Object.keys(L.passable || {}).map((k) => k.split(",").map((v) => parseInt(v, 10)));
-  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, passable: passList, name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer && !entities[id].down).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: L.spawn, floorItems: items, layers: layerSummaries() });
+  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, passable: passList, name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer && !entities[id].down).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: null, spawns: spawnList(), floorItems: items, layers: layerSummaries() });
 }
 
 function handleGmMessage(gm, data) {
@@ -2300,17 +2354,46 @@ function handleGmMessage(gm, data) {
     return;
   }
 
-  if (data.type === "gm_spawn") {
+  if (data.type === "gm_spawn_add" || data.type === "gm_spawn") {
     const n = parseInt(data.layer, 10);
     const c = parseInt(data.col, 10);
     const r = parseInt(data.row, 10);
-    if (!validLayerNumber(n) || !Number.isInteger(c) || !Number.isInteger(r)) return;
-    if (c < 0 || c >= LAYER_W || r < 0 || r >= LAYER_H) return;
-    ensureLayer(n).spawn = { col: c, row: r };
-    scheduleLayerSave();
-    for (const gmEntry of worldGms) {
-      if (gmEntry.layer === n) sendGmLayer(gmEntry);
+    if (!validSpawnSpot(n, c, r)) return;
+    ensureLayer(n);
+    const name = String(data.name || "").trim().slice(0, 40) || "Spawn " + spawnNextId;
+    spawnPoints.push({ id: "s" + spawnNextId, name: name, layer: n, col: c, row: r });
+    spawnNextId = spawnNextId + 1;
+    saveSpawns();
+    broadcastSpawns();
+    return;
+  }
+
+  if (data.type === "gm_spawn_edit") {
+    const sp = spawnPoints.find((x) => x.id === String(data.id));
+    if (!sp) return;
+    if (typeof data.name === "string" && data.name.trim()) sp.name = data.name.trim().slice(0, 40);
+    if (data.col !== undefined) {
+      const n = parseInt(data.layer, 10);
+      const c = parseInt(data.col, 10);
+      const r = parseInt(data.row, 10);
+      if (validSpawnSpot(n, c, r)) {
+        ensureLayer(n);
+        sp.layer = n;
+        sp.col = c;
+        sp.row = r;
+      }
     }
+    saveSpawns();
+    broadcastSpawns();
+    return;
+  }
+
+  if (data.type === "gm_spawn_del") {
+    const idx = spawnPoints.findIndex((x) => x.id === String(data.id));
+    if (idx === -1) return;
+    spawnPoints.splice(idx, 1);
+    saveSpawns();
+    broadcastSpawns();
     return;
   }
 
@@ -2387,6 +2470,7 @@ function handleWorldGmConnection(socket, info) {
   const list = [];
   for (const id in worldSession.players) list.push(publicPlayer(worldSession.players[id]));
   sendSocket(socket, { type: "gm_players", players: list });
+  sendSocket(socket, { type: "gm_spawns", spawns: spawnList() });
   sendGmLayer(gm);
 
   socket.on("message", (raw) => {
@@ -2405,6 +2489,41 @@ function handleWorldGmConnection(socket, info) {
   });
 }
 
+const pendingSpawnSockets = {};
+const SPAWN_PICK_WAIT_MS = 300000;
+const IDLE_LOGOUT_MS = Number(process.env.PMD_IDLE_LOGOUT_MS) || 60000;
+const IDLE_WARN_MS = Math.min(IDLE_LOGOUT_MS - 1000, Number(process.env.PMD_IDLE_WARN_MS) || 45000);
+
+function closePendingSpawn(userId) {
+  const old = pendingSpawnSockets[String(userId)];
+  if (!old) return;
+  delete pendingSpawnSockets[String(userId)];
+  old.pendingSpawn = false;
+  try { old.send(JSON.stringify({ type: "ended", reason: "You opened the world in another window." })); } catch (e) {}
+  try { old.close(); } catch (e) {}
+}
+
+function idleTick() {
+  const now = Date.now();
+  for (const id of Object.keys(worldSession.players)) {
+    const p = worldSession.players[id];
+    if (!p) continue;
+    if (worldCombat.isInFight(p)) {
+      p._lastActive = now;
+      p._idleWarned = false;
+      continue;
+    }
+    const idle = now - (p._lastActive || now);
+    if (idle >= IDLE_LOGOUT_MS) {
+      forceLeaveUser(p.userId, "You were logged out for standing still for over a minute. Your character is saved.");
+      sendLayerSummaries();
+    } else if (idle >= IDLE_WARN_MS && !p._idleWarned) {
+      p._idleWarned = true;
+      sendPlayer(p, { type: "idle_warn", seconds: Math.ceil((IDLE_LOGOUT_MS - idle) / 1000) });
+    }
+  }
+}
+
 function handleWorldConnection(socket, pass) {
   const info = pass ? worldPasses[pass] : null;
   if (!info) {
@@ -2419,7 +2538,52 @@ function handleWorldConnection(socket, pass) {
   }
 
   forceLeaveUser(info.userId, "You opened the world in another window.");
+  closePendingSpawn(info.userId);
 
+  const preKey = info.userId + "|" + info.name;
+  const preSaved = worldState.positions[preKey];
+  const preLayer = preSaved && Number.isInteger(preSaved.layer) ? preSaved.layer : 0;
+  const hasSaved = !!(preSaved && Number.isInteger(preSaved.col) && Number.isInteger(preSaved.row) && layers[preLayer]);
+
+  if (!hasSaved && spawnPoints.length > 1) {
+    socket.pendingSpawn = true;
+    socket.playerId = null;
+    socket.userId = info.userId;
+    pendingSpawnSockets[String(info.userId)] = socket;
+    sendSocket(socket, { type: "spawn_select", name: info.name, spawns: spawnList().map((sp) => ({ id: sp.id, name: sp.name, layer: sp.layer, layerName: sp.layerName })) });
+    const waitTimer = setTimeout(() => {
+      if (socket.pendingSpawn) {
+        try { socket.close(); } catch (e) {}
+      }
+    }, SPAWN_PICK_WAIT_MS);
+    socket.on("message", (raw) => {
+      if (!socket.pendingSpawn) return;
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch (e) {
+        return;
+      }
+      if (!data || data.type !== "spawn_pick") return;
+      const chosen = spawnPoints.find((x) => x.id === String(data.id));
+      if (!chosen) return;
+      socket.pendingSpawn = false;
+      clearTimeout(waitTimer);
+      if (pendingSpawnSockets[String(info.userId)] === socket) delete pendingSpawnSockets[String(info.userId)];
+      startWorldPlayer(socket, pass, info, chosen);
+    });
+    socket.on("close", () => {
+      clearTimeout(waitTimer);
+      socket.pendingSpawn = false;
+      if (pendingSpawnSockets[String(info.userId)] === socket) delete pendingSpawnSockets[String(info.userId)];
+    });
+    return;
+  }
+
+  startWorldPlayer(socket, pass, info, hasSaved ? null : (spawnPoints[0] || null));
+}
+
+function startWorldPlayer(socket, pass, info, spawn) {
   const id = worldSession.nextId;
   worldSession.nextId = worldSession.nextId + 1;
   socket.sessionId = WORLD_SESSION;
@@ -2432,6 +2596,12 @@ function handleWorldConnection(socket, pass) {
   let layer = 0;
   let startCol = layerSpawn(0).col;
   let startRow = layerSpawn(0).row;
+  if (spawn) {
+    ensureLayer(spawn.layer);
+    layer = spawn.layer;
+    startCol = spawn.col;
+    startRow = spawn.row;
+  }
   if (saved && Number.isInteger(saved.col) && Number.isInteger(saved.row)) {
     const savedLayer = Number.isInteger(saved.layer) ? saved.layer : 0;
     if (layers[savedLayer]) {
@@ -2464,7 +2634,9 @@ function handleWorldConnection(socket, pass) {
     _inv: inventory,
     _reported: countInventory(inventory),
     _seen: {},
-    _socket: socket
+    _socket: socket,
+    _lastActive: Date.now(),
+    _idleWarned: false
   };
   worldSession.players[id] = p;
   refreshVisibility(p);
@@ -2495,6 +2667,10 @@ function handleWorldConnection(socket, pass) {
     }
     const me = worldSession.players[socket.playerId];
     if (!me || socket.playerId === null) return;
+    me._lastActive = Date.now();
+    me._idleWarned = false;
+
+    if (data.type === "active") return;
 
     if (typeof data.type === "string" && data.type.indexOf("c_") === 0) {
       worldCombat.handleMessage(me, data);
@@ -2620,6 +2796,7 @@ worldCombat.init({
 
 setInterval(saveWorldState, WORLD_SAVE_INTERVAL);
 setInterval(entityTick, ENTITY_TICK_MS);
+setInterval(idleTick, 2000);
 setInterval(companionFollowTick, COMPANION_FOLLOW_MS);
 setInterval(saveEntitiesNow, WORLD_SAVE_INTERVAL);
 

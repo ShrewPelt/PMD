@@ -570,7 +570,7 @@ function create() {
   kb.on("keydown-I", (e) => { if (e.repeat || chatActive) return; toggleInventory(); });
   kb.on("keydown-F", (e) => { if (e.repeat || chatActive || isGM) return; attemptPickup(); });
   kb.on("keydown-G", (e) => { if (e.repeat || chatActive || isGM) return; attemptDrop(); });
-  kb.on("keydown-R", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "use" }); });
+  kb.on("keydown-R", (e) => { if (e.repeat || chatActive || isGM) return; lockAction(this, { type: "use" }); });
   kb.on("keydown-O", (e) => { if (e.repeat || chatActive) return; debugHp(-8); });
   kb.on("keydown-P", (e) => { if (e.repeat || chatActive) return; debugHp(8); });
   kb.on("keydown-SPACE", (e) => {
@@ -670,7 +670,7 @@ function updateViewRotation() {
     }
   }
   for (const key in worldObjectPool) {
-    worldObjectPool[key].setRotation(counter);
+    worldObjectPool[key].setRotation(worldObjectPool[key].objRotRad ? worldObjectPool[key].objRotRad : counter);
   }
   for (const key in floorItemSprites) {
     floorItemSprites[key].setRotation(counter);
