@@ -24,6 +24,7 @@ const ENGAGE_MAX = 5;
 const DEFEAT_COOLDOWN_MS = 12000;
 const WIN_COOLDOWN_MS = 3000;
 const RESPAWN_MS = 90000;
+const NPC_FAINT_MS = parseInt(process.env.PMD_NPC_FAINT_MS, 10) || 300000;
 const DEFEAT_HP_PERCENT = 25;
 const ORDER_PREVIEW = 8;
 const LOG_KEEP = 40;
@@ -84,6 +85,7 @@ function actorDistance(A, B) {
 }
 
 function sideOf(A) {
+  if (A.side) return A.side;
   return A.kind === "enemy" ? "enemies" : "players";
 }
 
@@ -120,6 +122,7 @@ function publicActor(A) {
   return {
     id: A.id,
     kind: A.kind,
+    side: sideOf(A),
     name: c.name,
     dex: A.ref.dex,
     level: c.level,
@@ -292,11 +295,11 @@ function buildEnemyCombatant(e) {
   return c;
 }
 
-function addActor(f, kind, ref) {
+function addActor(f, kind, ref, side) {
   const id = String(ref.id);
   if (f.actors[id] && !f.actors[id].gone) return f.actors[id];
   const c = kind === "enemy" ? buildEnemyCombatant(ref) : buildPlayerCombatant(ref);
-  const A = { id: ref.id, kind: kind, ref: ref, c: c, steps: 0, gone: false };
+  const A = { id: ref.id, kind: kind, ref: ref, c: c, steps: 0, gone: false, side: side || (kind === "enemy" ? "enemies" : "players") };
   f.actors[id] = A;
   ref._fight = f.id;
   if (kind === "enemy") ref.state = "alert";
@@ -345,8 +348,9 @@ function expand(f) {
   while (grew && guard < 8) {
     grew = false;
     guard++;
-    const enemyActors = livingOfKind(f, "enemy");
+    const enemyActors = f.duel ? [] : livingOfKind(f, "enemy");
     for (const id in ctx.worldSession.players) {
+      if (f.duel) break;
       const p = ctx.worldSession.players[id];
       if (p.layer !== f.layer || p._fight || p.hp <= 0) continue;
       if (p._noFightUntil && Date.now() < p._noFightUntil) continue;
@@ -363,13 +367,14 @@ function expand(f) {
     for (const P of livingOfKind(f, "player")) {
       for (const e of ctx.companionsOf(P.ref)) {
         if (e._fight || e.down || e.hp <= 0 || e.layer !== f.layer) continue;
-        addActor(f, "ally", e);
+        addActor(f, "ally", e, sideOf(P));
         grew = true;
         changed = true;
       }
     }
-    const playerActors = livingOfKind(f, "player");
+    const playerActors = f.duel ? [] : livingOfKind(f, "player");
     for (const id in ctx.entities) {
+      if (f.duel) break;
       const e = ctx.entities[id];
       if (e.kind !== "enemy" || e.layer !== f.layer || e._fight || e.down) continue;
       for (const P of playerActors) {
@@ -408,6 +413,121 @@ function startFight(layer, firstEnemy) {
   return f;
 }
 
+function sheetMoveInfo(sheet) {
+  const out = [];
+  for (const m of Array.isArray(sheet.moves) ? sheet.moves : []) {
+    if (!m || !m.name) continue;
+    if (m.data) registerMove(m.name, m.data);
+    out.push(moveInfo(m.name));
+  }
+  return out;
+}
+
+function startDuel(p, data) {
+  if (!data || typeof data !== "object") return;
+  if (p._fight && fights[p._fight]) {
+    notice(p, "You are already in a battle.");
+    return;
+  }
+  if (p.hp <= 0) return;
+  if (p._noFightUntil && Date.now() < p._noFightUntil) {
+    notice(p, "You can't start a fight right now.");
+    return;
+  }
+  const sheet = p._sheet || {};
+  const moveIdx = parseInt(data.move, 10);
+  const moveRaw = Array.isArray(sheet.moves) ? sheet.moves[moveIdx] : null;
+  const moveName = moveRaw ? (typeof moveRaw === "string" ? moveRaw : moveRaw.name) : null;
+  if (!moveName) {
+    notice(p, "Pick one of your moves.");
+    return;
+  }
+  if (moveRaw && moveRaw.name && moveRaw.data) registerMove(moveRaw.name, moveRaw.data);
+  if (UNSUPPORTED_MOVES[moveName]) {
+    notice(p, `${moveName} can't be used in the open world yet.`);
+    return;
+  }
+  const md = engine.getMoveData(moveName);
+  if (!md) {
+    notice(p, "That move has no data.");
+    return;
+  }
+  const targetKind = md.target || "enemy";
+  if (targetKind === "self" || targetKind === "all-allies" || targetKind === "ally") {
+    notice(p, `${moveName} can't be used to start a fight.`);
+    return;
+  }
+  const cost = md.mpCost || 0;
+  if (p.mp < cost) {
+    notice(p, `Not enough MP for ${moveName}.`);
+    return;
+  }
+  let targetRef = null;
+  let targetIsPlayer = false;
+  if (data.targetType === "player") {
+    targetRef = ctx.worldSession.players[String(data.id)] || null;
+    targetIsPlayer = true;
+    if (!targetRef || targetRef.id === p.id || targetRef.layer !== p.layer || targetRef.kind === "companion") {
+      notice(p, "That player isn't there.");
+      return;
+    }
+    if (targetRef.hp <= 0) {
+      notice(p, `${targetRef.name} can't fight right now.`);
+      return;
+    }
+    if (targetRef._fight && fights[targetRef._fight]) {
+      notice(p, `${targetRef.name} is already in a battle.`);
+      return;
+    }
+    if (targetRef._noFightUntil && Date.now() < targetRef._noFightUntil) {
+      notice(p, `${targetRef.name} just finished a battle and can't be challenged yet.`);
+      return;
+    }
+  } else {
+    targetRef = ctx.entities[String(data.id)] || null;
+    if (!targetRef || targetRef.kind !== "npc" || targetRef.layer !== p.layer) {
+      notice(p, "That target isn't there.");
+      return;
+    }
+    if (targetRef.fainted) {
+      notice(p, `${targetRef.name} has already fainted.`);
+      return;
+    }
+    if (targetRef._fight && fights[targetRef._fight]) {
+      notice(p, `${targetRef.name} is already in a battle.`);
+      return;
+    }
+  }
+  const dist = chebyshev(p.col, p.row, targetRef.col, targetRef.row);
+  if (dist > rangeOf(md)) {
+    notice(p, `${targetRef.name} is out of range for ${moveName} (${dist} tiles, range ${rangeOf(md)}).`);
+    return;
+  }
+  const f = { id: nextFightId, layer: p.layer, actors: {}, turnActor: null, timer: null, busy: false, ended: false, log: [], turnToken: 0, duel: true, forceFirst: null };
+  nextFightId = nextFightId + 1;
+  fights[f.id] = f;
+  const attacker = addActor(f, "player", p, "players");
+  let defender = null;
+  if (targetIsPlayer) {
+    defender = addActor(f, "player", targetRef, "enemies");
+    sendStart(f, targetRef);
+  } else {
+    defender = addActor(f, "enemy", targetRef, "enemies");
+    ctx.broadcastEntity(targetRef, targetRef.layer, targetRef.col, targetRef.row);
+  }
+  sendStart(f, p);
+  expand(f);
+  f.forceFirst = attacker;
+  pushLog(f, `${attacker.c.name} challenged ${defender.c.name}! Battle start!`);
+  emitState(f);
+  schedule(f, 700, () => {
+    nextTurn(f);
+    if (f.ended || f.turnActor !== attacker) return;
+    const combatIdx = attacker.c.moves.indexOf(moveName);
+    handleAttack(f, attacker, { move: combatIdx, target: defender.id });
+  });
+}
+
 function schedule(f, ms, fn) {
   if (f.timer) clearTimeout(f.timer);
   f.timer = setTimeout(() => {
@@ -423,8 +543,8 @@ function schedule(f, ms, fn) {
 }
 
 function checkEnd(f) {
-  const players = livingOfKind(f, "player");
-  const enemies = livingOfKind(f, "enemy");
+  const players = livingSide(f, "players");
+  const enemies = livingSide(f, "enemies");
   if (enemies.length === 0) {
     endFight(f, "win");
     return true;
@@ -434,6 +554,14 @@ function checkEnd(f) {
     return true;
   }
   return false;
+}
+
+function settleAfterLeave(f) {
+  if (livingOfKind(f, "player").length === 0) {
+    endFight(f, "fled");
+    return true;
+  }
+  return checkEnd(f);
 }
 
 function releaseAllies(f, ownerRef) {
@@ -473,6 +601,14 @@ function downEnemy(f, A) {
   const e = A.ref;
   e._fight = null;
   e.state = "idle";
+  if (e.kind === "npc") {
+    e.fainted = true;
+    e.faintUntil = Date.now() + NPC_FAINT_MS;
+    e.hp = 0;
+    ctx.broadcastEntity(e, e.layer, e.col, e.row);
+    ctx.scheduleEntitySave();
+    return;
+  }
   const loot = Array.isArray(e.loot) ? e.loot.filter((stack) => stack && stack.count > 0) : [];
   if (!e.boss && loot.length > 0) {
     e.kind = "corpse";
@@ -508,7 +644,7 @@ function endFight(f, result) {
   if (result === "win") {
     for (const id in f.actors) {
       const E = f.actors[id];
-      if (E.kind === "enemy" && E.c.hp <= 0) kills.push({ species: E.c.species || E.c.name, level: E.c.level });
+      if (E.kind === "enemy" && sideOf(E) === "enemies" && E.c.hp <= 0) kills.push({ species: E.c.species || E.c.name, level: E.c.level });
     }
     for (const k of kills) {
       gains.exp += k.level * 12;
@@ -533,15 +669,18 @@ function endFight(f, result) {
     } else if (!A.gone) {
       syncPlayerVitals(A);
       A.ref._fight = null;
-      A.ref._noFightUntil = Date.now() + (result === "win" ? WIN_COOLDOWN_MS : FLEE_COOLDOWN_MS);
+      const won = (sideOf(A) === "players" && result === "win") || (sideOf(A) === "enemies" && result === "lose");
+      A.ref._noFightUntil = Date.now() + (won ? WIN_COOLDOWN_MS : FLEE_COOLDOWN_MS);
       if (A.c.hp <= 0) {
         A.gone = false;
         defeatPlayer(f, A);
       } else {
-        if (kills.length > 0) A.ref._kills = A.ref._kills.concat(kills);
-        ctx.sendPlayer(A.ref, { type: "c_end", fight: f.id, result: result === "win" ? "win" : "over", hp: A.ref.hp, mp: A.ref.mp, exp: gains.exp, coins: gains.coins });
+        const earns = sideOf(A) === "players";
+        if (earns && kills.length > 0) A.ref._kills = A.ref._kills.concat(kills);
+        ctx.sendPlayer(A.ref, { type: "c_end", fight: f.id, result: won ? "win" : "over", hp: A.ref.hp, mp: A.ref.mp, exp: earns ? gains.exp : 0, coins: earns ? gains.coins : 0 });
         ctx.sendGms(null, { type: "gm_player", player: ctx.publicPlayer(A.ref) });
-        if (kills.length > 0) ctx.queueWorldSave(A.ref, false);
+        if (earns && kills.length > 0) ctx.queueWorldSave(A.ref, false);
+        else if (!earns) ctx.queueWorldSave(A.ref, false);
       }
     }
   }
@@ -605,14 +744,20 @@ function nextTurn(f) {
   if (checkEnd(f)) return;
   expand(f);
   const living = livingActors(f);
-  const picked = engine.nextActorMulti(living.map((A) => A.c));
-  if (!picked) {
-    endFight(f, "error");
-    return;
-  }
   let A = null;
-  for (const cand of living) {
-    if (cand.c === picked) A = cand;
+  if (f.forceFirst && !f.forceFirst.gone && f.forceFirst.c.hp > 0) {
+    A = f.forceFirst;
+    f.forceFirst = null;
+  } else {
+    f.forceFirst = null;
+    const picked = engine.nextActorMulti(living.map((C) => C.c));
+    if (!picked) {
+      endFight(f, "error");
+      return;
+    }
+    for (const cand of living) {
+      if (cand.c === picked) A = cand;
+    }
   }
   if (!A) {
     endFight(f, "error");
@@ -1547,10 +1692,7 @@ function handleMessage(p, data) {
       ctx.sendGms(null, { type: "gm_player", player: ctx.publicPlayer(p) });
     }
     f.turnActor = null;
-    if (livingOfKind(f, "player").length === 0) {
-      endFight(f, "fled");
-      return true;
-    }
+    if (settleAfterLeave(f)) return true;
     emitState(f);
     schedule(f, BETWEEN_TURNS_MS, () => nextTurn(f));
     return true;
@@ -1609,10 +1751,7 @@ function onPlayerLeave(p) {
   A.gone = true;
   releaseAllies(f, p);
   pushLog(f, `${A.c.name} left the battle.`);
-  if (livingOfKind(f, "player").length === 0) {
-    endFight(f, "fled");
-    return;
-  }
+  if (settleAfterLeave(f)) return;
   emitState(f);
   if (f.turnActor === A) {
     if (f.timer) clearTimeout(f.timer);
@@ -1631,7 +1770,7 @@ function onEntityRemoved(e) {
   if (!A || A.gone) return;
   A.gone = true;
   pushLog(f, `${A.c.name} vanished!`);
-  if (A.kind === "enemy" && livingOfKind(f, "enemy").length === 0) {
+  if (A.kind === "enemy" && livingSide(f, "enemies").length === 0) {
     endFight(f, "win");
     return;
   }
@@ -1677,4 +1816,4 @@ function shutdown() {
   for (const id of Object.keys(fights)) endFight(fights[id], "shutdown");
 }
 
-module.exports = { init, tick, handleMessage, canPlayerMove, afterPlayerMove, onPlayerLeave, onEntityRemoved, fightOf, isInFight, shutdown, useItemOutside, RESPAWN_MS };
+module.exports = { init, startDuel, sheetMoveInfo, tick, handleMessage, canPlayerMove, afterPlayerMove, onPlayerLeave, onEntityRemoved, fightOf, isInFight, shutdown, useItemOutside, RESPAWN_MS };

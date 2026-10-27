@@ -485,49 +485,88 @@ function tileCategoryFolders() {
   return folders;
 }
 
-function tileCategoryList() {
+const TILE_SCAN_TTL = 3000;
+const TILE_SCAN_DEPTH = 8;
+let tileScanCache = { at: 0, data: null };
+
+function walkTileFolder(dir, depth, out) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (e) {
+    return;
+  }
+  entries.sort((x, y) => x.name.localeCompare(y.name));
+  for (const entry of entries) {
+    if (entry.isFile() && /\.png$/i.test(entry.name)) {
+      out.push({ file: path.join(dir, entry.name), base: entry.name.replace(/\.png$/i, ""), parent: path.basename(dir) });
+    }
+  }
+  if (depth >= TILE_SCAN_DEPTH) return;
+  for (const entry of entries) {
+    if (entry.isDirectory()) walkTileFolder(path.join(dir, entry.name), depth + 1, out);
+  }
+}
+
+function scanTiles(force) {
+  const now = Date.now();
+  if (!force && tileScanCache.data && now - tileScanCache.at < TILE_SCAN_TTL) return tileScanCache.data;
+  const files = {};
+  const taken = {};
   const categories = [];
-  for (const folder of tileCategoryFolders()) {
-    const dir = path.join(TILE_ASSET_DIR, folder);
-    if (!fs.existsSync(dir)) {
-      if (TILE_CATEGORIES.includes(folder)) categories.push({ name: folder, tiles: [] });
-      continue;
+  const claimName = (found) => {
+    let name = found.base;
+    if (taken[name.toLowerCase()]) name = found.parent + " - " + found.base;
+    let n = 2;
+    const root = name;
+    while (taken[name.toLowerCase()]) {
+      name = root + " (" + n + ")";
+      n++;
     }
-    categories.push({ name: folder, tiles: listAssetNames(dir) });
-  }
-  const rootTiles = listAssetNames(TILE_ASSET_DIR);
-  if (rootTiles.length > 0) {
-    const def = categories.find((c) => c.name === "Default");
-    if (def) {
-      for (const t of rootTiles) if (!def.tiles.includes(t)) def.tiles.push(t);
-      def.tiles.sort();
-    } else {
-      categories.unshift({ name: "Default", tiles: rootTiles });
+    taken[name.toLowerCase()] = true;
+    files[name] = found.file;
+    return name;
+  };
+  const folders = tileCategoryFolders();
+  const rootLoose = [];
+  try {
+    for (const entry of fs.readdirSync(TILE_ASSET_DIR, { withFileTypes: true })) {
+      if (entry.isFile() && /\.png$/i.test(entry.name)) rootLoose.push({ file: path.join(TILE_ASSET_DIR, entry.name), base: entry.name.replace(/\.png$/i, ""), parent: path.basename(TILE_ASSET_DIR) });
     }
+  } catch (e) {}
+  rootLoose.sort((x, y) => x.base.localeCompare(y.base));
+  for (const folder of folders) {
+    const found = [];
+    walkTileFolder(path.join(TILE_ASSET_DIR, folder), 0, found);
+    const tiles = [];
+    if (folder === "Default") {
+      for (const f of rootLoose) tiles.push(claimName(f));
+    }
+    for (const f of found) tiles.push(claimName(f));
+    tiles.sort();
+    if (tiles.length > 0 || TILE_CATEGORIES.includes(folder)) categories.push({ name: folder, tiles: tiles });
   }
-  return categories;
+  if (!folders.includes("Default") && rootLoose.length > 0) {
+    categories.unshift({ name: "Default", tiles: rootLoose.map(claimName).sort() });
+  }
+  tileScanCache = { at: now, data: { categories: categories, files: files } };
+  return tileScanCache.data;
+}
+
+function tileCategoryList() {
+  return scanTiles(false).categories;
 }
 
 function allTileNames() {
-  const names = [];
-  for (const cat of tileCategoryList()) {
-    for (const t of cat.tiles) if (!names.includes(t)) names.push(t);
-  }
-  names.sort();
-  return names;
+  return Object.keys(scanTiles(false).files).sort();
 }
 
 function findTileFile(name) {
-  const clean = path.basename(String(name)).replace(/\.png$/i, "");
-  if (!clean) return null;
-  const rootFile = path.join(TILE_ASSET_DIR, clean + ".png");
-  const order = tileCategoryFolders();
-  for (const folder of order) {
-    const file = path.join(TILE_ASSET_DIR, folder, clean + ".png");
-    if (fs.existsSync(file)) return file;
-  }
-  if (fs.existsSync(rootFile)) return rootFile;
-  return null;
+  const wanted = String(name).replace(/\.png$/i, "");
+  if (!wanted) return null;
+  let data = scanTiles(false);
+  if (!data.files[wanted]) data = scanTiles(true);
+  return data.files[wanted] || null;
 }
 
 function isBlockingTile(name) {
@@ -935,9 +974,16 @@ function queueWorldSave(p, final) {
   }
   const kills = Array.isArray(p._kills) ? p._kills.splice(0) : [];
   const vitalsChanged = p.hp !== p._reportedHp || p.mp !== p._reportedMp;
-  if (!final && Object.keys(delta).length === 0 && kills.length === 0 && !vitalsChanged) return;
+  const accDirty = !!p._accDirty;
+  if (!final && Object.keys(delta).length === 0 && kills.length === 0 && !vitalsChanged && !accDirty) return;
   const ailments = p._sheet && Array.isArray(p._sheet.ailments) ? p._sheet.ailments : [];
-  pendingSaves.push({ id: makeToken(), kind: p._npcName ? "npc" : undefined, npcName: p._npcName || undefined, userId: p.userId, name: p.name, slot: p._slot, pass: p._pass, delta: delta, kills: kills, hp: p.hp, mp: p.mp, ailments: ailments, layer: p.layer, col: p.col, row: p.row, final: final, ts: Date.now() });
+  const entry = { id: makeToken(), kind: p._npcName ? "npc" : undefined, npcName: p._npcName || undefined, userId: p.userId, name: p.name, slot: p._slot, pass: p._pass, delta: delta, kills: kills, hp: p.hp, mp: p.mp, ailments: ailments, layer: p.layer, col: p.col, row: p.row, final: final, ts: Date.now() };
+  if (accDirty && p._sheet && p._sheet.accessories) {
+    const a = p._sheet.accessories;
+    entry.accessories = { head: a.head || null, neck: a.neck || null, back: a.back || null };
+    p._accDirty = false;
+  }
+  pendingSaves.push(entry);
   p._reported = current;
   p._reportedHp = p.hp;
   p._reportedMp = p.mp;
@@ -1150,7 +1196,7 @@ function forceLeaveUser(userId, reason) {
 }
 
 function clientSheet(sh) {
-  return { species: sh.species, level: sh.level, types: sh.types, coins: sh.coins, capacity: sh.capacity, accessories: sh.accessories, moves: sh.moves.map((m) => m.name) };
+  return { species: sh.species, level: sh.level, types: sh.types, coins: sh.coins, capacity: sh.capacity, accessories: sh.accessories, moves: sh.moves.map((m) => m.name), moveInfo: worldCombat.sheetMoveInfo(sh) };
 }
 
 function cleanSheet(sheet) {
@@ -1326,7 +1372,7 @@ function saveEntitiesNow() {
   for (const id of Object.keys(entities)) {
     const e = entities[id];
     if (e.kind === "companion") continue;
-    list.push({ id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves });
+    list.push({ id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, fainted: e.fainted || false, faintUntil: e.faintUntil || 0 });
   }
   writeJsonFile(ENTITIES_FILE, { nextId: entityNextId, list: list });
 }
@@ -1337,17 +1383,17 @@ function scheduleEntitySave() {
 }
 
 function publicEntity(e) {
-  return { id: e.id, kind: e.kind, name: e.name, dex: e.dex, layer: e.layer, col: e.col, row: e.row, direction: e.direction, state: e.state };
+  return { id: e.id, kind: e.kind, name: e.name, dex: e.dex, layer: e.layer, col: e.col, row: e.row, direction: e.direction, state: e.state, fainted: !!e.fainted };
 }
 
 function gmEntity(e) {
-  return { id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, state: e.state, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves };
+  return { id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, state: e.state, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, fainted: !!e.fainted };
 }
 
 function entityAt(layer, col, row, ignoreId) {
   for (const id in entities) {
     const e = entities[id];
-    if (e.down || e.kind === "corpse") continue;
+    if (e.down || e.kind === "corpse" || e.fainted) continue;
     if (e.id !== ignoreId && e.layer === layer && e.col === col && e.row === row) return e;
   }
   return null;
@@ -1399,6 +1445,20 @@ function reviveEntity(e) {
   e.col = spot.col;
   e.row = spot.row;
   broadcastEntity(e, null, 0, 0);
+}
+
+function wakeNpc(e) {
+  e.fainted = false;
+  e.faintUntil = 0;
+  e._fight = null;
+  e.state = "idle";
+  const oldCol = e.col;
+  const oldRow = e.row;
+  const spot = worldFreeSpot(e.layer, e.col, e.row, e.id);
+  e.col = spot.col;
+  e.row = spot.row;
+  broadcastEntity(e, e.layer, oldCol, oldRow);
+  scheduleEntitySave();
 }
 
 function broadcastFacing(p) {
@@ -1461,6 +1521,10 @@ function entityTick() {
     const e = entities[id];
     if (e.down) {
       if (now >= e._downUntil) reviveEntity(e);
+      continue;
+    }
+    if (e.fainted) {
+      if (now >= (e.faintUntil || 0)) wakeNpc(e);
       continue;
     }
     if (e.kind === "companion" || e.kind === "corpse") continue;
@@ -1634,24 +1698,113 @@ function handleGmEntitySet(gm, data) {
   e.wander = Number.isNaN(wander) ? DEFAULT_WANDER : wander;
   e.sensor = Number.isNaN(sensor) ? DEFAULT_SENSOR : sensor;
   e.lines = kind === "npc" ? cleanLines(src.lines) : [];
-  if (kind === "enemy") {
-    e.boss = !!src.boss;
+  {
+    e.boss = kind === "enemy" ? !!src.boss : false;
     e.ivs = cleanIvs(src.ivs);
     e.accessories = cleanAccessories(src.accessories);
     e.loot = cleanLoot(src.loot);
     const moveCheck = cleanEnemyMoves(src.moves);
     e.moves = moveCheck.moves;
     if (moveCheck.unknown.length > 0) sendSocket(gm.socket, { type: "gm_notice", text: "Unknown moves ignored: " + moveCheck.unknown.join(", ") });
-  } else {
-    e.boss = false;
-    e.ivs = null;
-    e.accessories = null;
-    e.loot = [];
-    e.moves = [];
   }
   e.state = "idle";
   broadcastEntity(e, oldLayer, oldCol, oldRow);
   scheduleEntitySave();
+}
+
+function gmTargetOf(target) {
+  if (!target || typeof target !== "object") return null;
+  if (target.type === "player") {
+    const p = worldSession.players[String(target.id)];
+    return p ? { kind: "player", ref: p } : null;
+  }
+  const e = entities[String(target.id)];
+  if (e && (e.kind === "npc" || e.kind === "enemy")) return { kind: "entity", ref: e };
+  return null;
+}
+
+function inspectPayload(t) {
+  if (t.kind === "player") {
+    const p = t.ref;
+    const acc = p._sheet && p._sheet.accessories ? p._sheet.accessories : {};
+    return { type: "gm_inspect", target: { type: "player", id: p.id }, name: p.name, inv: p._inv.map((s) => ({ name: s.name, count: s.count })), accessories: { head: acc.head || null, neck: acc.neck || null, back: acc.back || null }, capacity: capacityOf(p) };
+  }
+  const e = t.ref;
+  const acc = e.accessories || {};
+  return { type: "gm_inspect", target: { type: "entity", id: e.id }, name: e.name, inv: (e.loot || []).map((s) => ({ name: s.name, count: s.count })), accessories: { head: acc.head || null, neck: acc.neck || null, back: acc.back || null }, capacity: 12 };
+}
+
+function syncPlayerInventory(p) {
+  sendPlayer(p, { type: "inv_sync", inventory: p._inv.map((s) => ({ name: s.name, count: s.count })), sheet: clientSheet(p._sheet) });
+  sendGms(null, { type: "gm_player", player: publicPlayer(p) });
+  queueWorldSave(p, false);
+}
+
+function handleGmInv(gm, data) {
+  const t = gmTargetOf(data.target);
+  if (!t) {
+    sendSocket(gm.socket, { type: "gm_notice", text: "That target is gone." });
+    return;
+  }
+  const op = String(data.op || "");
+  const name = canonItemName(data.name);
+  const count = Math.max(1, Math.min(99, parseInt(data.count, 10) || 1));
+  const slot = ["head", "neck", "back"].includes(data.slot) ? data.slot : null;
+  const isPlayer = t.kind === "player";
+  const list = isPlayer ? t.ref._inv : (Array.isArray(t.ref.loot) ? t.ref.loot : (t.ref.loot = []));
+
+  if (op === "add") {
+    if (!name) return;
+    let mine = null;
+    for (const entry of list) {
+      if (entry.name === name) { mine = entry; break; }
+    }
+    const cap = isPlayer ? capacityOf(t.ref) : 12;
+    if (!mine && list.length >= cap) {
+      sendSocket(gm.socket, { type: "gm_notice", text: (isPlayer ? t.ref.name + "'s bag is full." : t.ref.name + " can't carry any more kinds of items.") });
+      return;
+    }
+    if (mine) mine.count = Math.min(isPlayer ? 999 : 99, mine.count + count);
+    else list.push({ name: name, count: count });
+  } else if (op === "remove") {
+    if (!name) return;
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].name !== name) continue;
+      list[i].count = list[i].count - count;
+      if (list[i].count <= 0) list.splice(i, 1);
+      break;
+    }
+  } else if (op === "equip") {
+    if (!name || !slot) return;
+    if (isPlayer) {
+      if (!t.ref._sheet.accessories) t.ref._sheet.accessories = { back: null, neck: null, head: null };
+      t.ref._sheet.accessories[slot] = name;
+      t.ref._accDirty = true;
+    } else {
+      const acc = t.ref.accessories || { back: null, neck: null, head: null };
+      acc[slot] = name;
+      t.ref.accessories = acc;
+    }
+  } else if (op === "unequip") {
+    if (!slot) return;
+    if (isPlayer) {
+      if (t.ref._sheet.accessories) t.ref._sheet.accessories[slot] = null;
+      t.ref._accDirty = true;
+    } else if (t.ref.accessories) {
+      t.ref.accessories[slot] = null;
+      if (!t.ref.accessories.back && !t.ref.accessories.neck && !t.ref.accessories.head) t.ref.accessories = null;
+    }
+  } else {
+    return;
+  }
+
+  if (isPlayer) {
+    syncPlayerInventory(t.ref);
+  } else {
+    sendGms(t.ref.layer, { type: "gm_entity", entity: gmEntity(t.ref) });
+    scheduleEntitySave();
+  }
+  sendGms(null, inspectPayload(t));
 }
 
 function capacityOf(p) {
@@ -1667,7 +1820,7 @@ function handleInteract(p) {
   let bestDist = Infinity;
   for (const id in entities) {
     const e = entities[id];
-    if ((e.kind !== "npc" && e.kind !== "corpse") || e.layer !== p.layer) continue;
+    if ((e.kind !== "npc" && e.kind !== "corpse") || e.layer !== p.layer || e.fainted) continue;
     const dist = Math.max(Math.abs(e.col - p.col), Math.abs(e.row - p.row));
     if (dist <= 1 && (dist < bestDist || (dist === bestDist && e.kind === "corpse"))) {
       bestDist = dist;
@@ -2134,6 +2287,17 @@ function handleGmMessage(gm, data) {
     return;
   }
 
+  if (data.type === "gm_inspect") {
+    const t = gmTargetOf(data.target);
+    if (t) sendSocket(gm.socket, inspectPayload(t));
+    return;
+  }
+
+  if (data.type === "gm_inv") {
+    handleGmInv(gm, data);
+    return;
+  }
+
   if (data.type === "gm_tp") {
     const p = worldSession.players[data.playerId];
     const n = parseInt(data.layer, 10);
@@ -2289,6 +2453,8 @@ function handleWorldConnection(socket, pass) {
       handleInteract(me);
     } else if (data.type === "loot_take") {
       handleLootTake(me, data);
+    } else if (data.type === "attack_start") {
+      worldCombat.startDuel(me, data);
     } else if (data.type === "item_use") {
       worldCombat.useItemOutside(me, data);
     } else if (data.type === "exit") {

@@ -15,7 +15,7 @@ const worldEntityMeta = {};
 const worldEntityLabels = {};
 
 function entityUpsert(scene, e) {
-  worldEntityMeta[e.id] = { kind: e.kind, name: e.name, state: e.state, dex: e.dex };
+  worldEntityMeta[e.id] = { kind: e.kind, name: e.name, state: e.state, dex: e.dex, fainted: !!e.fainted };
   const sprite = otherPlayers[e.id];
   if (!sprite) {
     addOtherPlayer(scene, { id: e.id, dex: e.dex, col: e.col, row: e.row, direction: e.direction });
@@ -81,7 +81,12 @@ function entityLabelsFrame(scene) {
       label.setText(meta.name + " (fainted) T: loot");
       label.setColor("#d9c27a");
       if (!COMBAT.active || !COMBAT.actors[id]) sp.setAlpha(0.45);
+    } else if (meta.fainted) {
+      label.setText(meta.name + " (fainted)");
+      label.setColor("#d9c27a");
+      if (!COMBAT.active || !COMBAT.actors[id]) sp.setAlpha(0.45);
     } else {
+      if (sp.alpha < 1 && (!COMBAT.active || !COMBAT.actors[id])) sp.setAlpha(1);
       label.setText((meta.state === "alert" ? "! " : "") + meta.name);
       label.setColor(meta.state === "alert" ? "#ff5050" : (meta.kind === "enemy" ? "#ffb0b0" : (meta.kind === "companion" ? "#8fd0ff" : "#9fe89f")));
     }
@@ -264,6 +269,10 @@ function enterPlayerWorld(scene) {
     worldViewGfx = scene.add.graphics();
     worldViewGfx.setDepth(0);
   }
+  scene.input.on("pointerdown", (pointer) => atkPointer(scene, pointer));
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && atkTarget) atkClose();
+  });
 }
 
 function drawPlayerView(scene, data) {
@@ -623,10 +632,7 @@ function gmHandleClickTool(scene, c, r) {
     gmSend({ type: "gm_spawn", layer: WG.layer, col: c, row: r });
     return;
   }
-  if (WG.tool === "item") {
-    gmSend({ type: "gm_item", layer: WG.layer, col: c, row: r, name: document.getElementById("wgItem").value.trim() });
-    return;
-  }
+  if (WG.tool === "item") return;
   if (WG.tool === "creature") {
     gmSend({ type: "gm_entity_set", entity: gmReadCreatureForm(null, c, r) });
     return;
@@ -640,6 +646,18 @@ function gmHandleClickTool(scene, c, r) {
     WG.selectedEntity = found ? found.id : null;
     gmShowSelection();
     gmDrawMarkers();
+    if (found) {
+      if (found.kind === "npc" || found.kind === "enemy") gmInspect({ type: "entity", id: found.id });
+      else gmInspectClose();
+      return;
+    }
+    let foundPlayer = null;
+    for (const pid in WG.players) {
+      const hp = WG.players[pid];
+      if (hp.layer === WG.layer && hp.col === c && hp.row === r) foundPlayer = hp;
+    }
+    if (foundPlayer) gmInspect({ type: "player", id: foundPlayer.id });
+    else gmInspectClose();
     return;
   }
   if (WG.tool === "movecreature") {
@@ -666,6 +684,7 @@ function gmPointerDown(scene, pointer) {
     return;
   }
   if (!pointer.leftButtonDown()) return;
+  if (gmTryFloorDrag(pointer, cell)) return;
   const paintTool = TOOL_PREVIEW[WG.tool] !== undefined;
   if (!paintTool) {
     gmHandleClickTool(scene, cell.c, cell.r);
@@ -796,9 +815,14 @@ function gmRenderPlayers() {
       gmRenderPlayers();
       gmUpdateHoverStatus();
     });
+    const itemsBtn = document.createElement("button");
+    itemsBtn.className = "wgBtn";
+    itemsBtn.textContent = "Items";
+    itemsBtn.addEventListener("click", () => gmInspect({ type: "player", id: p.id }));
     row.appendChild(label);
     row.appendChild(view);
     row.appendChild(move);
+    row.appendChild(itemsBtn);
     box.appendChild(row);
   }
 }
@@ -898,7 +922,7 @@ function gmBuildPanel() {
     + "<button class='wgBtn' data-wgtool='void'>Erase</button>"
     + "<button class='wgBtn' data-wgtool='portal'>Portal</button>"
     + "<button class='wgBtn' data-wgtool='spawn'>Spawn</button>"
-    + "<button class='wgBtn' data-wgtool='item'>Item</button>"
+    + "<button class='wgBtn' data-wgtool='item'>Move items</button>"
     + "<button class='wgBtn' data-wgtool='teleport'>Move player</button>"
     + "<button class='wgBtn' data-wgtool='tileclear'>Clear tile art</button>"
     + "<button class='wgBtn' data-wgtool='objerase'>Remove object</button>"
@@ -944,7 +968,6 @@ function gmBuildPanel() {
     + "<button class='wgBtn' data-wgshape='outline'>Box outline</button>"
     + "</div>"
     + "<div style='margin-top:6px'><label><input type='checkbox' id='wgTwoWay' checked> Portals work both ways</label></div>"
-    + "<div style='margin-top:6px'>Item name: <input type='text' id='wgItem' placeholder='empty = remove item'></div>"
     + "<div style='margin-top:6px'><button class='wgBtn' id='wgUndo'>Undo (Ctrl+Z)</button></div>"
     + "<h4>Players</h4><div id='wgPlayers'></div>"
     + "<div id='wgStatus'></div>"
@@ -1150,6 +1173,7 @@ function enterGmWorld(scene) {
   WG.markerGfx.setDepth(55);
   gmDrawGrid(scene);
   gmBuildPanel();
+  gmBuildCreative();
   fetch("/api/world/assets").then((r) => r.json()).then(gmBuildAssetButtons).catch(() => {
     document.getElementById("wgTileList").textContent = "Could not load the picture list.";
     document.getElementById("wgObjList").textContent = "";
@@ -1241,6 +1265,12 @@ const combatXml = {};
 const combatAnimState = {};
 let combatRangeGfx = null;
 
+function combatIsFoe(a) {
+  const me = COMBAT.actors[myId];
+  if (me && me.side && a.side) return a.side !== me.side;
+  return a.kind === "enemy";
+}
+
 function combatEl(id) {
   return document.getElementById(id);
 }
@@ -1306,7 +1336,7 @@ function combatRenderOrder() {
     const a = COMBAT.actors[ids[i]];
     if (!a || a.dead) continue;
     const chip = document.createElement("span");
-    chip.className = "cbo " + (a.kind === "enemy" ? "foe" : "ally") + (i === 0 && COMBAT.turn !== null ? " cur" : "");
+    chip.className = "cbo " + (combatIsFoe(a) ? "foe" : "ally") + (i === 0 && COMBAT.turn !== null ? " cur" : "");
     chip.textContent = a.name;
     el.appendChild(chip);
     shown++;
@@ -1393,7 +1423,7 @@ function combatShowRange(range) {
   combatRangeGfx.lineStyle(2, 0xff5050, 0.9);
   for (const id in COMBAT.actors) {
     const a = COMBAT.actors[id];
-    if (a.dead || a.kind !== "enemy") continue;
+    if (a.dead || !combatIsFoe(a)) continue;
     const spr = combatSprite(a.id);
     if (!spr || spr === "loading") continue;
     const c = Math.floor(spr.x / TILE);
@@ -1423,8 +1453,8 @@ function combatSelectMove(index) {
   for (const id in COMBAT.actors) {
     const a = COMBAT.actors[id];
     if (a.dead) continue;
-    if (wantEnemy && a.kind !== "enemy") continue;
-    if (!wantEnemy && a.kind !== "player" && a.kind !== "ally") continue;
+    if (wantEnemy && !combatIsFoe(a)) continue;
+    if (!wantEnemy && (combatIsFoe(a) || (a.kind !== "player" && a.kind !== "ally"))) continue;
     const spr = combatSprite(a.id);
     const pos = spr && spr !== "loading" ? { col: Math.floor(spr.x / TILE), row: Math.floor(spr.y / TILE) } : { col: a.col, row: a.row };
     cands.push({ a: a, dist: combatDistance(pos, mine) });
@@ -1750,7 +1780,8 @@ function combatEnd(scene, d) {
     const spr = otherPlayers[id];
     if (!spr) continue;
     const far = spr !== "loading" && (Math.abs(Math.floor(spr.x / TILE) - mine.col) > 8 || Math.abs(Math.floor(spr.y / TILE) - mine.row) > 6);
-    if (a.kind === "enemy" && (a.dead || far)) entityRemove(id);
+    const keepNpc = worldEntityMeta[id] && worldEntityMeta[id].kind === "npc";
+    if (a.kind === "enemy" && !keepNpc && (a.dead || far)) entityRemove(id);
     else if (a.kind === "player" && far) removeOtherPlayer(id);
     else if (a.kind === "ally" && spr !== "loading") spr.maxHp = 0;
   }
@@ -1962,7 +1993,7 @@ function itemCandidates(fx) {
     for (const id in COMBAT.actors) {
       const a = COMBAT.actors[id];
       if (a.dead || String(a.id) === String(myId)) continue;
-      const isFoe = a.kind === "enemy";
+      const isFoe = combatIsFoe(a);
       if (fx.rule === "enemy" && !isFoe) continue;
       if ((fx.rule === "ally" || fx.rule === "self") && isFoe) continue;
       const spr = combatSprite(a.id);
@@ -1999,7 +2030,7 @@ function itemConeOptions() {
   if (COMBAT.active) {
     for (const id in COMBAT.actors) {
       const a = COMBAT.actors[id];
-      if (a.dead || a.kind !== "enemy") continue;
+      if (a.dead || !combatIsFoe(a)) continue;
       const spr = combatSprite(a.id);
       const pos = spr && spr !== "loading" ? itemSpriteCell(spr) : { col: a.col, row: a.row };
       foes.push({ name: a.name, pos: pos, dist: combatDistance(pos, mine) });
@@ -2100,6 +2131,478 @@ document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape" && lootState) lootClose();
 });
 
+const worldPlayerNames = {};
+let atkTarget = null;
+let atkMenuEl = null;
+let atkRingGfx = null;
+
+function atkInject() {
+  if (atkMenuEl) return;
+  const style = document.createElement("style");
+  style.textContent = "#atkMenu{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);width:340px;max-width:94vw;background:rgba(20,20,34,0.96);border:2px solid #c0392b;border-radius:10px;padding:10px;color:#fff;font-size:13px;z-index:40}"
+    + "#atkMenu.hidden{display:none}"
+    + "#atkMenu .atkTitle{font-weight:bold;color:#ff9a8a;margin-bottom:6px}"
+    + "#atkMenu button{display:block;width:100%;text-align:left;background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:6px;padding:6px 8px;margin:3px 0;cursor:pointer;font-size:12px}"
+    + "#atkMenu button:disabled{opacity:0.45;cursor:not-allowed}"
+    + "#atkMenu button.atkCancel{text-align:center;border-color:#888}";
+  document.head.appendChild(style);
+  atkMenuEl = document.createElement("div");
+  atkMenuEl.id = "atkMenu";
+  atkMenuEl.className = "hidden";
+  document.body.appendChild(atkMenuEl);
+}
+
+function atkClose() {
+  atkTarget = null;
+  if (atkMenuEl) atkMenuEl.classList.add("hidden");
+  if (atkRingGfx) atkRingGfx.clear();
+}
+
+function atkFindTarget(c, r) {
+  for (const id in otherPlayers) {
+    const spr = otherPlayers[id];
+    if (!spr || spr === "loading") continue;
+    const pos = itemSpriteCell(spr);
+    if (pos.col !== c || pos.row !== r) continue;
+    const meta = worldEntityMeta[id];
+    if (meta) {
+      if (meta.kind !== "npc" || meta.fainted) continue;
+      return { id: id, type: "entity", name: meta.name, col: c, row: r };
+    }
+    return { id: id, type: "player", name: worldPlayerNames[id] || "Player", col: c, row: r };
+  }
+  return null;
+}
+
+function atkOpen(target) {
+  atkInject();
+  atkTarget = target;
+  const sheet = typeof invSheet === "object" && invSheet ? invSheet : null;
+  const infos = sheet && Array.isArray(sheet.moveInfo) ? sheet.moveInfo : [];
+  const dist = Math.max(Math.abs(player.col - target.col), Math.abs(player.row - target.row));
+  atkMenuEl.innerHTML = "";
+  const title = document.createElement("div");
+  title.className = "atkTitle";
+  title.textContent = (target.type === "player" ? "Challenge " : "Attack ") + target.name + " (" + dist + " tile" + (dist === 1 ? "" : "s") + " away). Pick a move:";
+  atkMenuEl.appendChild(title);
+  if (infos.length === 0) {
+    const none = document.createElement("div");
+    none.textContent = "You have no moves to use.";
+    atkMenuEl.appendChild(none);
+  }
+  for (let i = 0; i < infos.length; i++) {
+    const m = infos[i];
+    const btn = document.createElement("button");
+    let note = "";
+    let blocked = false;
+    if (m.unsupported) { note = " | not usable here"; blocked = true; }
+    else if (m.target === "self" || m.target === "all-allies" || m.target === "ally") { note = " | not an attack"; blocked = true; }
+    else if (typeof player.mp === "number" && player.mp < m.mpCost) { note = " | not enough MP"; blocked = true; }
+    else if (dist > m.range) { note = " | too far"; blocked = true; }
+    btn.textContent = (i + 1) + ". " + m.name + " | " + m.type + " " + m.category + (m.power > 0 ? " P" + m.power : "") + " | MP " + m.mpCost + " | R" + m.range + note;
+    btn.disabled = blocked;
+    btn.addEventListener("click", () => {
+      gmSend({ type: "attack_start", targetType: target.type, id: target.id, move: i });
+      atkClose();
+    });
+    atkMenuEl.appendChild(btn);
+  }
+  const cancel = document.createElement("button");
+  cancel.className = "atkCancel";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", atkClose);
+  atkMenuEl.appendChild(cancel);
+  atkMenuEl.classList.remove("hidden");
+  if (sceneRef) {
+    if (!atkRingGfx) {
+      atkRingGfx = sceneRef.add.graphics();
+      atkRingGfx.setDepth(150);
+    }
+    atkRingGfx.clear();
+    atkRingGfx.lineStyle(3, 0xff5050, 1);
+    atkRingGfx.strokeRect(target.col * TILE + 2, target.row * TILE + 2, TILE - 4, TILE - 4);
+  }
+}
+
+function atkPointer(scene, pointer) {
+  if (!worldPlayerMode || worldGmMode) return;
+  if (!pointer.leftButtonDown()) return;
+  if (COMBAT.active || chatActive) return;
+  if (typeof itemMenuOpenNow === "function" && itemMenuOpenNow()) return;
+  if (lootState) return;
+  const wp = scene.cameras.main.getWorldPoint(pointer.x, pointer.y);
+  const target = atkFindTarget(Math.floor(wp.x / TILE), Math.floor(wp.y / TILE));
+  if (!target) {
+    atkClose();
+    return;
+  }
+  atkOpen(target);
+}
+
+const WGD = { drag: null, ghost: null, inspect: null, inspEl: null, creativeEl: null, searchEl: null, gridEl: null };
+
+function wgIconUrl(name) {
+  const path = typeof itemIndex === "object" && itemIndex ? itemIndex[name] : null;
+  return path ? encodeURI(path) : null;
+}
+
+function wgMakeIcon(name) {
+  const box = document.createElement("div");
+  box.className = "wgIcon";
+  const url = wgIconUrl(name);
+  if (url) {
+    const img = document.createElement("img");
+    img.src = url;
+    img.draggable = false;
+    box.appendChild(img);
+  } else {
+    box.textContent = String(name).charAt(0).toUpperCase();
+  }
+  return box;
+}
+
+function gmBuildCreative() {
+  if (WGD.creativeEl) return;
+  const style = document.createElement("style");
+  style.textContent = "#wgCreative{position:fixed;left:8px;bottom:8px;width:340px;height:230px;background:rgba(20,20,34,0.95);border:1px solid #3a3a55;border-radius:8px;padding:8px;color:#fff;font-size:12px;z-index:25;display:flex;flex-direction:column;user-select:none}"
+    + "#wgCreative.wgDel{border-color:#ff5050;box-shadow:0 0 12px #ff5050}"
+    + "#wgCreative .wgCrHead{font-weight:bold;color:#ffd23f;margin-bottom:4px}"
+    + "#wgCreative input{background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;padding:4px;width:96%;margin-bottom:4px;user-select:text}"
+    + "#wgCreGrid{flex:1;overflow-y:auto;display:flex;flex-wrap:wrap;align-content:flex-start}"
+    + ".wgCreItem{width:52px;margin:2px;padding:3px 1px;background:#2d2d44;border:1px solid #55557a;border-radius:5px;text-align:center;cursor:grab;font-size:9px;overflow:hidden}"
+    + ".wgCreItem:hover{border-color:#fff}"
+    + ".wgCreItem span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
+    + ".wgIcon{width:32px;height:32px;margin:0 auto 2px auto;display:flex;align-items:center;justify-content:center;background:#1a1a2a;border-radius:4px;font-weight:bold}"
+    + ".wgIcon img{max-width:32px;max-height:32px;image-rendering:pixelated;pointer-events:none}"
+    + "#wgGhost{position:fixed;z-index:80;pointer-events:none;opacity:0.85;width:44px;text-align:center;font-size:9px;color:#fff;text-shadow:0 0 3px #000}"
+    + "#wgInspector{position:fixed;left:356px;bottom:8px;width:300px;max-height:60vh;overflow-y:auto;background:rgba(20,20,34,0.95);border:1px solid #3a3a55;border-radius:8px;padding:8px;color:#fff;font-size:12px;z-index:25;user-select:none}"
+    + "#wgInspector.hidden{display:none}"
+    + "#wgInspector .wgInHead{display:flex;justify-content:space-between;font-weight:bold;color:#ffd23f;margin-bottom:6px}"
+    + "#wgInspector h5{margin:8px 0 4px 0;color:#c8c8ff;font-size:12px}"
+    + ".wgSlots{display:flex;gap:6px}"
+    + ".wgSlot{flex:1;min-height:58px;background:#1a1a2a;border:1px dashed #55557a;border-radius:6px;padding:3px;text-align:center;font-size:10px}"
+    + ".wgSlot.wgOver,.wgInvBox.wgOver{border-color:#4a6cff;background:#232344}"
+    + ".wgInvBox{min-height:64px;background:#1a1a2a;border:1px dashed #55557a;border-radius:6px;padding:3px;display:flex;flex-wrap:wrap;align-content:flex-start}"
+    + ".wgStack{position:relative;width:54px;margin:2px;padding:3px 1px;background:#2d2d44;border:1px solid #55557a;border-radius:5px;text-align:center;cursor:grab;font-size:9px}"
+    + ".wgStack span.n{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
+    + ".wgStack .cnt{position:absolute;right:2px;top:1px;background:#000;border-radius:6px;padding:0 4px;font-size:9px}"
+    + ".wgStack .pm{display:flex;justify-content:center;gap:4px;margin-top:2px}"
+    + ".wgStack .pm b{cursor:pointer;background:#444466;border-radius:3px;padding:0 5px}";
+  document.head.appendChild(style);
+
+  const box = document.createElement("div");
+  box.id = "wgCreative";
+  box.innerHTML = "<div class='wgCrHead'>Creative items | drag out to place or give, drag anything back here to delete</div><input type='text' id='wgCreSearch' placeholder='Search items'><div id='wgCreGrid'></div>";
+  document.body.appendChild(box);
+  WGD.creativeEl = box;
+  WGD.searchEl = box.querySelector("#wgCreSearch");
+  WGD.gridEl = box.querySelector("#wgCreGrid");
+  WGD.searchEl.addEventListener("focus", () => { chatActive = true; });
+  WGD.searchEl.addEventListener("blur", () => { chatActive = false; });
+  WGD.searchEl.addEventListener("input", gmCreativeFill);
+
+  const insp = document.createElement("div");
+  insp.id = "wgInspector";
+  insp.className = "hidden";
+  document.body.appendChild(insp);
+  WGD.inspEl = insp;
+
+  fetch("items-index.json").then((r) => r.json()).then((data) => {
+    itemIndex = data;
+    gmCreativeFill();
+    if (WGD.inspect && WGD.lastInspect) gmRenderInspector(WGD.lastInspect);
+  }).catch(() => {});
+  gmCreativeFill();
+}
+
+function gmCreativeFill() {
+  if (!WGD.gridEl) return;
+  const query = WGD.searchEl.value.trim().toLowerCase();
+  const names = typeof itemIndex === "object" && itemIndex ? Object.keys(itemIndex).sort() : [];
+  WGD.gridEl.innerHTML = "";
+  if (names.length === 0) {
+    WGD.gridEl.textContent = "Loading items...";
+    return;
+  }
+  let shown = 0;
+  for (const name of names) {
+    if (query && name.toLowerCase().indexOf(query) === -1) continue;
+    const cell = document.createElement("div");
+    cell.className = "wgCreItem";
+    cell.title = name;
+    cell.appendChild(wgMakeIcon(name));
+    const label = document.createElement("span");
+    label.textContent = name;
+    cell.appendChild(label);
+    cell.addEventListener("mousedown", (ev) => gmDragStart(ev, { src: "new", name: name, count: 1 }));
+    WGD.gridEl.appendChild(cell);
+    shown++;
+  }
+  if (shown === 0) WGD.gridEl.textContent = "No items match that search.";
+}
+
+function gmDragStart(ev, info) {
+  if (ev.button !== 0) return;
+  if (ev.preventDefault) ev.preventDefault();
+  gmDragCancel();
+  WGD.drag = info;
+  const ghost = document.createElement("div");
+  ghost.id = "wgGhost";
+  ghost.appendChild(wgMakeIcon(info.name));
+  const label = document.createElement("div");
+  label.textContent = info.name;
+  ghost.appendChild(label);
+  document.body.appendChild(ghost);
+  WGD.ghost = ghost;
+  gmDragPlaceGhost(ev);
+  if (WGD.creativeEl) WGD.creativeEl.classList.toggle("wgDel", info.src !== "new");
+  window.addEventListener("mousemove", gmDragMove);
+  window.addEventListener("mouseup", gmDragEnd);
+}
+
+function gmDragPlaceGhost(ev) {
+  if (!WGD.ghost) return;
+  WGD.ghost.style.left = (ev.clientX - 22) + "px";
+  WGD.ghost.style.top = (ev.clientY - 22) + "px";
+}
+
+function gmDragMove(ev) {
+  gmDragPlaceGhost(ev);
+  document.querySelectorAll(".wgOver").forEach((el) => el.classList.remove("wgOver"));
+  const el = document.elementFromPoint(ev.clientX, ev.clientY);
+  const zone = el && el.closest ? el.closest("[data-wgdrop]") : null;
+  if (zone) zone.classList.add("wgOver");
+}
+
+function gmDragCancel() {
+  window.removeEventListener("mousemove", gmDragMove);
+  window.removeEventListener("mouseup", gmDragEnd);
+  if (WGD.ghost) {
+    WGD.ghost.remove();
+    WGD.ghost = null;
+  }
+  WGD.drag = null;
+  document.querySelectorAll(".wgOver").forEach((el) => el.classList.remove("wgOver"));
+  if (WGD.creativeEl) WGD.creativeEl.classList.remove("wgDel");
+}
+
+function gmDragEnd(ev) {
+  const info = WGD.drag;
+  const el = document.elementFromPoint(ev.clientX, ev.clientY);
+  gmDragCancel();
+  if (!info || !el) return;
+  if (el.closest("#wgCreative")) {
+    gmDeleteSource(info);
+    return;
+  }
+  const zone = el.closest("[data-wgdrop]");
+  if (zone) {
+    gmDropZone(info, zone.getAttribute("data-wgdrop"));
+    return;
+  }
+  if (el.tagName === "CANVAS") gmDropWorld(info, ev);
+}
+
+function gmSameTarget(a, b) {
+  return !!a && !!b && a.type === b.type && String(a.id) === String(b.id);
+}
+
+function gmTakeFromSource(info, wholeStack) {
+  if (info.src === "floor") {
+    gmSend({ type: "gm_item", layer: WG.layer, col: info.col, row: info.row, name: "" });
+  } else if (info.src === "inv") {
+    gmSend({ type: "gm_inv", target: info.target, op: "remove", name: info.name, count: wholeStack ? info.count : 1 });
+  } else if (info.src === "slot") {
+    gmSend({ type: "gm_inv", target: info.target, op: "unequip", slot: info.slot });
+  }
+}
+
+function gmDeleteSource(info) {
+  if (info.src === "new") return;
+  gmTakeFromSource(info, true);
+}
+
+function gmGiveTo(info, target, mode, slot) {
+  if (mode === "inv" && info.src === "inv" && gmSameTarget(info.target, target)) return;
+  if (mode === "slot" && info.src === "slot" && gmSameTarget(info.target, target) && info.slot === slot) return;
+  gmTakeFromSource(info, false);
+  if (mode === "slot") gmSend({ type: "gm_inv", target: target, op: "equip", name: info.name, slot: slot });
+  else gmSend({ type: "gm_inv", target: target, op: "add", name: info.name, count: 1 });
+}
+
+function gmDropZone(info, zone) {
+  const target = WGD.inspect;
+  if (!target) return;
+  if (zone === "inv") gmGiveTo(info, target, "inv", null);
+  else if (zone.indexOf("slot:") === 0) gmGiveTo(info, target, "slot", zone.substring(5));
+}
+
+function gmDropWorld(info, ev) {
+  if (!sceneRef) return;
+  const canvas = sceneRef.game.canvas;
+  const rect = canvas.getBoundingClientRect();
+  const gx = (ev.clientX - rect.left) * (sceneRef.scale.width / rect.width);
+  const gy = (ev.clientY - rect.top) * (sceneRef.scale.height / rect.height);
+  const wp = sceneRef.cameras.main.getWorldPoint(gx, gy);
+  const c = Math.floor(wp.x / TILE);
+  const r = Math.floor(wp.y / TILE);
+  if (!gmInBounds(c, r)) return;
+  let target = null;
+  for (const eid in WG.entities) {
+    const he = WG.entities[eid];
+    if (he.col === c && he.row === r && (he.kind === "npc" || he.kind === "enemy")) target = { type: "entity", id: he.id };
+  }
+  for (const pid in WG.players) {
+    const hp = WG.players[pid];
+    if (hp.layer === WG.layer && hp.col === c && hp.row === r) target = { type: "player", id: hp.id };
+  }
+  if (target) {
+    gmGiveTo(info, target, "inv", null);
+    return;
+  }
+  if (info.src === "floor" && info.col === c && info.row === r) return;
+  gmTakeFromSource(info, false);
+  gmSend({ type: "gm_item", layer: WG.layer, col: c, row: r, name: info.name });
+}
+
+function gmTryFloorDrag(pointer, cell) {
+  if (WG.tool !== "item" && WG.tool !== "select") return false;
+  if (WG.tool === "select") {
+    for (const eid in WG.entities) {
+      if (WG.entities[eid].col === cell.c && WG.entities[eid].row === cell.r) return false;
+    }
+    for (const pid in WG.players) {
+      const hp = WG.players[pid];
+      if (hp.layer === WG.layer && hp.col === cell.c && hp.row === cell.r) return false;
+    }
+  }
+  for (const it of floorItems) {
+    if (it.col === cell.c && it.row === cell.r) {
+      gmDragStart(pointer.event, { src: "floor", name: it.name, col: it.col, row: it.row, count: 1 });
+      return true;
+    }
+  }
+  return false;
+}
+
+function gmInspect(target) {
+  WGD.inspect = target;
+  WGD.lastInspect = null;
+  if (WGD.inspEl) {
+    WGD.inspEl.classList.remove("hidden");
+    WGD.inspEl.textContent = "Loading...";
+  }
+  gmSend({ type: "gm_inspect", target: target });
+}
+
+function gmInspectClose() {
+  WGD.inspect = null;
+  WGD.lastInspect = null;
+  if (WGD.inspEl) WGD.inspEl.classList.add("hidden");
+}
+
+function gmSyncFormFromInspect(data) {
+  if (data.target.type !== "entity" || WG.selectedEntity !== data.target.id) return;
+  document.getElementById("wgEItems").value = gmFormatLoot(data.inv);
+  document.getElementById("wgEAccHead").value = data.accessories.head || "";
+  document.getElementById("wgEAccNeck").value = data.accessories.neck || "";
+  document.getElementById("wgEAccBack").value = data.accessories.back || "";
+}
+
+function gmRenderInspector(data) {
+  if (!WGD.inspect || !gmSameTarget(WGD.inspect, data.target)) return;
+  WGD.lastInspect = data;
+  gmSyncFormFromInspect(data);
+  const el = WGD.inspEl;
+  el.innerHTML = "";
+  el.classList.remove("hidden");
+  const head = document.createElement("div");
+  head.className = "wgInHead";
+  const title = document.createElement("span");
+  title.textContent = data.name + (data.target.type === "player" ? " (player)" : "");
+  const close = document.createElement("button");
+  close.className = "wgBtn";
+  close.textContent = "Close";
+  close.addEventListener("click", gmInspectClose);
+  head.appendChild(title);
+  head.appendChild(close);
+  el.appendChild(head);
+
+  const eqTitle = document.createElement("h5");
+  eqTitle.textContent = "Equipped (drop an item on a slot)";
+  el.appendChild(eqTitle);
+  const slots = document.createElement("div");
+  slots.className = "wgSlots";
+  for (const slot of ["head", "neck", "back"]) {
+    const slotEl = document.createElement("div");
+    slotEl.className = "wgSlot";
+    slotEl.setAttribute("data-wgdrop", "slot:" + slot);
+    const name = data.accessories[slot];
+    const label = document.createElement("div");
+    label.textContent = slot.charAt(0).toUpperCase() + slot.slice(1);
+    slotEl.appendChild(label);
+    if (name) {
+      const held = document.createElement("div");
+      held.style.cursor = "grab";
+      held.title = name + " (drag out to unequip or delete)";
+      held.appendChild(wgMakeIcon(name));
+      const nm = document.createElement("div");
+      nm.textContent = name;
+      held.appendChild(nm);
+      held.addEventListener("mousedown", (ev) => gmDragStart(ev, { src: "slot", name: name, slot: slot, target: data.target, count: 1 }));
+      slotEl.appendChild(held);
+    }
+    slots.appendChild(slotEl);
+  }
+  el.appendChild(slots);
+
+  const invTitle = document.createElement("h5");
+  invTitle.textContent = "Inventory " + data.inv.length + "/" + data.capacity + " (drop items here)";
+  el.appendChild(invTitle);
+  const inv = document.createElement("div");
+  inv.className = "wgInvBox";
+  inv.setAttribute("data-wgdrop", "inv");
+  if (data.inv.length === 0) {
+    const empty = document.createElement("div");
+    empty.style.cssText = "color:#99a;padding:6px";
+    empty.textContent = "Empty";
+    inv.appendChild(empty);
+  }
+  for (const stack of data.inv) {
+    const cell = document.createElement("div");
+    cell.className = "wgStack";
+    cell.title = stack.name + " (drag onto a slot or the world, or back to the creative window to delete)";
+    cell.appendChild(wgMakeIcon(stack.name));
+    const nm = document.createElement("span");
+    nm.className = "n";
+    nm.textContent = stack.name;
+    cell.appendChild(nm);
+    const cnt = document.createElement("span");
+    cnt.className = "cnt";
+    cnt.textContent = "x" + stack.count;
+    cell.appendChild(cnt);
+    const pm = document.createElement("div");
+    pm.className = "pm";
+    const minus = document.createElement("b");
+    minus.textContent = "-";
+    minus.addEventListener("mousedown", (ev) => ev.stopPropagation());
+    minus.addEventListener("click", () => gmSend({ type: "gm_inv", target: data.target, op: "remove", name: stack.name, count: 1 }));
+    const plus = document.createElement("b");
+    plus.textContent = "+";
+    plus.addEventListener("mousedown", (ev) => ev.stopPropagation());
+    plus.addEventListener("click", () => gmSend({ type: "gm_inv", target: data.target, op: "add", name: stack.name, count: 1 }));
+    pm.appendChild(minus);
+    pm.appendChild(plus);
+    cell.appendChild(pm);
+    cell.addEventListener("mousedown", (ev) => {
+      if (ev.target.tagName === "B") return;
+      gmDragStart(ev, { src: "inv", name: stack.name, count: stack.count, target: data.target });
+    });
+    inv.appendChild(cell);
+  }
+  el.appendChild(inv);
+}
+
 window.worldHook = function (scene, data) {
   if (data.type === "init" && data.world) {
     if (data.itemFx) itemFx = data.itemFx;
@@ -2108,7 +2611,37 @@ window.worldHook = function (scene, data) {
       return true;
     }
     enterPlayerWorld(scene);
+    if (data.players) {
+      for (const pid in data.players) {
+        if (data.players[pid] && data.players[pid].name) worldPlayerNames[pid] = data.players[pid].name;
+      }
+    }
     return false;
+  }
+
+  if (data.type === "join" && data.player && data.player.name) {
+    worldPlayerNames[data.player.id] = data.player.name;
+    return false;
+  }
+
+  if (data.type === "inv_sync") {
+    if (data.sheet) {
+      invSheet = data.sheet;
+      invSheet.accessories = invSheet.accessories || { back: null, neck: null, head: null };
+      invCapacity = Math.max(1, data.sheet.capacity || BASE_SLOTS);
+    }
+    if (Array.isArray(data.inventory)) {
+      inventoryItems.length = 0;
+      for (const entry of data.inventory) inventoryItems.push({ name: entry.name, count: entry.count });
+      selectedSlot = -1;
+    }
+    if (inventoryOpen) refreshInventoryPanel();
+    return true;
+  }
+
+  if (data.type === "gm_inspect" && worldGmMode) {
+    gmRenderInspector(data);
+    return true;
   }
 
   if (typeof data.type === "string" && data.type.indexOf("c_") === 0) {
@@ -2212,6 +2745,7 @@ window.worldHook = function (scene, data) {
         WG.selectedEntity = null;
         gmShowSelection();
       }
+      if (WGD.inspect && WGD.inspect.type === "entity" && WGD.inspect.id === data.id) gmInspectClose();
       gmDrawMarkers();
       return true;
     }
