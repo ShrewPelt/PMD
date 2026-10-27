@@ -699,11 +699,11 @@ function makeLayer(name) {
   const rows = [];
   const blank = " ".repeat(LAYER_W);
   for (let r = 0; r < LAYER_H; r++) rows.push(blank);
-  return { name: name || "", rows: rows, art: rows.slice(), objects: {}, portals: {}, spawn: null };
+  return { name: name || "", rows: rows, art: rows.slice(), objects: {}, passable: {}, portals: {}, spawn: null };
 }
 
 function layerHasContent(L) {
-  if (L.name || L.spawn || Object.keys(L.portals).length > 0 || Object.keys(L.objects).length > 0) return true;
+  if (L.name || L.spawn || Object.keys(L.portals).length > 0 || Object.keys(L.objects).length > 0 || Object.keys(L.passable).length > 0) return true;
   for (const row of L.rows) {
     if (row.trim().length > 0) return true;
   }
@@ -731,6 +731,10 @@ function loadLayers() {
       const objList = Array.isArray(saved.objects) ? saved.objects : [];
       for (const o of objList) {
         if (Array.isArray(o) && o.length >= 3) L.objects[o[0] + "," + o[1]] = { name: String(o[2]), solid: o[3] !== 0 };
+      }
+      const passList = Array.isArray(saved.passable) ? saved.passable : [];
+      for (const pc of passList) {
+        if (Array.isArray(pc) && pc.length >= 2) L.passable[pc[0] + "," + pc[1]] = 1;
       }
       L.portals = saved.portals && typeof saved.portals === "object" ? saved.portals : {};
       L.spawn = saved.spawn || null;
@@ -767,7 +771,12 @@ function saveLayersNow() {
       const parts = k.split(",");
       objList.push([parseInt(parts[0], 10), parseInt(parts[1], 10), L.objects[k].name, L.objects[k].solid ? 1 : 0]);
     }
-    out[key] = { name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), objects: objList, portals: L.portals, spawn: L.spawn };
+    const passOut = [];
+    for (const k of Object.keys(L.passable)) {
+      const parts = k.split(",");
+      passOut.push([parseInt(parts[0], 10), parseInt(parts[1], 10)]);
+    }
+    out[key] = { name: L.name, passable: passOut, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), objects: objList, portals: L.portals, spawn: L.spawn };
   }
   writeJsonFile(LAYERS_FILE, out);
   layersDirty = false;
@@ -800,7 +809,7 @@ function isWalkable(layer, col, row) {
   if (ch !== "." && ch !== "P") return false;
   const L = layers[layer];
   const obj = L ? L.objects[col + "," + row] : null;
-  if (obj && obj.solid) return false;
+  if (obj && obj.solid && !(L.passable && L.passable[col + "," + row])) return false;
   return true;
 }
 
@@ -2193,7 +2202,8 @@ function sendGmLayer(gm) {
     const parts = k.split(",");
     objList.push([parseInt(parts[0], 10), parseInt(parts[1], 10), L.objects[k].name, L.objects[k].solid ? 1 : 0]);
   }
-  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer && !entities[id].down).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: L.spawn, floorItems: items, layers: layerSummaries() });
+  const passList = Object.keys(L.passable || {}).map((k) => k.split(",").map((v) => parseInt(v, 10)));
+  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, passable: passList, name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer && !entities[id].down).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: L.spawn, floorItems: items, layers: layerSummaries() });
 }
 
 function handleGmMessage(gm, data) {
@@ -2228,6 +2238,34 @@ function handleGmMessage(gm, data) {
     if (!validLayerNumber(n) || !Array.isArray(data.ops)) return;
     applyArt(n, data.ops.slice(0, MAX_EDIT_OPS));
     sendLayerSummaries();
+    return;
+  }
+
+  if (data.type === "gm_pass") {
+    const n = parseInt(data.layer, 10);
+    if (!validLayerNumber(n) || !Array.isArray(data.ops)) return;
+    const L = ensureLayer(n);
+    const changed = [];
+    for (const op of data.ops.slice(0, MAX_EDIT_OPS)) {
+      const c = op[0];
+      const r = op[1];
+      if (!Number.isInteger(c) || !Number.isInteger(r)) continue;
+      if (c < 0 || c >= LAYER_W || r < 0 || r >= LAYER_H) continue;
+      const key = c + "," + r;
+      const on = op[2] === 1 || op[2] === true;
+      if (on && !L.passable[key]) {
+        L.passable[key] = 1;
+        changed.push([c, r, 1]);
+      } else if (!on && L.passable[key]) {
+        delete L.passable[key];
+        changed.push([c, r, 0]);
+      }
+    }
+    if (changed.length > 0) {
+      scheduleLayerSave();
+      sendGms(n, { type: "gm_pass", layer: n, cells: changed });
+      sendLayerSummaries();
+    }
     return;
   }
 

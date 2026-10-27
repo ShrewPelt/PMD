@@ -2,7 +2,7 @@ const WORLD_COLS = 1024;
 const WORLD_ROWS = 1024;
 const CHUNK = 32;
 const TOOL_CHARS = { floor: ".", wall: "#", barrier: "x", void: " " };
-const TOOL_PREVIEW = { floor: 0x5a5a88, wall: 0x8a6a4a, barrier: 0xc0392b, void: 0x000000, tile: 0x4a9a4a, tileclear: 0x888888, object: 0xd8a840, objerase: 0xc0392b };
+const TOOL_PREVIEW = { floor: 0x5a5a88, wall: 0x8a6a4a, barrier: 0xc0392b, void: 0x000000, tile: 0x4a9a4a, tileclear: 0x888888, object: 0xd8a840, objerase: 0xc0392b, passable: 0x3ec13e, passableclear: 0x999999 };
 const worldArtPool = {};
 const worldObjectPool = {};
 const worldAssetState = {};
@@ -132,6 +132,7 @@ const WG = {
   art: [],
   palette: {},
   objects: {},
+  passable: {},
   entities: {},
   selectedEntity: null,
   notice: "",
@@ -402,7 +403,7 @@ function gmSyncArt(scene) {
         wantedArt[c + "," + r] = { name: WG.palette[ch], c: c, r: r };
       }
       const obj = WG.objects[c + "," + r];
-      if (obj) wantedObjs[c + "," + r] = { name: obj.name, c: c, r: r, alpha: obj.solid ? 1 : 0.7 };
+      if (obj) wantedObjs[c + "," + r] = { name: obj.name, c: c, r: r, alpha: obj.solid && !WG.passable[c + "," + r] ? 1 : 0.7 };
     }
   }
   worldSyncPool(scene, worldArtPool, wantedArt, "tile");
@@ -492,6 +493,15 @@ function gmDrawMarkers() {
   if (WG.spawn) {
     g.lineStyle(4, 0x3ec13e, 1);
     g.strokeCircle(WG.spawn.col * TILE + TILE / 2 - 1, WG.spawn.row * TILE + TILE / 2 - 1, 19);
+  }
+  g.fillStyle(0x3ec13e, 0.22);
+  g.lineStyle(2, 0x3ec13e, 0.9);
+  for (const key in WG.passable) {
+    const parts = key.split(",");
+    const pc = parseInt(parts[0], 10);
+    const pr = parseInt(parts[1], 10);
+    g.fillRect(pc * TILE + 1, pr * TILE + 1, TILE - 2, TILE - 2);
+    g.strokeRect(pc * TILE + 4, pr * TILE + 4, TILE - 8, TILE - 8);
   }
   const picked = WG.selectedEntity ? WG.entities[WG.selectedEntity] : null;
   if (picked) {
@@ -584,7 +594,8 @@ function gmSnapshotCell(c, r) {
     logic: WG.rows[r][c],
     art: artChar === " " ? "" : (WG.palette[artChar] || ""),
     obj: obj ? obj.name : "",
-    solid: obj ? obj.solid : true
+    solid: obj ? obj.solid : true,
+    pass: WG.passable[key] ? 1 : 0
   };
 }
 
@@ -593,6 +604,7 @@ function gmSendEdit(cells) {
   const logicOps = [];
   const artOps = [];
   const objOps = [];
+  const passOps = [];
   const solid = document.getElementById("wgSolid").checked ? 1 : 0;
   for (const cell of cells) {
     const c = cell[0];
@@ -604,10 +616,13 @@ function gmSendEdit(cells) {
     else if (tool === "tileclear") artOps.push([c, r, ""]);
     else if (tool === "object") objOps.push([c, r, WG.objName, solid]);
     else if (tool === "objerase") objOps.push([c, r, "", 0]);
+    else if (tool === "passable") passOps.push([c, r, 1]);
+    else if (tool === "passableclear") passOps.push([c, r, 0]);
   }
   if (logicOps.length > 0) gmSend({ type: "gm_edit", layer: WG.layer, ops: logicOps });
   if (artOps.length > 0 && (tool !== "tile" || WG.tileName)) gmSend({ type: "gm_art", layer: WG.layer, ops: artOps });
   if (objOps.length > 0 && (tool !== "object" || WG.objName)) gmSend({ type: "gm_obj", layer: WG.layer, ops: objOps });
+  if (passOps.length > 0) gmSend({ type: "gm_pass", layer: WG.layer, ops: passOps });
 }
 
 function gmApplyTiles(scene, cells) {
@@ -845,8 +860,10 @@ function gmUndo() {
   const logicOps = [];
   const artOps = [];
   const objOps = [];
+  const passOps = [];
   for (const key in entry.cells) {
     const cell = entry.cells[key];
+    passOps.push([cell.c, cell.r, cell.pass ? 1 : 0]);
     logicOps.push([cell.c, cell.r, cell.logic]);
     artOps.push([cell.c, cell.r, cell.art]);
     objOps.push([cell.c, cell.r, cell.obj, cell.solid ? 1 : 0]);
@@ -854,6 +871,7 @@ function gmUndo() {
   gmSend({ type: "gm_edit", layer: entry.layer, ops: logicOps });
   gmSend({ type: "gm_art", layer: entry.layer, ops: artOps });
   gmSend({ type: "gm_obj", layer: entry.layer, ops: objOps });
+  gmSend({ type: "gm_pass", layer: entry.layer, ops: passOps });
 }
 
 function gmGoLayer(n) {
@@ -1020,6 +1038,8 @@ function gmBuildPanel() {
     + "<button class='wgBtn' data-wgtool='teleport'>Move player</button>"
     + "<button class='wgBtn' data-wgtool='tileclear'>Clear tile art</button>"
     + "<button class='wgBtn' data-wgtool='objerase'>Remove object</button>"
+    + "<button class='wgBtn' data-wgtool='passable'>Passable</button>"
+    + "<button class='wgBtn' data-wgtool='passableclear'>Clear passable</button>"
     + "<button class='wgBtn' data-wgtool='pan'>Pan</button>"
     + "</div>"
     + "<h4>Tile art</h4><div id='wgTileList'>Loading...</div>"
@@ -1324,6 +1344,10 @@ function gmLoadLayer(scene, data) {
   WG.objects = {};
   for (const o of data.objects || []) {
     WG.objects[o[0] + "," + o[1]] = { name: o[2], solid: o[3] !== 0 };
+  }
+  WG.passable = {};
+  for (const pc of data.passable || []) {
+    WG.passable[pc[0] + "," + pc[1]] = 1;
   }
   WG.artDirty = true;
   entityClearAll();
@@ -2852,6 +2876,18 @@ window.worldHook = function (scene, data) {
       WG.notice = data.text;
       WG.noticeUntil = Date.now() + 5000;
       gmUpdateHoverStatus();
+      return true;
+    }
+    if (data.type === "gm_pass") {
+      if (data.layer === WG.layer) {
+        for (const cell of data.cells) {
+          const key = cell[0] + "," + cell[1];
+          if (cell[2]) WG.passable[key] = 1;
+          else delete WG.passable[key];
+        }
+        WG.artDirty = true;
+        gmDrawMarkers();
+      }
       return true;
     }
     if (data.type === "gm_art") {
