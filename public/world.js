@@ -117,6 +117,9 @@ const WG = {
   rows: [],
   portals: {},
   spawn: null,
+  spawns: [],
+  spawnMoveId: null,
+  spawnLabels: {},
   layers: [],
   players: {},
   tool: "floor",
@@ -140,6 +143,9 @@ const WG = {
   tileName: "",
   tileRot: 0,
   tileFlip: false,
+  objRot: 0,
+  objFlip: false,
+  hoverObjSprite: null,
   hoverSprite: null,
   objName: "",
   viewKey: "",
@@ -246,6 +252,10 @@ function worldSyncPool(scene, pool, wanted, kind) {
     if (kind === "tile") {
       sp.setFlipX(parsed.flip);
       sp.setAngle(parsed.rot);
+    } else {
+      sp.setFlipX(!!w.flip);
+      sp.objRotRad = (w.rot || 0) * Math.PI / 180;
+      sp.setRotation(sp.objRotRad ? sp.objRotRad : -viewRot);
     }
   }
 }
@@ -328,7 +338,7 @@ function drawPlayerView(scene, data) {
     }
   }
   for (const o of data.objects || []) {
-    wantedObjs[o.col + "," + o.row] = { name: o.name, c: o.col, r: o.row };
+    wantedObjs[o.col + "," + o.row] = { name: o.name, c: o.col, r: o.row, rot: o.rot || 0, flip: !!o.flip };
   }
   worldSyncPool(scene, worldArtPool, wantedArt, "tile");
   worldSyncPool(scene, worldObjectPool, wantedObjs, "object");
@@ -403,7 +413,7 @@ function gmSyncArt(scene) {
         wantedArt[c + "," + r] = { name: WG.palette[ch], c: c, r: r };
       }
       const obj = WG.objects[c + "," + r];
-      if (obj) wantedObjs[c + "," + r] = { name: obj.name, c: c, r: r, alpha: obj.solid && !WG.passable[c + "," + r] ? 1 : 0.7 };
+      if (obj) wantedObjs[c + "," + r] = { name: obj.name, c: c, r: r, rot: obj.rot || 0, flip: !!obj.flip, alpha: obj.solid && !WG.passable[c + "," + r] ? 1 : 0.7 };
     }
   }
   worldSyncPool(scene, worldArtPool, wantedArt, "tile");
@@ -436,6 +446,32 @@ function gmUpdateHoverTile(scene) {
   sp.setVisible(true);
 }
 
+function gmUpdateHoverObject(scene) {
+  const show = WG.tool === "object" && !!WG.objName && !WG.pan && gmInBounds(WG.hoverCol, WG.hoverRow);
+  if (!show) {
+    if (WG.hoverObjSprite) WG.hoverObjSprite.setVisible(false);
+    return;
+  }
+  const tex = worldEnsureAsset(scene, "object", WG.objName);
+  if (!tex) {
+    if (WG.hoverObjSprite) WG.hoverObjSprite.setVisible(false);
+    return;
+  }
+  if (!WG.hoverObjSprite) {
+    WG.hoverObjSprite = scene.add.image(0, 0, tex);
+    WG.hoverObjSprite.setOrigin(0.5, 0.5);
+    WG.hoverObjSprite.setDepth(58);
+  }
+  const sp = WG.hoverObjSprite;
+  if (sp.texture.key !== tex) sp.setTexture(tex);
+  sp.setScale((TILE - 2) / Math.max(sp.width, sp.height));
+  sp.setAlpha(0.5);
+  sp.setFlipX(WG.objFlip);
+  sp.setRotation(WG.objRot ? WG.objRot * Math.PI / 180 : (typeof viewRot === "number" ? -viewRot : 0));
+  sp.setPosition(WG.hoverCol * TILE + TILE / 2 - 1, WG.hoverRow * TILE + TILE / 2 - 1);
+  sp.setVisible(true);
+}
+
 function gmFlipTile() {
   WG.tileFlip = !WG.tileFlip;
   gmUpdateHoverStatus();
@@ -452,9 +488,14 @@ document.addEventListener("keydown", (ev) => {
   const isFlip = ev.key === "f" || ev.key === "F";
   if (!isRotate && !isFlip) return;
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
-  if (WG.tool !== "tile") return;
-  if (isRotate) gmRotateTile();
-  else gmFlipTile();
+  if (WG.tool === "tile") {
+    if (isRotate) gmRotateTile();
+    else gmFlipTile();
+  } else if (WG.tool === "object") {
+    if (isRotate) WG.objRot = (WG.objRot + 90) % 360;
+    else WG.objFlip = !WG.objFlip;
+    gmUpdateHoverStatus();
+  }
 });
 
 function worldFrame(scene) {
@@ -462,6 +503,7 @@ function worldFrame(scene) {
   if (worldGmMode) {
     gmSyncArt(scene);
     gmUpdateHoverTile(scene);
+    gmUpdateHoverObject(scene);
     return;
   }
   if (worldPlayerMode && worldAssetsDirty && worldLastView) {
@@ -490,9 +532,30 @@ function gmDrawMarkers() {
   if (!WG.markerGfx) return;
   const g = WG.markerGfx;
   g.clear();
-  if (WG.spawn) {
-    g.lineStyle(4, 0x3ec13e, 1);
-    g.strokeCircle(WG.spawn.col * TILE + TILE / 2 - 1, WG.spawn.row * TILE + TILE / 2 - 1, 19);
+  const liveLabels = {};
+  for (const sp of WG.spawns) {
+    if (sp.layer !== WG.layer) continue;
+    const moving = WG.spawnMoveId === sp.id;
+    g.lineStyle(4, moving ? 0xffd23f : 0x3ec13e, 1);
+    g.strokeCircle(sp.col * TILE + TILE / 2 - 1, sp.row * TILE + TILE / 2 - 1, 19);
+    let label = WG.spawnLabels[sp.id];
+    if (!label) {
+      label = WG.markerGfx.scene.add.text(0, 0, "", { fontFamily: "sans-serif", fontSize: "12px", color: "#9fe89f", stroke: "#000000", strokeThickness: 3 });
+      label.setOrigin(0.5, 1);
+      label.setDepth(56);
+      WG.spawnLabels[sp.id] = label;
+    }
+    if (label) {
+      label.setText(sp.name);
+      label.setPosition(sp.col * TILE + TILE / 2, sp.row * TILE - 2);
+      liveLabels[sp.id] = true;
+    }
+  }
+  for (const sid in WG.spawnLabels) {
+    if (!liveLabels[sid]) {
+      WG.spawnLabels[sid].destroy();
+      delete WG.spawnLabels[sid];
+    }
   }
   g.fillStyle(0x3ec13e, 0.22);
   g.lineStyle(2, 0x3ec13e, 0.9);
@@ -595,6 +658,8 @@ function gmSnapshotCell(c, r) {
     art: artChar === " " ? "" : (WG.palette[artChar] || ""),
     obj: obj ? obj.name : "",
     solid: obj ? obj.solid : true,
+    rot: obj ? obj.rot || 0 : 0,
+    flip: obj && obj.flip ? 1 : 0,
     pass: WG.passable[key] ? 1 : 0
   };
 }
@@ -614,7 +679,7 @@ function gmSendEdit(cells) {
     if (TOOL_CHARS[tool] !== undefined) logicOps.push([c, r, TOOL_CHARS[tool]]);
     else if (tool === "tile") artOps.push([c, r, gmTileStoredName()]);
     else if (tool === "tileclear") artOps.push([c, r, ""]);
-    else if (tool === "object") objOps.push([c, r, WG.objName, solid]);
+    else if (tool === "object") objOps.push([c, r, WG.objName, solid, WG.objRot, WG.objFlip ? 1 : 0]);
     else if (tool === "objerase") objOps.push([c, r, "", 0]);
     else if (tool === "passable") passOps.push([c, r, 1]);
     else if (tool === "passableclear") passOps.push([c, r, 0]);
@@ -672,7 +737,7 @@ function gmApplyArt(scene, cells, palette) {
 function gmApplyObjs(scene, cells) {
   for (const cell of cells) {
     const key = cell[0] + "," + cell[1];
-    if (cell[2]) WG.objects[key] = { name: cell[2], solid: cell[3] !== 0 };
+    if (cell[2]) WG.objects[key] = { name: cell[2], solid: cell[3] !== 0, rot: cell[4] || 0, flip: cell[5] === 1 };
     else delete WG.objects[key];
   }
   WG.artDirty = true;
@@ -717,6 +782,7 @@ function gmUpdateHoverStatus() {
   if (portal) text += " to layer " + portal.layer + " (" + portal.col + ", " + portal.row + ")";
   if (WG.portalSource) text += "\nPortal start set on layer " + WG.portalSource.layer + ". Pick the destination.";
   if (WG.tpTarget && WG.players[WG.tpTarget]) text += "\nMoving " + WG.players[WG.tpTarget].name + ": click a tile.";
+  if (WG.tool === "object" && WG.objName) text += "\nObject " + WG.objName + " | rotated " + WG.objRot + " degrees" + (WG.objFlip ? " | flipped" : "") + ". R rotates, F flips.";
   if (WG.tool === "tile" && WG.tileName) text += "\nTile " + WG.tileName + " | rotated " + WG.tileRot + " degrees" + (WG.tileFlip ? " | flipped" : "") + ". R rotates, F flips.";
   if (WG.notice && Date.now() < WG.noticeUntil) text = WG.notice + "\n" + text;
   gmStatus(text);
@@ -738,7 +804,16 @@ function gmHandleClickTool(scene, c, r) {
     return;
   }
   if (WG.tool === "spawn") {
-    gmSend({ type: "gm_spawn", layer: WG.layer, col: c, row: r });
+    if (WG.spawnMoveId) {
+      gmSend({ type: "gm_spawn_edit", id: WG.spawnMoveId, layer: WG.layer, col: c, row: r });
+      WG.spawnMoveId = null;
+      gmRenderSpawns();
+      gmDrawMarkers();
+      return;
+    }
+    const nameInput = document.getElementById("wgSpawnName");
+    gmSend({ type: "gm_spawn_add", name: nameInput ? nameInput.value : "", layer: WG.layer, col: c, row: r });
+    if (nameInput) nameInput.value = "";
     return;
   }
   if (WG.tool === "item") return;
@@ -866,7 +941,7 @@ function gmUndo() {
     passOps.push([cell.c, cell.r, cell.pass ? 1 : 0]);
     logicOps.push([cell.c, cell.r, cell.logic]);
     artOps.push([cell.c, cell.r, cell.art]);
-    objOps.push([cell.c, cell.r, cell.obj, cell.solid ? 1 : 0]);
+    objOps.push([cell.c, cell.r, cell.obj, cell.solid ? 1 : 0, cell.rot || 0, cell.flip ? 1 : 0]);
   }
   gmSend({ type: "gm_edit", layer: entry.layer, ops: logicOps });
   gmSend({ type: "gm_art", layer: entry.layer, ops: artOps });
@@ -896,6 +971,59 @@ function gmRenderLayers() {
   }
 }
 
+function gmRenderSpawns() {
+  const box = document.getElementById("wgSpawnList");
+  if (!box) return;
+  box.innerHTML = "";
+  if (WG.spawns.length === 0) {
+    box.textContent = "No spawnpoints yet. Players spawn at the top-left floor tile.";
+    return;
+  }
+  for (const sp of WG.spawns) {
+    const row = document.createElement("div");
+    row.style.cssText = "margin-bottom:5px;padding:4px;background:#1a1a2a;border-radius:5px";
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.value = sp.name;
+    nameInput.style.width = "130px";
+    nameInput.addEventListener("focus", () => { chatActive = true; });
+    nameInput.addEventListener("blur", () => { chatActive = false; });
+    nameInput.addEventListener("change", () => gmSend({ type: "gm_spawn_edit", id: sp.id, name: nameInput.value }));
+    const info = document.createElement("span");
+    info.style.cssText = "color:#99a;font-size:11px;margin-left:4px";
+    info.textContent = "L" + sp.layer + " (" + sp.col + ", " + sp.row + ")";
+    const go = document.createElement("button");
+    go.className = "wgBtn";
+    go.textContent = "Go";
+    go.addEventListener("click", () => {
+      if (sp.layer !== WG.layer) gmGoLayer(sp.layer);
+      WG.markerGfx.scene.cameras.main.centerOn(sp.col * TILE + TILE / 2, sp.row * TILE + TILE / 2);
+    });
+    const move = document.createElement("button");
+    move.className = "wgBtn" + (WG.spawnMoveId === sp.id ? " on" : "");
+    move.textContent = "Move";
+    move.addEventListener("click", () => {
+      WG.spawnMoveId = WG.spawnMoveId === sp.id ? null : sp.id;
+      if (WG.spawnMoveId) gmSetTool("spawn");
+      gmRenderSpawns();
+      gmDrawMarkers();
+    });
+    const del = document.createElement("button");
+    del.className = "wgBtn";
+    del.textContent = "Delete";
+    del.addEventListener("click", () => {
+      if (window.confirm("Delete spawnpoint " + sp.name + "?")) gmSend({ type: "gm_spawn_del", id: sp.id });
+    });
+    row.appendChild(nameInput);
+    row.appendChild(info);
+    row.appendChild(document.createElement("br"));
+    row.appendChild(go);
+    row.appendChild(move);
+    row.appendChild(del);
+    box.appendChild(row);
+  }
+}
+
 function gmRenderPlayers() {
   const box = document.getElementById("wgPlayers");
   if (!box) return;
@@ -916,7 +1044,7 @@ function gmRenderPlayers() {
     view.textContent = "View";
     view.addEventListener("click", () => {
       if (p.layer !== WG.layer) gmGoLayer(p.layer);
-      sceneRef.cameras.main.centerOn(p.col * TILE + TILE / 2, p.row * TILE + TILE / 2);
+      WG.markerGfx.scene.cameras.main.centerOn(p.col * TILE + TILE / 2, p.row * TILE + TILE / 2);
     });
     const move = document.createElement("button");
     move.className = "wgBtn" + (WG.tpTarget === p.id ? " on" : "");
@@ -1042,6 +1170,9 @@ function gmBuildPanel() {
     + "<button class='wgBtn' data-wgtool='passableclear'>Clear passable</button>"
     + "<button class='wgBtn' data-wgtool='pan'>Pan</button>"
     + "</div>"
+    + "<h4>Spawnpoints</h4>"
+    + "<div><input type='text' id='wgSpawnName' placeholder='New spawn name' style='width:150px'> then use the Spawn tool and click a tile</div>"
+    + "<div id='wgSpawnList' style='margin-top:4px'></div>"
     + "<h4>Tile art</h4><div id='wgTileList'>Loading...</div>"
     + "<h4>Objects</h4><div id='wgObjList'>Loading...</div>"
     + "<div style='margin-top:6px'><label><input type='checkbox' id='wgSolid' checked> Objects block movement</label></div>"
@@ -1343,7 +1474,7 @@ function gmLoadLayer(scene, data) {
   WG.palette = data.palette || {};
   WG.objects = {};
   for (const o of data.objects || []) {
-    WG.objects[o[0] + "," + o[1]] = { name: o[2], solid: o[3] !== 0 };
+    WG.objects[o[0] + "," + o[1]] = { name: o[2], solid: o[3] !== 0, rot: o[4] || 0, flip: o[5] === 1 };
   }
   WG.passable = {};
   for (const pc of data.passable || []) {
@@ -1359,7 +1490,8 @@ function gmLoadLayer(scene, data) {
   WG.selectedEntity = null;
   gmShowSelection();
   WG.portals = data.portals || {};
-  WG.spawn = data.spawn || null;
+  WG.spawn = null;
+  if (Array.isArray(data.spawns)) WG.spawns = data.spawns;
   WG.layers = data.layers || WG.layers;
   gmRedrawAll(scene);
   gmDrawMarkers();
@@ -1369,8 +1501,10 @@ function gmLoadLayer(scene, data) {
   document.getElementById("wgName").value = WG.name;
   gmRenderLayers();
   gmRenderPlayers();
+  gmRenderSpawns();
   if (firstLoad) {
-    const target = WG.spawn || { col: 32, row: 22 };
+    const firstSpawn = WG.spawns.find((sp) => sp.layer === WG.layer) || WG.spawns[0];
+    const target = firstSpawn || { col: 32, row: 22 };
     scene.cameras.main.centerOn(target.col * TILE + TILE / 2, target.row * TILE + TILE / 2);
   }
   gmUpdateHoverStatus();
@@ -2721,7 +2855,63 @@ function gmRenderInspector(data) {
   el.appendChild(inv);
 }
 
+let spawnSelectEl = null;
+
+function spawnSelectShow(data) {
+  if (!spawnSelectEl) {
+    const style = document.createElement("style");
+    style.textContent = "#spawnSelect{position:fixed;inset:0;background:rgba(10,10,20,0.92);z-index:90;display:flex;align-items:center;justify-content:center}"
+      + "#spawnSelect .box{background:#1b1b2e;border:2px solid #4a6cff;border-radius:12px;padding:18px;width:360px;max-width:92vw;max-height:80vh;overflow-y:auto;color:#fff;font-size:14px}"
+      + "#spawnSelect h3{margin:0 0 4px 0;color:#ffd23f}"
+      + "#spawnSelect p{margin:0 0 10px 0;color:#c8c8ff;font-size:12px}"
+      + "#spawnSelect button{display:block;width:100%;text-align:left;background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:8px;padding:10px;margin:6px 0;cursor:pointer;font-size:14px}"
+      + "#spawnSelect button:hover{background:#4a6cff;border-color:#fff}"
+      + "#spawnSelect button small{display:block;color:#aab;font-size:11px;margin-top:2px}";
+    document.head.appendChild(style);
+    spawnSelectEl = document.createElement("div");
+    spawnSelectEl.id = "spawnSelect";
+    document.body.appendChild(spawnSelectEl);
+  }
+  spawnSelectEl.innerHTML = "";
+  const box = document.createElement("div");
+  box.className = "box";
+  const title = document.createElement("h3");
+  title.textContent = "Where should " + (data.name || "your character") + " appear?";
+  const sub = document.createElement("p");
+  sub.textContent = "Pick a spawnpoint. Next time you join, you'll return to where you left off.";
+  box.appendChild(title);
+  box.appendChild(sub);
+  for (const sp of data.spawns || []) {
+    const btn = document.createElement("button");
+    btn.textContent = sp.name;
+    const small = document.createElement("small");
+    small.textContent = "Layer " + sp.layer + (sp.layerName ? " | " + sp.layerName : "");
+    btn.appendChild(small);
+    btn.addEventListener("click", () => {
+      gmSend({ type: "spawn_pick", id: sp.id });
+      spawnSelectEl.style.display = "none";
+    });
+    box.appendChild(btn);
+  }
+  spawnSelectEl.appendChild(box);
+  spawnSelectEl.style.display = "flex";
+}
+
+setInterval(() => {
+  if (!worldPlayerMode || worldGmMode) return;
+  const busy = (typeof lootState !== "undefined" && lootState) || (typeof itemMenuOpenNow === "function" && itemMenuOpenNow()) || inventoryOpen || atkTarget || COMBAT.active || chatActive;
+  if (busy) gmSend({ type: "active" });
+}, 20000);
+
 window.worldHook = function (scene, data) {
+  if (data.type === "spawn_select") {
+    spawnSelectShow(data);
+    return true;
+  }
+  if (data.type === "idle_warn") {
+    itemToast("You will be logged out in " + data.seconds + " seconds for standing still. Move to stay.");
+    return true;
+  }
   if (data.type === "init" && data.world) {
     if (data.itemFx) itemFx = data.itemFx;
     if (data.role === "gm") {
@@ -2876,6 +3066,13 @@ window.worldHook = function (scene, data) {
       WG.notice = data.text;
       WG.noticeUntil = Date.now() + 5000;
       gmUpdateHoverStatus();
+      return true;
+    }
+    if (data.type === "gm_spawns") {
+      WG.spawns = data.spawns || [];
+      if (WG.spawnMoveId && !WG.spawns.some((sp) => sp.id === WG.spawnMoveId)) WG.spawnMoveId = null;
+      gmRenderSpawns();
+      gmDrawMarkers();
       return true;
     }
     if (data.type === "gm_pass") {
