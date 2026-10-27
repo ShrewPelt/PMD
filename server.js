@@ -448,8 +448,8 @@ const LAYER_W = 1024;
 const LAYER_H = 1024;
 const MAX_LAYER = 999;
 const MIN_LAYER = -999;
-const VIEW_HALF_W = 8;
-const VIEW_HALF_H = 6;
+const VIEW_HALF_W = 10;
+const VIEW_HALF_H = 10;
 const TILE_CHARS = " .#xP";
 const MAX_EDIT_OPS = 6000;
 const TILE_ASSET_DIR = path.join(__dirname, "assets", "tilemap");
@@ -2720,8 +2720,13 @@ function handleGmMessage(gm, data) {
     const c = parseInt(data.col, 10);
     const r = parseInt(data.row, 10);
     if (!p || !validLayerNumber(n) || !Number.isInteger(c) || !Number.isInteger(r)) return;
+    if (c < 0 || c >= LAYER_W || r < 0 || r >= LAYER_H) {
+      sendSocket(gm.socket, { type: "gm_notice", text: "Coordinates must be between 0 and " + (LAYER_W - 1) + "." });
+      return;
+    }
     teleportPlayer(p, n, c, r);
     sendLayerSummaries();
+    sendSocket(gm.socket, { type: "gm_notice", text: "Moved " + p.name + " to layer " + p.layer + " (" + p.col + ", " + p.row + ")." });
     return;
   }
 

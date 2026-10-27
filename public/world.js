@@ -126,6 +126,9 @@ const WG = {
   shape: "pencil",
   portalSource: null,
   tpTarget: null,
+  selPlayer: null,
+  playerDrag: null,
+  drawRange: null,
   undo: [],
   strokeUndo: null,
   stroke: null,
@@ -510,6 +513,8 @@ function gmRedrawChunk(scene, cx, cy) {
   let g = WG.chunks[key];
   let over = WG.overlays[key];
   if (!g) {
+    const dr = WG.drawRange;
+    if (dr && (cx < dr.cx0 || cx > dr.cx1 || cy < dr.cy0 || cy > dr.cy1)) return;
     let hasContent = false;
     const rLimit = Math.min(WORLD_ROWS, (cy + 1) * CHUNK);
     for (let rr = cy * CHUNK; rr < rLimit && !hasContent; rr++) {
@@ -542,9 +547,47 @@ function gmRedrawChunk(scene, cx, cy) {
   }
 }
 
+function gmChunkRange(scene, extra) {
+  const wv = scene.cameras.main.worldView;
+  const span = CHUNK * TILE;
+  return {
+    cx0: Math.max(0, Math.floor(wv.x / span) - extra),
+    cx1: Math.min(WORLD_COLS / CHUNK - 1, Math.floor((wv.x + wv.width) / span) + extra),
+    cy0: Math.max(0, Math.floor(wv.y / span) - extra),
+    cy1: Math.min(WORLD_ROWS / CHUNK - 1, Math.floor((wv.y + wv.height) / span) + extra)
+  };
+}
+
+function gmCullChunks(scene) {
+  const keep = gmChunkRange(scene, 2);
+  for (const key in WG.chunks) {
+    const parts = key.split(",");
+    const cx = parseInt(parts[0], 10);
+    const cy = parseInt(parts[1], 10);
+    if (cx < keep.cx0 || cx > keep.cx1 || cy < keep.cy0 || cy > keep.cy1) {
+      WG.chunks[key].destroy();
+      delete WG.chunks[key];
+      if (WG.overlays[key]) {
+        WG.overlays[key].destroy();
+        delete WG.overlays[key];
+      }
+    }
+  }
+}
+
 function gmRedrawAll(scene) {
-  for (let cy = 0; cy < WORLD_ROWS / CHUNK; cy++) {
-    for (let cx = 0; cx < WORLD_COLS / CHUNK; cx++) {
+  for (const key in WG.chunks) {
+    WG.chunks[key].destroy();
+    delete WG.chunks[key];
+  }
+  for (const key in WG.overlays) {
+    WG.overlays[key].destroy();
+    delete WG.overlays[key];
+  }
+  const draw = gmChunkRange(scene, 1);
+  WG.drawRange = draw;
+  for (let cy = draw.cy0; cy <= draw.cy1; cy++) {
+    for (let cx = draw.cx0; cx <= draw.cx1; cx++) {
       gmRedrawChunk(scene, cx, cy);
     }
   }
@@ -562,6 +605,14 @@ function gmSyncArt(scene) {
   WG.viewKey = key;
   WG.artDirty = false;
   worldAssetsDirty = false;
+  const drawRange = gmChunkRange(scene, 1);
+  WG.drawRange = drawRange;
+  gmCullChunks(scene);
+  for (let cy = drawRange.cy0; cy <= drawRange.cy1; cy++) {
+    for (let cx = drawRange.cx0; cx <= drawRange.cx1; cx++) {
+      if (!WG.chunks[cx + "," + cy]) gmRedrawChunk(scene, cx, cy);
+    }
+  }
   const wantedArt = {};
   const wantedObjs = {};
   for (let r = r0; r <= r1; r++) {
@@ -922,6 +973,75 @@ function gmStatus(text) {
   if (el) el.textContent = text;
 }
 
+function gmNotice(text) {
+  WG.notice = text;
+  WG.noticeUntil = Date.now() + 4000;
+  gmUpdateHoverStatus();
+}
+
+function gmUpdateCoords(c, r) {
+  const el = document.getElementById("wgCoords");
+  if (!el) return;
+  el.textContent = gmInBounds(c, r) ? "X: " + c + "   Y: " + r : "X: -   Y: -";
+}
+
+function gmCellFromClient(scene, ev) {
+  const canvas = scene.game.canvas;
+  const rect = canvas.getBoundingClientRect();
+  const gx = (ev.clientX - rect.left) * scene.scale.width / rect.width;
+  const gy = (ev.clientY - rect.top) * scene.scale.height / rect.height;
+  const wp = scene.cameras.main.getWorldPoint(gx, gy);
+  return { c: Math.floor(wp.x / TILE), r: Math.floor(wp.y / TILE) };
+}
+
+function gmPlayerDragCancel() {
+  if (!WG.playerDrag) return;
+  if (WG.playerDrag.ghost) WG.playerDrag.ghost.remove();
+  window.removeEventListener("mousemove", gmPlayerDragMove);
+  window.removeEventListener("mouseup", gmPlayerDragEnd);
+  WG.playerDrag = null;
+}
+
+function gmPlayerDragMove(ev) {
+  if (!WG.playerDrag) return;
+  WG.playerDrag.ghost.style.left = (ev.clientX - 20) + "px";
+  WG.playerDrag.ghost.style.top = (ev.clientY - 20) + "px";
+  const cell = gmCellFromClient(sceneRef, ev);
+  gmUpdateCoords(cell.c, cell.r);
+}
+
+function gmPlayerDragEnd(ev) {
+  const drag = WG.playerDrag;
+  if (!drag) return;
+  gmPlayerDragCancel();
+  const over = document.elementFromPoint(ev.clientX, ev.clientY);
+  if (!over || over !== sceneRef.game.canvas) return;
+  const cell = gmCellFromClient(sceneRef, ev);
+  if (!gmInBounds(cell.c, cell.r)) return;
+  if (cell.c === drag.col && cell.r === drag.row) {
+    gmHandleClickTool(sceneRef, cell.c, cell.r);
+    return;
+  }
+  gmSend({ type: "gm_tp", playerId: drag.id, layer: WG.layer, col: cell.c, row: cell.r });
+}
+
+function gmTryPlayerDrag(pointer, cell) {
+  if (WG.tool !== "select" && WG.tool !== "item" && WG.tool !== "targettile") return false;
+  const id = WG.selPlayer;
+  const p = id ? WG.players[id] : null;
+  if (!p || p.layer !== WG.layer || p.col !== cell.c || p.row !== cell.r) return false;
+  const ghost = document.createElement("div");
+  ghost.style.cssText = "position:fixed;z-index:90;pointer-events:none;background:rgba(74,108,255,0.85);color:#fff;border:2px solid #fff;border-radius:8px;padding:4px 8px;font-size:12px;font-family:sans-serif";
+  ghost.textContent = p.name;
+  document.body.appendChild(ghost);
+  WG.playerDrag = { id: id, col: p.col, row: p.row, ghost: ghost };
+  ghost.style.left = (pointer.event.clientX - 20) + "px";
+  ghost.style.top = (pointer.event.clientY - 20) + "px";
+  window.addEventListener("mousemove", gmPlayerDragMove);
+  window.addEventListener("mouseup", gmPlayerDragEnd);
+  return true;
+}
+
 function gmUpdateHoverStatus() {
   if (!gmInBounds(WG.hoverCol, WG.hoverRow)) {
     gmStatus("Layer " + WG.layer + " | outside the editable area");
@@ -941,7 +1061,8 @@ function gmUpdateHoverStatus() {
   const portal = WG.portals[WG.hoverCol + "," + WG.hoverRow];
   if (portal) text += " to layer " + portal.layer + " (" + portal.col + ", " + portal.row + ")";
   if (WG.portalSource) text += "\nPortal start set on layer " + WG.portalSource.layer + ". Pick the destination.";
-  if (WG.tpTarget && WG.players[WG.tpTarget]) text += "\nMoving " + WG.players[WG.tpTarget].name + ": click a tile.";
+  if (WG.tool === "targettile") text += WG.selPlayer && WG.players[WG.selPlayer] ? "\nTarget tile: click to teleport " + WG.players[WG.selPlayer].name + " here." : "\nTarget tile: select a player first.";
+  if (WG.selPlayer && WG.players[WG.selPlayer]) text += "\nSelected player: " + WG.players[WG.selPlayer].name + " (drag them to a tile to move them)";
   if (WG.tool === "object" && WG.objName) text += "\nObject " + WG.objName + " | rotated " + WG.objRot + " degrees" + (WG.objFlip ? " | flipped" : "") + ". R rotates, F flips.";
   if (WG.tool === "tile" && WG.tileName) text += "\nTile " + WG.tileName + " | rotated " + WG.tileRot + " degrees" + (WG.tileFlip ? " | flipped" : "") + ". R rotates, F flips.";
   if (WG.notice && Date.now() < WG.noticeUntil) text = WG.notice + "\n" + text;
@@ -1000,8 +1121,13 @@ function gmHandleClickTool(scene, c, r) {
       const hp = WG.players[pid];
       if (hp.layer === WG.layer && hp.col === c && hp.row === r) foundPlayer = hp;
     }
-    if (foundPlayer) gmInspect({ type: "player", id: foundPlayer.id });
-    else gmInspectClose();
+    if (foundPlayer) {
+      WG.selPlayer = foundPlayer.id;
+      gmRenderPlayers();
+      gmInspect({ type: "player", id: foundPlayer.id });
+    } else {
+      gmInspectClose();
+    }
     return;
   }
   if (WG.tool === "movecreature") {
@@ -1009,11 +1135,11 @@ function gmHandleClickTool(scene, c, r) {
     if (picked) gmSend({ type: "gm_entity_set", entity: gmReadCreatureForm(picked, c, r) });
     return;
   }
-  if (WG.tool === "teleport") {
-    if (WG.tpTarget && WG.players[WG.tpTarget]) {
-      gmSend({ type: "gm_tp", playerId: WG.tpTarget, layer: WG.layer, col: c, row: r });
-      WG.tpTarget = null;
-      gmRenderPlayers();
+  if (WG.tool === "targettile") {
+    if (WG.selPlayer && WG.players[WG.selPlayer]) {
+      gmSend({ type: "gm_tp", playerId: WG.selPlayer, layer: WG.layer, col: c, row: r });
+    } else {
+      gmNotice("Select a player first (Select tool or the Players list), then click a tile.");
     }
   }
 }
@@ -1028,6 +1154,7 @@ function gmPointerDown(scene, pointer) {
     return;
   }
   if (!pointer.leftButtonDown()) return;
+  if (gmTryPlayerDrag(pointer, cell)) return;
   if (gmTryFloorDrag(pointer, cell)) return;
   const paintTool = TOOL_PREVIEW[WG.tool] !== undefined;
   if (!paintTool) {
@@ -1047,6 +1174,7 @@ function gmPointerMove(scene, pointer) {
   const cell = gmCellFromPointer(scene, pointer);
   WG.hoverCol = cell.c;
   WG.hoverRow = cell.r;
+  gmUpdateCoords(cell.c, cell.r);
   if (WG.pan) {
     const cam = scene.cameras.main;
     cam.scrollX = WG.pan.sx - (pointer.x - WG.pan.x) / cam.zoom;
@@ -1197,8 +1325,9 @@ function gmRenderPlayers() {
     const p = WG.players[id];
     const row = document.createElement("div");
     row.className = "wgPlayer";
+    if (WG.selPlayer === id) row.style.cssText = "background:#2a2a52;border-radius:5px";
     const label = document.createElement("span");
-    label.textContent = p.name + " | L" + p.layer;
+    label.textContent = p.name + " | L" + p.layer + " (" + p.col + ", " + p.row + ")";
     const view = document.createElement("button");
     view.className = "wgBtn";
     view.textContent = "View";
@@ -1207,11 +1336,10 @@ function gmRenderPlayers() {
       WG.markerGfx.scene.cameras.main.centerOn(p.col * TILE + TILE / 2, p.row * TILE + TILE / 2);
     });
     const move = document.createElement("button");
-    move.className = "wgBtn" + (WG.tpTarget === p.id ? " on" : "");
-    move.textContent = "Move";
+    move.className = "wgBtn" + (WG.selPlayer === p.id ? " on" : "");
+    move.textContent = WG.selPlayer === p.id ? "Selected" : "Select";
     move.addEventListener("click", () => {
-      WG.tpTarget = p.id;
-      gmSetTool("teleport");
+      WG.selPlayer = WG.selPlayer === p.id ? null : p.id;
       gmRenderPlayers();
       gmUpdateHoverStatus();
     });
@@ -1302,6 +1430,12 @@ function gmBuildPanel() {
     + ".wgCatEmpty{padding:8px 4px;color:#aab;font-size:11px}"
     + ".wgAsset.on{background:#4a6cff;border-color:#fff}"
     + ".wgAsset img{width:36px;height:36px;object-fit:contain;image-rendering:pixelated;margin-bottom:2px}"
+    + ".wgSecHead{cursor:pointer;color:#ffd23f;font-weight:bold;font-size:13px;margin:8px 0 4px 0;padding:6px 8px;background:#252540;border:1px solid #3a3a55;border-radius:6px;user-select:none}"
+    + ".wgSecHead:hover{background:#2f2f55}"
+    + ".wgSecHead .wgArrow::before{content:'\\25BE  '}"
+    + ".wgSecHead.closed .wgArrow::before{content:'\\25B8  '}"
+    + ".wgSecBody{padding:2px 2px 4px 2px}"
+    + ".wgSecBody.closed{display:none}"
     + ".wgPlayer{display:flex;gap:4px;align-items:center;margin:3px 0}.wgPlayer span{flex:1}"
     + "#wgStatus{white-space:pre-wrap;font-family:monospace;font-size:12px;color:#c8c8ff;margin-top:6px}"
     + "#wgHelp{color:#8888aa;font-size:11px;margin-top:6px;line-height:1.4}";
@@ -1310,33 +1444,47 @@ function gmBuildPanel() {
   const panel = document.createElement("div");
   panel.id = "wgPanel";
   panel.innerHTML = ""
-    + "<h4>Layer</h4>"
+    + "<div class='wgSecHead' data-wgsec='layer'><span class='wgArrow'></span>Layer</div><div class='wgSecBody' data-wgbody='layer'>"
     + "<div><button class='wgBtn' id='wgPrev'>&lt;</button><input type='number' id='wgLayerNum' min='-999' max='999' value='0'><button class='wgBtn' id='wgGo'>Go</button><button class='wgBtn' id='wgNext'>&gt;</button></div>"
     + "<div style='margin-top:6px'><input type='text' id='wgName' placeholder='Layer name'><button class='wgBtn' id='wgSetName'>Set</button></div>"
     + "<div id='wgLayerList' style='margin-top:6px'></div>"
-    + "<h4>Tools</h4>"
+    + "</div>"
+    + "<div class='wgSecHead' data-wgsec='build'><span class='wgArrow'></span>Build tools</div><div class='wgSecBody' data-wgbody='build'>"
     + "<div id='wgTools'>"
     + "<button class='wgBtn on' data-wgtool='floor'>Floor</button>"
     + "<button class='wgBtn' data-wgtool='wall'>Wall</button>"
     + "<button class='wgBtn' data-wgtool='barrier'>Barrier</button>"
     + "<button class='wgBtn' data-wgtool='void'>Erase</button>"
     + "<button class='wgBtn' data-wgtool='portal'>Portal</button>"
-    + "<button class='wgBtn' data-wgtool='spawn'>Spawn</button>"
-    + "<button class='wgBtn' data-wgtool='item'>Move items</button>"
-    + "<button class='wgBtn' data-wgtool='teleport'>Move player</button>"
     + "<button class='wgBtn' data-wgtool='tileclear'>Clear tile art</button>"
     + "<button class='wgBtn' data-wgtool='objerase'>Remove object</button>"
     + "<button class='wgBtn' data-wgtool='passable'>Passable</button>"
     + "<button class='wgBtn' data-wgtool='passableclear'>Clear passable</button>"
     + "<button class='wgBtn' data-wgtool='pan'>Pan</button>"
     + "</div>"
-    + "<h4>Spawnpoints</h4>"
+    + "<h4>Shape</h4>"
+    + "<div>"
+    + "<button class='wgBtn on' data-wgshape='pencil'>Pencil</button>"
+    + "<button class='wgBtn' data-wgshape='line'>Straight line</button>"
+    + "<button class='wgBtn' data-wgshape='rect'>Filled box</button>"
+    + "<button class='wgBtn' data-wgshape='outline'>Box outline</button>"
+    + "</div>"
+    + "<div style='margin-top:6px'><label><input type='checkbox' id='wgTwoWay' checked> Portals work both ways</label></div>"
+    + "<div style='margin-top:6px'><button class='wgBtn' id='wgUndo'>Undo (Ctrl+Z)</button></div>"
+    + "</div>"
+    + "<div class='wgSecHead' data-wgsec='spawn'><span class='wgArrow'></span>Spawnpoints</div><div class='wgSecBody' data-wgbody='spawn'>"
+    + "<div><button class='wgBtn' data-wgtool='spawn'>Spawn tool</button></div>"
     + "<div><input type='text' id='wgSpawnName' placeholder='New spawn name' style='width:150px'> then use the Spawn tool and click a tile</div>"
     + "<div id='wgSpawnList' style='margin-top:4px'></div>"
-    + "<h4>Tile art</h4><div id='wgTileList'>Loading...</div>"
-    + "<h4>Objects</h4><div id='wgObjList'>Loading...</div>"
+    + "</div>"
+    + "<div class='wgSecHead' data-wgsec='tiles'><span class='wgArrow'></span>Tile art</div><div class='wgSecBody' data-wgbody='tiles'>"
+    + "<div id='wgTileList'>Loading...</div>"
+    + "</div>"
+    + "<div class='wgSecHead' data-wgsec='objects'><span class='wgArrow'></span>Objects</div><div class='wgSecBody' data-wgbody='objects'>"
+    + "<div id='wgObjList'>Loading...</div>"
     + "<div style='margin-top:6px'><label><input type='checkbox' id='wgSolid' checked> Objects block movement</label></div>"
-    + "<h4>Creatures</h4>"
+    + "</div>"
+    + "<div class='wgSecHead' data-wgsec='creatures'><span class='wgArrow'></span>Creatures</div><div class='wgSecBody' data-wgbody='creatures'>"
     + "<div>Type <select id='wgEKind'><option value='enemy'>Enemy</option><option value='npc'>NPC</option></select></div>"
     + "<div style='margin-top:4px'>Species <input type='text' id='wgESpecies' list='wgSpeciesList' placeholder='e.g. Pikachu'><datalist id='wgSpeciesList'></datalist></div>"
     + "<div style='margin-top:4px'>Name <input type='text' id='wgEName' placeholder='optional'></div>"
@@ -1365,21 +1513,66 @@ function gmBuildPanel() {
     + "<button class='wgBtn' id='wgEDelete'>Delete selected</button>"
     + "</div>"
     + "<div id='wgESel' style='margin-top:4px;color:#c8c8ff'>Nothing selected.</div>"
-    + "<h4>Shape</h4>"
-    + "<div>"
-    + "<button class='wgBtn on' data-wgshape='pencil'>Pencil</button>"
-    + "<button class='wgBtn' data-wgshape='line'>Straight line</button>"
-    + "<button class='wgBtn' data-wgshape='rect'>Filled box</button>"
-    + "<button class='wgBtn' data-wgshape='outline'>Box outline</button>"
     + "</div>"
-    + "<div style='margin-top:6px'><label><input type='checkbox' id='wgTwoWay' checked> Portals work both ways</label></div>"
-    + "<div style='margin-top:6px'><button class='wgBtn' id='wgUndo'>Undo (Ctrl+Z)</button></div>"
-    + "<h4>Players</h4><div id='wgPlayers'></div>"
+    + "<div class='wgSecHead' data-wgsec='items'><span class='wgArrow'></span>Items</div><div class='wgSecBody' data-wgbody='items'>"
+    + "<div>Drag items from the Creative items window (bottom left) onto a tile, creature or player. Drag them back into the window to delete them.</div>"
+    + "<div style='margin-top:6px'><button class='wgBtn' data-wgtool='item'>Move items</button><button class='wgBtn' id='wgToggleCreative'>Hide creative window</button></div>"
+    + "</div>"
+    + "<div class='wgSecHead' data-wgsec='moderation'><span class='wgArrow'></span>Moderation</div><div class='wgSecBody' data-wgbody='moderation'>"
+    + "<div style='margin-bottom:4px'>Select a player below, then drag them on the map, use the Target tile tool, or type coordinates.</div>"
+    + "<div><button class='wgBtn' data-wgtool='select'>Select tool</button><button class='wgBtn' data-wgtool='targettile'>Target tile</button></div>"
+    + "<div style='margin-top:6px;color:#c8c8ff'><b>Players</b></div><div id='wgPlayers'></div>"
+    + "<div class='wgTpBox'>Teleport selected player | X <input type='number' id='wgTpX' step='1' style='width:60px'> Y <input type='number' id='wgTpY' step='1' style='width:60px'> <button class='wgBtn' id='wgTpGo'>Teleport</button> <button class='wgBtn' id='wgTpSpawn'>Send to spawn</button></div>"
+    + "</div>"
     + "<div id='wgStatus'></div>"
     + "<div id='wgHelp'>Right-drag, middle-drag or hold Space to pan. Mouse wheel zooms. Lines snap straight; hold Shift for any angle. Portal: click the start tile, switch layer if needed, then click the destination. The green ring is the layer's spawn point. Red crossed tiles are invisible barriers that players cannot see.</div>";
   document.body.appendChild(panel);
   WG.panel = panel;
 
+  const secDefaults = { layer: true, build: true, tiles: true, objects: true, spawn: false, creatures: false, items: false, moderation: false };
+  let secState = {};
+  try {
+    secState = JSON.parse(localStorage.getItem("pmdGmSections") || "{}") || {};
+  } catch (e) {
+    secState = {};
+  }
+  panel.querySelectorAll("[data-wgsec]").forEach((headEl) => {
+    const id = headEl.getAttribute("data-wgsec");
+    const bodyEl = panel.querySelector("[data-wgbody='" + id + "']");
+    const apply = () => {
+      const open = secState[id] === undefined ? secDefaults[id] !== false : !!secState[id];
+      headEl.classList.toggle("closed", !open);
+      bodyEl.classList.toggle("closed", !open);
+    };
+    apply();
+    headEl.addEventListener("click", () => {
+      const open = !headEl.classList.contains("closed");
+      secState[id] = !open;
+      apply();
+      try { localStorage.setItem("pmdGmSections", JSON.stringify(secState)); } catch (e) {}
+    });
+  });
+  document.getElementById("wgToggleCreative").addEventListener("click", () => {
+    const creative = document.getElementById("wgCreative");
+    const coords = document.getElementById("wgCoords");
+    if (!creative) return;
+    const hide = creative.style.display !== "none";
+    creative.style.display = hide ? "none" : "flex";
+    if (coords) coords.style.bottom = hide ? "8px" : "246px";
+    document.getElementById("wgToggleCreative").textContent = hide ? "Show creative window" : "Hide creative window";
+  });
+  document.getElementById("wgTpSpawn").addEventListener("click", () => {
+    if (!WG.selPlayer || !WG.players[WG.selPlayer]) {
+      gmNotice("Select a player first.");
+      return;
+    }
+    const sp = WG.spawns[0];
+    if (!sp) {
+      gmNotice("There are no spawnpoints yet.");
+      return;
+    }
+    gmSend({ type: "gm_tp", playerId: WG.selPlayer, layer: sp.layer, col: sp.col, row: sp.row });
+  });
   document.getElementById("wgGo").addEventListener("click", () => gmGoLayer(document.getElementById("wgLayerNum").value));
   document.getElementById("wgPrev").addEventListener("click", () => gmGoLayer(WG.layer - 1));
   document.getElementById("wgNext").addEventListener("click", () => gmGoLayer(WG.layer + 1));
@@ -1394,6 +1587,24 @@ function gmBuildPanel() {
     if (picked) gmSend({ type: "gm_entity_del", id: picked.id });
   });
   document.querySelectorAll("[data-wgtool]").forEach((b) => b.addEventListener("click", () => gmSetTool(b.getAttribute("data-wgtool"))));
+  for (const tpId of ["wgTpX", "wgTpY"]) {
+    const tpInput = document.getElementById(tpId);
+    tpInput.addEventListener("focus", () => { chatActive = true; });
+    tpInput.addEventListener("blur", () => { chatActive = false; });
+  }
+  document.getElementById("wgTpGo").addEventListener("click", () => {
+    if (!WG.selPlayer || !WG.players[WG.selPlayer]) {
+      gmNotice("Select a player first.");
+      return;
+    }
+    const tx = parseInt(document.getElementById("wgTpX").value, 10);
+    const ty = parseInt(document.getElementById("wgTpY").value, 10);
+    if (!Number.isInteger(tx) || !Number.isInteger(ty) || tx < 0 || ty < 0 || tx >= WORLD_COLS || ty >= WORLD_ROWS) {
+      gmNotice("Enter whole numbers for X and Y between 0 and " + (WORLD_COLS - 1) + ".");
+      return;
+    }
+    gmSend({ type: "gm_tp", playerId: WG.selPlayer, layer: WG.layer, col: tx, row: ty });
+  });
   document.querySelectorAll("[data-wgshape]").forEach((b) => b.addEventListener("click", () => gmSetShape(b.getAttribute("data-wgshape"))));
   panel.querySelectorAll("input[type=text],input[type=number],textarea,select").forEach((input) => {
     input.addEventListener("focus", () => { chatActive = true; gmFillItemNames(); });
@@ -1645,7 +1856,7 @@ function enterGmWorld(scene) {
   scene.input.on("pointerup", (pointer) => gmPointerUp(scene, pointer));
   scene.input.on("wheel", (pointer, over, dx, dy) => {
     let z = cam.zoom * (dy > 0 ? 0.9 : 1.1);
-    if (z < 0.12) z = 0.12;
+    if (z < 0.2) z = 0.2;
     if (z > 2.5) z = 2.5;
     cam.setZoom(z);
   });
@@ -1656,6 +1867,7 @@ function enterGmWorld(scene) {
     if (e.key === "Escape") {
       WG.portalSource = null;
       WG.tpTarget = null;
+      gmPlayerDragCancel();
       gmDrawMarkers();
       gmRenderPlayers();
     }
@@ -2754,6 +2966,11 @@ function gmBuildCreative() {
   box.id = "wgCreative";
   box.innerHTML = "<div class='wgCrHead'>Creative items | drag out to place or give, drag anything back here to delete</div><input type='text' id='wgCreSearch' placeholder='Search items'><div id='wgCreGrid'></div>";
   document.body.appendChild(box);
+  const coords = document.createElement("div");
+  coords.id = "wgCoords";
+  coords.style.cssText = "position:fixed;left:8px;bottom:246px;background:rgba(20,20,34,0.95);border:1px solid #3a3a55;border-radius:8px;padding:4px 10px;color:#ffd23f;font-size:13px;font-family:monospace;z-index:25;pointer-events:none";
+  coords.textContent = "X: -   Y: -";
+  document.body.appendChild(coords);
   WGD.creativeEl = box;
   WGD.searchEl = box.querySelector("#wgCreSearch");
   WGD.gridEl = box.querySelector("#wgCreGrid");
