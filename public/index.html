@@ -2,6 +2,16 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PMD Web">
+<meta name="theme-color" content="#1a1a2e">
+<link rel="manifest" href="manifest.webmanifest">
+<script>
+if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) document.documentElement.classList.add("touch");
+</script>
 <title>PMD Web</title>
 <style>
   body { margin: 0; background: #1a1a2e; font-family: sans-serif; }
@@ -367,6 +377,7 @@ const config = {
   height: 480,
   pixelArt: true,
   parent: "game",
+  scale: document.documentElement.classList.contains("touch") ? { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH, width: 640, height: 480 } : undefined,
   backgroundColor: "#1a1a2e",
   loader: { crossOrigin: "anonymous" },
   scene: {
@@ -1484,5 +1495,6 @@ function addGmLine(text, ts) {
 new Phaser.Game(config);
 </script>
 <script src="world.js"></script>
+<script src="mobile.js"></script>
 </body>
 </html>
