@@ -464,10 +464,10 @@ function parseTileName(full) {
   const text = String(full || "");
   const at = text.lastIndexOf("@");
   if (at > 0) {
-    const rot = parseInt(text.substring(at + 1), 10);
-    if (TILE_ROTATIONS.includes(rot) && String(rot) === text.substring(at + 1)) return { base: text.substring(0, at), rot: rot };
+    const m = text.substring(at + 1).match(/^(90|180|270)?(f)?$/);
+    if (m && (m[1] || m[2])) return { base: text.substring(0, at), rot: m[1] ? parseInt(m[1], 10) : 0, flip: !!m[2] };
   }
-  return { base: text, rot: 0 };
+  return { base: text, rot: 0, flip: false };
 }
 const BLOCKING_TILES = ["Water"];
 
@@ -2101,7 +2101,7 @@ function applyArt(layer, ops) {
     }
     const parsed = parseTileName(name);
     if (names.indexOf(parsed.base) === -1) continue;
-    const storedName = parsed.rot === 0 ? parsed.base : parsed.base + "@" + parsed.rot;
+    const storedName = parsed.rot === 0 && !parsed.flip ? parsed.base : parsed.base + "@" + (parsed.rot === 0 ? "" : parsed.rot) + (parsed.flip ? "f" : "");
     const ch = paletteChar(storedName);
     if (!ch) continue;
     if (oldCh === ch) continue;

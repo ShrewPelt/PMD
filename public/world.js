@@ -138,6 +138,7 @@ const WG = {
   noticeUntil: 0,
   tileName: "",
   tileRot: 0,
+  tileFlip: false,
   hoverSprite: null,
   objName: "",
   viewKey: "",
@@ -216,7 +217,7 @@ function worldSyncPool(scene, pool, wanted, kind) {
   }
   for (const key in wanted) {
     const w = wanted[key];
-    const parsed = kind === "tile" ? worldParseTileName(w.name) : { base: w.name, rot: 0 };
+    const parsed = kind === "tile" ? worldParseTileName(w.name) : { base: w.name, rot: 0, flip: false };
     const tex = worldEnsureAsset(scene, kind, parsed.base);
     if (!tex) continue;
     let sp = pool[key];
@@ -241,7 +242,10 @@ function worldSyncPool(scene, pool, wanted, kind) {
       pool[key] = sp;
     }
     sp.setAlpha(w.alpha === undefined ? 1 : w.alpha);
-    if (kind === "tile") sp.setAngle(parsed.rot);
+    if (kind === "tile") {
+      sp.setFlipX(parsed.flip);
+      sp.setAngle(parsed.rot);
+    }
   }
 }
 
@@ -249,11 +253,15 @@ function worldParseTileName(full) {
   const text = String(full || "");
   const at = text.lastIndexOf("@");
   if (at > 0) {
-    const tail = text.substring(at + 1);
-    const rot = parseInt(tail, 10);
-    if ((rot === 90 || rot === 180 || rot === 270) && String(rot) === tail) return { base: text.substring(0, at), rot: rot };
+    const m = text.substring(at + 1).match(/^(90|180|270)?(f)?$/);
+    if (m && (m[1] || m[2])) return { base: text.substring(0, at), rot: m[1] ? parseInt(m[1], 10) : 0, flip: !!m[2] };
   }
-  return { base: text, rot: 0 };
+  return { base: text, rot: 0, flip: false };
+}
+
+function gmTileStoredName() {
+  if (!WG.tileRot && !WG.tileFlip) return WG.tileName;
+  return WG.tileName + "@" + (WG.tileRot ? WG.tileRot : "") + (WG.tileFlip ? "f" : "");
 }
 
 function worldSyncItems(scene, items) {
@@ -409,9 +417,15 @@ function gmUpdateHoverTile(scene) {
   if (sp.texture.key !== tex) sp.setTexture(tex);
   sp.setDisplaySize(TILE, TILE);
   sp.setAlpha(0.5);
+  sp.setFlipX(WG.tileFlip);
   sp.setAngle(WG.tileRot);
   sp.setPosition(WG.hoverCol * TILE + TILE / 2, WG.hoverRow * TILE + TILE / 2);
   sp.setVisible(true);
+}
+
+function gmFlipTile() {
+  WG.tileFlip = !WG.tileFlip;
+  gmUpdateHoverStatus();
 }
 
 function gmRotateTile() {
@@ -421,10 +435,13 @@ function gmRotateTile() {
 
 document.addEventListener("keydown", (ev) => {
   if (ev.repeat || !worldGmMode || chatActive) return;
-  if (ev.key !== "r" && ev.key !== "R") return;
+  const isRotate = ev.key === "r" || ev.key === "R";
+  const isFlip = ev.key === "f" || ev.key === "F";
+  if (!isRotate && !isFlip) return;
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
   if (WG.tool !== "tile") return;
-  gmRotateTile();
+  if (isRotate) gmRotateTile();
+  else gmFlipTile();
 });
 
 function worldFrame(scene) {
@@ -571,7 +588,7 @@ function gmSendEdit(cells) {
     if (!gmInBounds(c, r)) continue;
     gmSnapshotCell(c, r);
     if (TOOL_CHARS[tool] !== undefined) logicOps.push([c, r, TOOL_CHARS[tool]]);
-    else if (tool === "tile") artOps.push([c, r, WG.tileRot ? WG.tileName + "@" + WG.tileRot : WG.tileName]);
+    else if (tool === "tile") artOps.push([c, r, gmTileStoredName()]);
     else if (tool === "tileclear") artOps.push([c, r, ""]);
     else if (tool === "object") objOps.push([c, r, WG.objName, solid]);
     else if (tool === "objerase") objOps.push([c, r, "", 0]);
@@ -673,7 +690,7 @@ function gmUpdateHoverStatus() {
   if (portal) text += " to layer " + portal.layer + " (" + portal.col + ", " + portal.row + ")";
   if (WG.portalSource) text += "\nPortal start set on layer " + WG.portalSource.layer + ". Pick the destination.";
   if (WG.tpTarget && WG.players[WG.tpTarget]) text += "\nMoving " + WG.players[WG.tpTarget].name + ": click a tile.";
-  if (WG.tool === "tile" && WG.tileName) text += "\nTile " + WG.tileName + " rotated " + WG.tileRot + " degrees. Press R to rotate.";
+  if (WG.tool === "tile" && WG.tileName) text += "\nTile " + WG.tileName + " | rotated " + WG.tileRot + " degrees" + (WG.tileFlip ? " | flipped" : "") + ". R rotates, F flips.";
   if (WG.notice && Date.now() < WG.noticeUntil) text = WG.notice + "\n" + text;
   gmStatus(text);
 }
