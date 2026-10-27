@@ -973,6 +973,82 @@ function gmStatus(text) {
   if (el) el.textContent = text;
 }
 
+function gmPlaceCoords() {
+  const coords = document.getElementById("wgCoords");
+  const box = document.getElementById("wgCreative");
+  if (!coords) return;
+  if (!box || box.style.display === "none") {
+    coords.style.left = "8px";
+    coords.style.top = "";
+    coords.style.bottom = "8px";
+    return;
+  }
+  const rect = box.getBoundingClientRect();
+  coords.style.bottom = "";
+  coords.style.left = rect.left + "px";
+  coords.style.top = Math.max(0, rect.top - 34) + "px";
+}
+
+function gmClampWindow(el) {
+  const rect = el.getBoundingClientRect();
+  let left = rect.left;
+  let top = rect.top;
+  const maxLeft = Math.max(0, window.innerWidth - rect.width);
+  const maxTop = Math.max(0, window.innerHeight - rect.height);
+  if (left > maxLeft) left = maxLeft;
+  if (top > maxTop) top = maxTop;
+  if (left < 0) left = 0;
+  if (top < 0) top = 0;
+  el.style.left = left + "px";
+  el.style.top = top + "px";
+  el.style.bottom = "auto";
+}
+
+function gmMakeDraggable(el, handle, storeKey, onMove, filter) {
+  if (!filter) handle.style.cursor = "move";
+  handle.style.touchAction = "none";
+  try {
+    const saved = JSON.parse(localStorage.getItem(storeKey) || "null");
+    if (saved && typeof saved.left === "number" && typeof saved.top === "number") {
+      el.style.left = saved.left + "px";
+      el.style.top = saved.top + "px";
+      el.style.bottom = "auto";
+      gmClampWindow(el);
+    }
+  } catch (e) {}
+  let drag = null;
+  handle.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== undefined && ev.button !== 0) return;
+    if (filter && !filter(ev.target)) return;
+    const rect = el.getBoundingClientRect();
+    drag = { id: ev.pointerId, dx: ev.clientX - rect.left, dy: ev.clientY - rect.top };
+    try { handle.setPointerCapture(ev.pointerId); } catch (e) {}
+    ev.preventDefault();
+  });
+  handle.addEventListener("pointermove", (ev) => {
+    if (!drag || ev.pointerId !== drag.id) return;
+    el.style.left = (ev.clientX - drag.dx) + "px";
+    el.style.top = (ev.clientY - drag.dy) + "px";
+    el.style.bottom = "auto";
+    gmClampWindow(el);
+    if (onMove) onMove();
+  });
+  const finish = (ev) => {
+    if (!drag || ev.pointerId !== drag.id) return;
+    drag = null;
+    const rect = el.getBoundingClientRect();
+    try { localStorage.setItem(storeKey, JSON.stringify({ left: rect.left, top: rect.top })); } catch (e) {}
+  };
+  handle.addEventListener("pointerup", finish);
+  handle.addEventListener("pointercancel", finish);
+  window.addEventListener("resize", () => {
+    if (el.style.top && el.style.top !== "auto") {
+      gmClampWindow(el);
+      if (onMove) onMove();
+    }
+  });
+}
+
 function gmNotice(text) {
   WG.notice = text;
   WG.noticeUntil = Date.now() + 4000;
@@ -1558,7 +1634,7 @@ function gmBuildPanel() {
     if (!creative) return;
     const hide = creative.style.display !== "none";
     creative.style.display = hide ? "none" : "flex";
-    if (coords) coords.style.bottom = hide ? "8px" : "246px";
+    gmPlaceCoords();
     document.getElementById("wgToggleCreative").textContent = hide ? "Show creative window" : "Hide creative window";
   });
   document.getElementById("wgTpSpawn").addEventListener("click", () => {
@@ -2938,7 +3014,7 @@ function gmBuildCreative() {
   const style = document.createElement("style");
   style.textContent = "#wgCreative{position:fixed;left:8px;bottom:8px;width:340px;height:230px;background:rgba(20,20,34,0.95);border:1px solid #3a3a55;border-radius:8px;padding:8px;color:#fff;font-size:12px;z-index:25;display:flex;flex-direction:column;user-select:none}"
     + "#wgCreative.wgDel{border-color:#ff5050;box-shadow:0 0 12px #ff5050}"
-    + "#wgCreative .wgCrHead{font-weight:bold;color:#ffd23f;margin-bottom:4px}"
+    + "#wgCreative .wgCrHead{font-weight:bold;color:#ffd23f;margin-bottom:4px;padding:2px 0;user-select:none}"
     + "#wgCreative input{background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;padding:4px;width:96%;margin-bottom:4px;user-select:text}"
     + "#wgCreGrid{flex:1;overflow-y:auto;display:flex;flex-wrap:wrap;align-content:flex-start}"
     + ".wgCreItem{width:52px;margin:2px;padding:3px 1px;background:#2d2d44;border:1px solid #55557a;border-radius:5px;text-align:center;cursor:grab;font-size:9px;overflow:hidden}"
@@ -2949,7 +3025,7 @@ function gmBuildCreative() {
     + "#wgGhost{position:fixed;z-index:80;pointer-events:none;opacity:0.85;width:44px;text-align:center;font-size:9px;color:#fff;text-shadow:0 0 3px #000}"
     + "#wgInspector{position:fixed;left:356px;bottom:8px;width:300px;max-height:60vh;overflow-y:auto;background:rgba(20,20,34,0.95);border:1px solid #3a3a55;border-radius:8px;padding:8px;color:#fff;font-size:12px;z-index:25;user-select:none}"
     + "#wgInspector.hidden{display:none}"
-    + "#wgInspector .wgInHead{display:flex;justify-content:space-between;font-weight:bold;color:#ffd23f;margin-bottom:6px}"
+    + "#wgInspector .wgInHead{cursor:move;display:flex;justify-content:space-between;font-weight:bold;color:#ffd23f;margin-bottom:6px}"
     + "#wgInspector h5{margin:8px 0 4px 0;color:#c8c8ff;font-size:12px}"
     + ".wgSlots{display:flex;gap:6px}"
     + ".wgSlot{flex:1;min-height:58px;background:#1a1a2a;border:1px dashed #55557a;border-radius:6px;padding:3px;text-align:center;font-size:10px}"
@@ -2972,6 +3048,9 @@ function gmBuildCreative() {
   coords.textContent = "X: -   Y: -";
   document.body.appendChild(coords);
   WGD.creativeEl = box;
+  gmMakeDraggable(box, box.querySelector(".wgCrHead"), "pmdCreativePos", gmPlaceCoords);
+  gmPlaceCoords();
+  window.addEventListener("resize", gmPlaceCoords);
   WGD.searchEl = box.querySelector("#wgCreSearch");
   WGD.gridEl = box.querySelector("#wgCreGrid");
   WGD.searchEl.addEventListener("focus", () => { chatActive = true; });
@@ -2983,6 +3062,7 @@ function gmBuildCreative() {
   insp.className = "hidden";
   document.body.appendChild(insp);
   WGD.inspEl = insp;
+  gmMakeDraggable(insp, insp, "pmdInspectorPos", null, (target) => !!(target && target.closest && target.closest(".wgInHead")));
 
   fetch("items-index.json").then((r) => r.json()).then((data) => {
     itemIndex = data;
