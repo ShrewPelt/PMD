@@ -1,5 +1,5 @@
-const WORLD_COLS = 256;
-const WORLD_ROWS = 256;
+const WORLD_COLS = 1024;
+const WORLD_ROWS = 1024;
 const CHUNK = 32;
 const TOOL_CHARS = { floor: ".", wall: "#", barrier: "x", void: " " };
 const TOOL_PREVIEW = { floor: 0x5a5a88, wall: 0x8a6a4a, barrier: 0xc0392b, void: 0x000000, tile: 0x4a9a4a, tileclear: 0x888888, object: 0xd8a840, objerase: 0xc0392b };
@@ -339,6 +339,18 @@ function gmRedrawChunk(scene, cx, cy) {
   let g = WG.chunks[key];
   let over = WG.overlays[key];
   if (!g) {
+    let hasContent = false;
+    const rLimit = Math.min(WORLD_ROWS, (cy + 1) * CHUNK);
+    for (let rr = cy * CHUNK; rr < rLimit && !hasContent; rr++) {
+      const lineCheck = WG.rows[rr];
+      for (let cc = cx * CHUNK; cc < Math.min(WORLD_COLS, (cx + 1) * CHUNK); cc++) {
+        if (lineCheck[cc] !== " ") {
+          hasContent = true;
+          break;
+        }
+      }
+    }
+    if (!hasContent) return;
     g = scene.add.graphics();
     g.setDepth(0);
     WG.chunks[key] = g;
