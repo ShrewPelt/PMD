@@ -289,8 +289,168 @@ function worldSyncItems(scene, items) {
   updatePlayerLift();
 }
 
+const MUSIC = { tracks: [], queue: [], current: null, audio: null, state: "stopped", volume: 0.4, unlocked: false, el: null, label: null, playBtn: null };
+
+function musicShuffle(list) {
+  const out = list.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = out[i];
+    out[i] = out[j];
+    out[j] = tmp;
+  }
+  return out;
+}
+
+function musicNextTrack() {
+  if (MUSIC.tracks.length === 0) return null;
+  if (MUSIC.queue.length === 0) {
+    MUSIC.queue = musicShuffle(MUSIC.tracks);
+    if (MUSIC.queue.length > 1 && MUSIC.current && MUSIC.queue[0].url === MUSIC.current.url) {
+      const first = MUSIC.queue.shift();
+      MUSIC.queue.push(first);
+    }
+  }
+  return MUSIC.queue.shift();
+}
+
+function musicRefreshUi() {
+  if (!MUSIC.el) return;
+  MUSIC.playBtn.textContent = MUSIC.state === "playing" ? "Pause" : (MUSIC.state === "paused" ? "Resume" : "Play");
+  if (MUSIC.tracks.length === 0) MUSIC.label.textContent = "No music found";
+  else if (MUSIC.state === "stopped") MUSIC.label.textContent = "Music stopped";
+  else if (MUSIC.state === "blocked") MUSIC.label.textContent = "Click anywhere to start the music";
+  else MUSIC.label.textContent = (MUSIC.state === "paused" ? "Paused: " : "Now playing: ") + (MUSIC.current ? MUSIC.current.name : "");
+}
+
+function musicStartTrack() {
+  const track = musicNextTrack();
+  if (!track) {
+    musicRefreshUi();
+    return;
+  }
+  if (MUSIC.audio) {
+    MUSIC.audio.onended = null;
+    MUSIC.audio.pause();
+  }
+  MUSIC.current = track;
+  const audio = new Audio(track.url);
+  audio.volume = MUSIC.volume;
+  audio.onended = () => {
+    if (MUSIC.state === "playing") musicStartTrack();
+  };
+  audio.onerror = () => {
+    if (MUSIC.state === "playing") setTimeout(musicStartTrack, 500);
+  };
+  MUSIC.audio = audio;
+  MUSIC.state = "playing";
+  musicRefreshUi();
+  const attempt = audio.play();
+  if (attempt && attempt.catch) {
+    attempt.catch(() => {
+      if (MUSIC.audio === audio && MUSIC.state === "playing") MUSIC.state = "blocked";
+      musicRefreshUi();
+    });
+  }
+}
+
+function musicPlayPause() {
+  if (MUSIC.state === "playing") {
+    MUSIC.audio.pause();
+    MUSIC.state = "paused";
+  } else if (MUSIC.state === "paused" && MUSIC.audio) {
+    MUSIC.state = "playing";
+    const attempt = MUSIC.audio.play();
+    if (attempt && attempt.catch) attempt.catch(() => {});
+  } else {
+    musicStartTrack();
+    return;
+  }
+  musicRefreshUi();
+}
+
+function musicStop() {
+  if (MUSIC.audio) {
+    MUSIC.audio.onended = null;
+    MUSIC.audio.pause();
+    MUSIC.audio = null;
+  }
+  MUSIC.state = "stopped";
+  musicRefreshUi();
+}
+
+function musicBuildUi() {
+  const style = document.createElement("style");
+  style.textContent = "#worldMusic{position:fixed;left:50%;bottom:6px;transform:translateX(-50%);z-index:40;display:flex;align-items:center;gap:6px;background:rgba(20,20,36,0.88);border:1px solid #4a4a70;border-radius:16px;padding:4px 10px;color:#dde;font-size:12px;font-family:sans-serif}"
+    + "#worldMusic button{background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:10px;padding:2px 9px;cursor:pointer;font-size:12px}"
+    + "#worldMusic button:hover{background:#4a6cff}"
+    + "#worldMusic .mLabel{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+    + "#worldMusic input[type=range]{width:70px}";
+  document.head.appendChild(style);
+  const el = document.createElement("div");
+  el.id = "worldMusic";
+  const label = document.createElement("span");
+  label.className = "mLabel";
+  const playBtn = document.createElement("button");
+  const nextBtn = document.createElement("button");
+  nextBtn.textContent = "Next";
+  const stopBtn = document.createElement("button");
+  stopBtn.textContent = "Stop";
+  const vol = document.createElement("input");
+  vol.type = "range";
+  vol.min = "0";
+  vol.max = "100";
+  vol.value = String(Math.round(MUSIC.volume * 100));
+  playBtn.addEventListener("click", musicPlayPause);
+  nextBtn.addEventListener("click", () => {
+    if (MUSIC.tracks.length === 0) return;
+    musicStartTrack();
+  });
+  stopBtn.addEventListener("click", musicStop);
+  vol.addEventListener("input", () => {
+    MUSIC.volume = Number(vol.value) / 100;
+    if (MUSIC.audio) MUSIC.audio.volume = MUSIC.volume;
+    try { localStorage.setItem("pmdMusicVolume", String(MUSIC.volume)); } catch (e) {}
+  });
+  for (const node of [label, playBtn, nextBtn, stopBtn, vol]) el.appendChild(node);
+  for (const evName of ["keydown", "keyup"]) vol.addEventListener(evName, (ev) => ev.stopPropagation());
+  document.body.appendChild(el);
+  MUSIC.el = el;
+  MUSIC.label = label;
+  MUSIC.playBtn = playBtn;
+}
+
+function musicInit() {
+  if (MUSIC.el) return;
+  try {
+    const saved = parseFloat(localStorage.getItem("pmdMusicVolume"));
+    if (!isNaN(saved) && saved >= 0 && saved <= 1) MUSIC.volume = saved;
+  } catch (e) {}
+  musicBuildUi();
+  musicRefreshUi();
+  fetch("/api/world/music").then((r) => r.json()).then((data) => {
+    MUSIC.tracks = Array.isArray(data.tracks) ? data.tracks : [];
+    musicRefreshUi();
+    if (MUSIC.tracks.length > 0) musicStartTrack();
+  }).catch(() => {});
+  const unlock = (ev) => {
+    if (ev && ev.target && ev.target.closest && ev.target.closest("#worldMusic")) return;
+    document.removeEventListener("pointerdown", unlock);
+    document.removeEventListener("keydown", unlock);
+    if (MUSIC.state === "blocked" && MUSIC.audio) {
+      MUSIC.state = "playing";
+      const attempt = MUSIC.audio.play();
+      if (attempt && attempt.catch) attempt.catch(() => {});
+      musicRefreshUi();
+    }
+  };
+  document.addEventListener("pointerdown", unlock);
+  document.addEventListener("keydown", unlock);
+}
+
 function enterPlayerWorld(scene) {
   worldPlayerMode = true;
+  musicInit();
   if (mapGraphics) mapGraphics.clear();
   scene.cameras.main.removeBounds();
   const exitBtn = document.getElementById("exitWorld");
@@ -1449,6 +1609,7 @@ function gmBuildAssetButtons(list) {
 
 function enterGmWorld(scene) {
   worldGmMode = true;
+  musicInit();
   isGM = true;
   window.worldGmActive = true;
   player.setVisible(false);
@@ -2956,7 +3117,7 @@ function bushPlaySound(file, volume) {
   try {
     let base = bushAudioCache[file];
     if (!base) {
-      base = new Audio("assets/music/" + encodeURIComponent(file));
+      base = new Audio("assets/music/" + file.split("/").map(encodeURIComponent).join("/"));
       base.preload = "auto";
       bushAudioCache[file] = base;
     }

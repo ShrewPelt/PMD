@@ -1148,9 +1148,12 @@ function queueWorldSave(p, final) {
   const kills = Array.isArray(p._kills) ? p._kills.splice(0) : [];
   const vitalsChanged = p.hp !== p._reportedHp || p.mp !== p._reportedMp;
   const accDirty = !!p._accDirty;
-  if (!final && Object.keys(delta).length === 0 && kills.length === 0 && !vitalsChanged && !accDirty) return;
+  const coinsPending = p._coinsPending || 0;
+  if (!final && Object.keys(delta).length === 0 && kills.length === 0 && !vitalsChanged && !accDirty && coinsPending === 0) return;
+  p._coinsPending = 0;
   const ailments = p._sheet && Array.isArray(p._sheet.ailments) ? p._sheet.ailments : [];
   const entry = { id: makeToken(), kind: p._npcName ? "npc" : undefined, npcName: p._npcName || undefined, userId: p.userId, name: p.name, slot: p._slot, pass: p._pass, delta: delta, kills: kills, hp: p.hp, mp: p.mp, ailments: ailments, layer: p.layer, col: p.col, row: p.row, final: final, ts: Date.now() };
+  if (coinsPending > 0) entry.coins = coinsPending;
   if (accDirty && p._sheet && p._sheet.accessories) {
     const a = p._sheet.accessories;
     entry.accessories = { head: a.head || null, neck: a.neck || null, back: a.back || null };
@@ -1442,6 +1445,35 @@ app.post("/api/world/join", (req, res) => {
 
 app.get("/api/world/species", (req, res) => {
   res.json({ species: Object.keys(speciesDex) });
+});
+
+const MUSIC_DIR = path.join(__dirname, "assets", "music", "Background");
+
+function walkMusic(dir, rel, out, depth) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (e) {
+    return;
+  }
+  entries.sort((x, y) => x.name.localeCompare(y.name));
+  for (const entry of entries) {
+    if (entry.isFile() && /\.ogg$/i.test(entry.name)) {
+      const parts = rel.concat([entry.name]);
+      out.push({ name: entry.name.replace(/\.ogg$/i, ""), url: "assets/music/Background/" + parts.map(encodeURIComponent).join("/") });
+    }
+  }
+  if (depth >= 4) return;
+  for (const entry of entries) {
+    if (entry.isDirectory()) walkMusic(path.join(dir, entry.name), rel.concat([entry.name]), out, depth + 1);
+  }
+}
+
+app.get("/api/world/music", (req, res) => {
+  const tracks = [];
+  walkMusic(MUSIC_DIR, [], tracks, 0);
+  res.set("Cache-Control", "no-cache");
+  res.json({ tracks: tracks });
 });
 
 app.get("/api/world/assets", (req, res) => {
@@ -1990,7 +2022,7 @@ function sendLoot(p, e) {
 
 const BUSH_SEARCH_MS = Number(process.env.PMD_BUSH_SEARCH_MS) || 2000;
 const BUSH_WOBBLE_MS = 1000;
-const BUSH_SOUND = "Bush Rustle.mp3";
+const BUSH_SOUND = "SFX/Bush Rustle.mp3";
 const BUSH_REGROW_MS = Number(process.env.PMD_BUSH_REGROW_MS) || 300000;
 const bushStates = {};
 
@@ -2026,12 +2058,39 @@ function handleObjectInteract(p) {
   for (const cell of candidates) {
     const obj = L.objects[cell[0] + "," + cell[1]];
     if (!obj) continue;
+    if (isCoinPile(obj.name)) {
+      collectCoinPile(p, cell[0], cell[1], obj);
+      return true;
+    }
     const item = berryItemForObject(obj.name);
     if (!item) continue;
     startBushSearch(p, cell[0], cell[1], obj, item);
     return true;
   }
   return false;
+}
+
+const COIN_PILE_MIN = 40;
+const COIN_PILE_MAX = 100;
+
+function isCoinPile(name) {
+  return /pile[ _]of[ _]coins/i.test(String(name || ""));
+}
+
+function collectCoinPile(p, col, row, obj) {
+  if (worldCombat.isInFight(p)) {
+    sendPlayer(p, { type: "item_result", ok: false, text: "You can't pick that up during battle." });
+    return;
+  }
+  const layer = p.layer;
+  const current = layers[layer] && layers[layer].objects[col + "," + row];
+  if (!current || current.name !== obj.name) return;
+  applyObjects(layer, [[col, row, "", 0]]);
+  const amount = COIN_PILE_MIN + Math.floor(Math.random() * (COIN_PILE_MAX - COIN_PILE_MIN + 1));
+  if (p._sheet) p._sheet.coins = (Number(p._sheet.coins) || 0) + amount;
+  p._coinsPending = (p._coinsPending || 0) + amount;
+  syncPlayerInventory(p);
+  sendPlayer(p, { type: "item_result", ok: true, text: "You picked up " + amount + " coins!" });
 }
 
 function startBushSearch(p, col, row, obj, item) {
