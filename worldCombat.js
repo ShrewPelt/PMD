@@ -4,6 +4,8 @@ const { effectiveSpeed } = require("./Utils/Combat/turnOrder");
 const { registerMove } = require("./Utils/Combat/moveData");
 const worldItems = require("./worldItems");
 const battleItems = require("./Utils/battleItems");
+const leveling = require("./Utils/leveling");
+const { accessoryBonusFor } = require("./Utils/accessoryBonus");
 
 const MOVE_STEPS = 3;
 const PLAYER_TURN_MS = 30000;
@@ -242,8 +244,50 @@ function buildPlayerCombatant(p) {
 }
 
 function buildEnemyCombatant(e) {
-  const c = engine.makeWildPokemon(e.species, e.level);
-  c.name = e.name;
+  const hasIvs = !!e.ivs;
+  const hasAccessories = !!(e.accessories && (e.accessories.back || e.accessories.neck || e.accessories.head));
+  const hasLoot = Array.isArray(e.loot) && e.loot.length > 0;
+  const hasMoves = Array.isArray(e.moves) && e.moves.length > 0;
+  if (!hasIvs && !hasAccessories && !hasLoot && !hasMoves) {
+    const plain = engine.makeWildPokemon(e.species, e.level);
+    plain.name = e.name;
+    plain.energy = 0;
+    return plain;
+  }
+  const ivs = { hp: 15, attack: 15, defense: 15, spAtk: 15, spDef: 15, speed: 15 };
+  if (hasIvs) {
+    for (const stat of Object.keys(ivs)) {
+      if (typeof e.ivs[stat] === "number") ivs[stat] = e.ivs[stat];
+    }
+  }
+  const character = {
+    name: e.name,
+    species: e.species,
+    level: e.level,
+    nature: null,
+    ivs: ivs,
+    evs: { hp: 0, attack: 0, defense: 0, spAtk: 0, spDef: 0, speed: 0 },
+    boosts: { hp: 0, mp: 0, attack: 0, defense: 0, spAtk: 0, spDef: 0, speed: 0 },
+    hp: 1,
+    maxHp: 1,
+    mp: 1,
+    maxMp: 1,
+    accessories: hasAccessories ? { back: e.accessories.back || null, neck: e.accessories.neck || null, head: e.accessories.head || null } : {},
+    inventory: hasLoot ? e.loot.map((stack) => ({ name: stack.name, count: stack.count })) : [],
+    moves: hasMoves ? e.moves.slice() : []
+  };
+  leveling.recalcStats(character);
+  const bonus = accessoryBonusFor(character);
+  character.maxHp += bonus.hp;
+  character.maxMp += bonus.mp;
+  character.attack += bonus.attack;
+  character.defense += bonus.defense;
+  character.spAtk += bonus.spAtk;
+  character.spDef += bonus.spDef;
+  character.speed += bonus.speed;
+  character.hp = character.maxHp;
+  character.mp = character.maxMp;
+  const c = engine.makeCombatant(character, e.name);
   c.energy = 0;
   return c;
 }
@@ -429,6 +473,18 @@ function downEnemy(f, A) {
   const e = A.ref;
   e._fight = null;
   e.state = "idle";
+  const loot = Array.isArray(e.loot) ? e.loot.filter((stack) => stack && stack.count > 0) : [];
+  if (!e.boss && loot.length > 0) {
+    e.kind = "corpse";
+    e.loot = loot;
+    e.hp = 0;
+    ctx.broadcastEntity(e, e.layer, e.col, e.row);
+    ctx.scheduleEntitySave();
+    setTimeout(() => {
+      if (ctx.entities[e.id] === e) ctx.broadcastEntity(e, e.layer, e.col, e.row);
+    }, 900);
+    return;
+  }
   ctx.removeEntity(e.id);
 }
 
@@ -493,15 +549,18 @@ function endFight(f, result) {
 }
 
 function tryAutoRevive(A) {
-  if (A.kind === "enemy" || A.c.hp > 0) return null;
-  const inv = Array.isArray(A.ref._inv) ? A.ref._inv : [];
+  if (A.c.hp > 0) return null;
+  const inv = invOf(A.ref);
   const norm = (n) => String(n).toLowerCase().replace(/\s+/g, "");
-  if (inv.some((s) => s && norm(s.name) === "theshade")) {
+  const relicLocked = A.kind === "enemy" && A.relicRevived;
+  if (!relicLocked && inv.some((s) => s && norm(s.name) === "theshade")) {
+    A.relicRevived = true;
     A.c.hp = A.c.maxHp;
     engine.clearAilmentsKeepToxin(A.c);
     return `The Shade prevents ${A.c.name} from fainting and forced them back up again!`;
   }
-  if (inv.some((s) => s && norm(s.name) === "shadeling")) {
+  if (!relicLocked && inv.some((s) => s && norm(s.name) === "shadeling")) {
+    A.relicRevived = true;
     A.c.hp = Math.min(1, A.c.maxHp);
     engine.clearAilmentsKeepToxin(A.c);
     return `The Shadeling clings to ${A.c.name} and refuses to let them fall | they cling on with 1 HP!`;
@@ -1225,11 +1284,18 @@ function handleAttack(f, A, data) {
   performAction(f, A, "move", moveName, T);
 }
 
+function invOf(ref) {
+  if (Array.isArray(ref._inv)) return ref._inv;
+  if (Array.isArray(ref.loot)) return ref.loot;
+  return [];
+}
+
 function removeOneFromInventory(ref, name) {
-  for (let i = 0; i < ref._inv.length; i++) {
-    if (ref._inv[i].name !== name) continue;
-    ref._inv[i].count = ref._inv[i].count - 1;
-    if (ref._inv[i].count <= 0) ref._inv.splice(i, 1);
+  const list = invOf(ref);
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].name !== name) continue;
+    list[i].count = list[i].count - 1;
+    if (list[i].count <= 0) list.splice(i, 1);
     return true;
   }
   return false;

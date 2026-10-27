@@ -76,8 +76,14 @@ function entityLabelsFrame(scene) {
       label.setDepth(200);
       worldEntityLabels[id] = label;
     }
-    label.setText((meta.state === "alert" ? "! " : "") + meta.name);
-    label.setColor(meta.state === "alert" ? "#ff5050" : (meta.kind === "enemy" ? "#ffb0b0" : (meta.kind === "companion" ? "#8fd0ff" : "#9fe89f")));
+    if (meta.kind === "corpse") {
+      label.setText(meta.name + " (fainted) T: loot");
+      label.setColor("#d9c27a");
+      if (!COMBAT.active || !COMBAT.actors[id]) sp.setAlpha(0.45);
+    } else {
+      label.setText((meta.state === "alert" ? "! " : "") + meta.name);
+      label.setColor(meta.state === "alert" ? "#ff5050" : (meta.kind === "enemy" ? "#ffb0b0" : (meta.kind === "companion" ? "#8fd0ff" : "#9fe89f")));
+    }
     const off = (sp.feetOff !== undefined ? sp.feetOff : TILE / 2 - 2) + 12;
     label.setRotation(-viewRot);
     label.setPosition(sp.x + off * Math.sin(viewRot), sp.y + off * Math.cos(viewRot));
@@ -902,6 +908,20 @@ function gmBuildPanel() {
     + "<div style='margin-top:4px'>Name <input type='text' id='wgEName' placeholder='optional'></div>"
     + "<div style='margin-top:4px'>Level <input type='number' id='wgELevel' value='5' min='1' max='100'> Wander <input type='number' id='wgEWander' value='4' min='0' max='30'></div>"
     + "<div style='margin-top:4px'>Sensor range <input type='number' id='wgESensor' value='5' min='1' max='5'> (enemies, max 5)</div>"
+    + "<div id='wgEEnemyBox' style='margin-top:6px;padding:6px;border:1px solid #55557a;border-radius:6px'>"
+    + "<div><b>Enemy build</b></div>"
+    + "<div style='margin-top:4px'><label><input type='checkbox' id='wgEBoss'> Boss (no body left behind, items are only for its own use)</label></div>"
+    + "<div style='margin-top:4px'>IVs 0-31 (blank = 15):<br>"
+    + "HP <input type='number' class='wgIv' id='wgEIvHp' min='0' max='31' style='width:44px'> "
+    + "Atk <input type='number' class='wgIv' id='wgEIvAtk' min='0' max='31' style='width:44px'> "
+    + "Def <input type='number' class='wgIv' id='wgEIvDef' min='0' max='31' style='width:44px'><br>"
+    + "SpA <input type='number' class='wgIv' id='wgEIvSpa' min='0' max='31' style='width:44px'> "
+    + "SpD <input type='number' class='wgIv' id='wgEIvSpd' min='0' max='31' style='width:44px'> "
+    + "Spe <input type='number' class='wgIv' id='wgEIvSpe' min='0' max='31' style='width:44px'></div>"
+    + "<div style='margin-top:4px'>Equipped:<br>Head <input type='text' id='wgEAccHead' list='wgItemNames' style='width:120px'> Neck <input type='text' id='wgEAccNeck' list='wgItemNames' style='width:120px'><br>Back <input type='text' id='wgEAccBack' list='wgItemNames' style='width:120px'></div>"
+    + "<div style='margin-top:4px'>Items carried, one per line (Name or Name x3). Non-boss enemies drop these as loot when they faint:<br><textarea id='wgEItems' rows='3' list='wgItemNames' style='width:96%;background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px'></textarea><datalist id='wgItemNames'></datalist></div>"
+    + "<div style='margin-top:4px'>Moves, comma separated, up to 4 (blank = default for species and level):<br><input type='text' id='wgEMoves' style='width:96%'></div>"
+    + "</div>"
     + "<div style='margin-top:4px'>NPC lines, one per line:<br><textarea id='wgELines' rows='4' style='width:96%;background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px'></textarea></div>"
     + "<div style='margin-top:4px'>"
     + "<button class='wgBtn' data-wgtool='creature'>Place</button>"
@@ -943,12 +963,58 @@ function gmBuildPanel() {
   document.querySelectorAll("[data-wgtool]").forEach((b) => b.addEventListener("click", () => gmSetTool(b.getAttribute("data-wgtool"))));
   document.querySelectorAll("[data-wgshape]").forEach((b) => b.addEventListener("click", () => gmSetShape(b.getAttribute("data-wgshape"))));
   panel.querySelectorAll("input[type=text],input[type=number],textarea,select").forEach((input) => {
-    input.addEventListener("focus", () => { chatActive = true; });
+    input.addEventListener("focus", () => { chatActive = true; gmFillItemNames(); });
     input.addEventListener("blur", () => { chatActive = false; });
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && input.id === "wgLayerNum") gmGoLayer(input.value);
     });
   });
+}
+
+const GM_IV_FIELDS = [["hp", "wgEIvHp"], ["attack", "wgEIvAtk"], ["defense", "wgEIvDef"], ["spAtk", "wgEIvSpa"], ["spDef", "wgEIvSpd"], ["speed", "wgEIvSpe"]];
+
+function gmReadIvs() {
+  const out = {};
+  for (const pair of GM_IV_FIELDS) {
+    const raw = document.getElementById(pair[1]).value;
+    if (raw !== "") out[pair[0]] = raw;
+  }
+  return out;
+}
+
+function gmParseLoot(text) {
+  const out = [];
+  for (const raw of String(text || "").split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    let name = line;
+    let count = 1;
+    const lead = line.match(/^(\d+)\s*[x\u00d7]\s*(.+)$/i);
+    const tail = line.match(/^(.+?)\s*[x\u00d7]\s*(\d+)$/i);
+    if (lead) {
+      count = parseInt(lead[1], 10);
+      name = lead[2].trim();
+    } else if (tail) {
+      count = parseInt(tail[2], 10);
+      name = tail[1].trim();
+    }
+    out.push({ name: name, count: count });
+  }
+  return out;
+}
+
+function gmFormatLoot(list) {
+  return (list || []).map((s) => s.name + (s.count > 1 ? " x" + s.count : "")).join("\n");
+}
+
+function gmFillItemNames() {
+  const list = document.getElementById("wgItemNames");
+  if (!list || list.children.length > 0 || typeof itemIndex !== "object") return;
+  for (const name of Object.keys(itemIndex).sort()) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    list.appendChild(opt);
+  }
 }
 
 function gmReadCreatureForm(existing, col, row) {
@@ -961,6 +1027,11 @@ function gmReadCreatureForm(existing, col, row) {
     wander: document.getElementById("wgEWander").value,
     sensor: document.getElementById("wgESensor").value,
     lines: document.getElementById("wgELines").value.split("\n"),
+    boss: document.getElementById("wgEBoss").checked,
+    ivs: gmReadIvs(),
+    accessories: { head: document.getElementById("wgEAccHead").value, neck: document.getElementById("wgEAccNeck").value, back: document.getElementById("wgEAccBack").value },
+    loot: gmParseLoot(document.getElementById("wgEItems").value),
+    moves: document.getElementById("wgEMoves").value.split(",").map((m) => m.trim()).filter((m) => m.length > 0),
     layer: WG.layer,
     col: col,
     row: row
@@ -982,6 +1053,16 @@ function gmShowSelection() {
   document.getElementById("wgEWander").value = picked.wander;
   document.getElementById("wgESensor").value = picked.sensor;
   document.getElementById("wgELines").value = (picked.lines || []).join("\n");
+  document.getElementById("wgEBoss").checked = !!picked.boss;
+  for (const pair of GM_IV_FIELDS) {
+    document.getElementById(pair[1]).value = picked.ivs && typeof picked.ivs[pair[0]] === "number" ? picked.ivs[pair[0]] : "";
+  }
+  const acc = picked.accessories || {};
+  document.getElementById("wgEAccHead").value = acc.head || "";
+  document.getElementById("wgEAccNeck").value = acc.neck || "";
+  document.getElementById("wgEAccBack").value = acc.back || "";
+  document.getElementById("wgEItems").value = gmFormatLoot(picked.loot);
+  document.getElementById("wgEMoves").value = (picked.moves || []).join(", ");
 }
 
 function gmBuildAssetButtons(list) {
@@ -1773,6 +1854,41 @@ else combatInitUi();
 
 
 let itemFx = {};
+let lootState = null;
+
+function lootClose() {
+  lootState = null;
+  const el = document.getElementById("lootPanel");
+  if (el) el.classList.add("hidden");
+}
+
+function lootRender() {
+  const el = document.getElementById("lootPanel");
+  if (!el || !lootState) return;
+  el.innerHTML = "";
+  const title = document.createElement("div");
+  title.className = "imtitle";
+  title.textContent = lootState.name + " dropped:";
+  el.appendChild(title);
+  for (const stack of lootState.items) {
+    const row = document.createElement("button");
+    row.className = "imbtn use";
+    row.textContent = "Take " + stack.name + (stack.count > 1 ? " x" + stack.count : "");
+    row.addEventListener("click", () => gmSend({ type: "loot_take", id: lootState.id, name: stack.name }));
+    el.appendChild(row);
+  }
+  const all = document.createElement("button");
+  all.className = "imbtn ally";
+  all.textContent = "Take all";
+  all.addEventListener("click", () => gmSend({ type: "loot_take", id: lootState.id, all: true }));
+  el.appendChild(all);
+  const close = document.createElement("button");
+  close.className = "imbtn cancel";
+  close.textContent = "Close";
+  close.addEventListener("click", lootClose);
+  el.appendChild(close);
+  el.classList.remove("hidden");
+}
 const ITEM_RANGE = 3;
 
 function itemEl() {
@@ -1948,6 +2064,7 @@ function itemMenuTry() {
 
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape" && itemMenuOpenNow()) itemMenuClose();
+  if (ev.key === "Escape" && lootState) lootClose();
 });
 
 window.worldHook = function (scene, data) {
@@ -1965,6 +2082,15 @@ window.worldHook = function (scene, data) {
     return combatMessage(scene, data);
   }
 
+  if (data.type === "loot_open") {
+    lootState = { id: data.id, name: data.name, items: data.items };
+    lootRender();
+    return true;
+  }
+  if (data.type === "loot_close") {
+    lootClose();
+    return true;
+  }
   if (data.type === "itemused") {
     if (data.consumed) removeFromInventory(data.name);
     else if (inventoryOpen) refreshInventoryPanel();

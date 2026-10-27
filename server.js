@@ -6,6 +6,7 @@ const fs = require("fs");
 const worldCombat = require("./worldCombat");
 const worldItems = require("./worldItems");
 const ITEM_FX = worldItems.allInfo();
+const { getMoveData } = require("./Utils/Combat/moveData");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -31,7 +32,7 @@ function scanItemIcons(dir, root, out) {
   }
 }
 
-app.get("/items-index.json", (req, res) => {
+function currentItemIndex() {
   const now = Date.now();
   if (!itemIndexCache.data || now - itemIndexCache.at > 10000) {
     const fresh = {};
@@ -40,10 +41,30 @@ app.get("/items-index.json", (req, res) => {
       for (const k of Object.keys(old)) fresh[k] = old[k];
     } catch (e) {}
     scanItemIcons(ITEMS_DIR, ITEMS_DIR, fresh);
-    itemIndexCache = { at: now, data: fresh };
+    itemIndexCache = { at: now, data: fresh, lower: null };
   }
+  return itemIndexCache.data;
+}
+
+function canonItemName(raw) {
+  const wanted = String(raw || "").trim();
+  if (!wanted) return null;
+  const index = currentItemIndex();
+  if (!itemIndexCache.lower) {
+    const lower = {};
+    for (const k of Object.keys(index)) lower[k.toLowerCase()] = k;
+    const effectNames = Object.keys(require("./Utils/battleItems").allEffects());
+    for (const k of effectNames) {
+      if (!lower[k.toLowerCase()]) lower[k.toLowerCase()] = k;
+    }
+    itemIndexCache.lower = lower;
+  }
+  return itemIndexCache.lower[wanted.toLowerCase()] || wanted.slice(0, 80);
+}
+
+app.get("/items-index.json", (req, res) => {
   res.set("Cache-Control", "no-cache");
-  res.json(itemIndexCache.data);
+  res.json(currentItemIndex());
 });
 
 app.use(express.static(path.join(__dirname, "public")));
@@ -1236,7 +1257,7 @@ function saveEntitiesNow() {
   for (const id of Object.keys(entities)) {
     const e = entities[id];
     if (e.kind === "companion") continue;
-    list.push({ id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines });
+    list.push({ id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves });
   }
   writeJsonFile(ENTITIES_FILE, { nextId: entityNextId, list: list });
 }
@@ -1251,13 +1272,13 @@ function publicEntity(e) {
 }
 
 function gmEntity(e) {
-  return { id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, state: e.state };
+  return { id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, state: e.state, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves };
 }
 
 function entityAt(layer, col, row, ignoreId) {
   for (const id in entities) {
     const e = entities[id];
-    if (e.down) continue;
+    if (e.down || e.kind === "corpse") continue;
     if (e.id !== ignoreId && e.layer === layer && e.col === col && e.row === row) return e;
   }
   return null;
@@ -1373,7 +1394,7 @@ function entityTick() {
       if (now >= e._downUntil) reviveEntity(e);
       continue;
     }
-    if (e.kind === "companion") continue;
+    if (e.kind === "companion" || e.kind === "corpse") continue;
     if (!layerHasViewers(e.layer)) continue;
     if (e._fight) continue;
 
@@ -1431,6 +1452,68 @@ function cleanLines(value) {
   return out;
 }
 
+function cleanIvs(value) {
+  if (!value || typeof value !== "object") return null;
+  const out = {};
+  let any = false;
+  for (const stat of ["hp", "attack", "defense", "spAtk", "spDef", "speed"]) {
+    const n = parseInt(value[stat], 10);
+    if (Number.isNaN(n)) {
+      out[stat] = 15;
+    } else {
+      out[stat] = Math.max(0, Math.min(31, n));
+      any = true;
+    }
+  }
+  return any ? out : null;
+}
+
+function cleanAccessories(value) {
+  if (!value || typeof value !== "object") return null;
+  const out = { back: null, neck: null, head: null };
+  let any = false;
+  for (const slot of ["back", "neck", "head"]) {
+    const name = canonItemName(value[slot]);
+    if (name) {
+      out[slot] = name;
+      any = true;
+    }
+  }
+  return any ? out : null;
+}
+
+function cleanLoot(value) {
+  const out = [];
+  if (!Array.isArray(value)) return out;
+  for (const entry of value) {
+    if (!entry) continue;
+    const name = canonItemName(entry.name);
+    const count = Math.max(1, Math.min(99, parseInt(entry.count, 10) || 1));
+    if (!name) continue;
+    const existing = out.find((stack) => stack.name === name);
+    if (existing) existing.count = Math.min(99, existing.count + count);
+    else out.push({ name: name, count: count });
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+function cleanEnemyMoves(value) {
+  const moves = [];
+  const unknown = [];
+  if (!Array.isArray(value)) return { moves: moves, unknown: unknown };
+  for (const raw of value) {
+    const name = String(raw || "").trim();
+    if (!name) continue;
+    if (getMoveData(name)) {
+      if (moves.length < 4 && moves.indexOf(name) === -1) moves.push(name);
+    } else {
+      unknown.push(name);
+    }
+  }
+  return { moves: moves, unknown: unknown };
+}
+
 function handleGmEntitySet(gm, data) {
   const src = data.entity;
   if (!src || typeof src !== "object") return;
@@ -1448,7 +1531,7 @@ function handleGmEntitySet(gm, data) {
   if (col < 0 || col >= LAYER_W || row < 0 || row >= LAYER_H) return;
 
   let e = typeof src.id === "string" ? entities[src.id] : null;
-  if (e && e.kind === "companion") return;
+  if (e && (e.kind === "companion" || e.kind === "corpse")) return;
   let oldLayer = null;
   let oldCol = 0;
   let oldRow = 0;
@@ -1482,9 +1565,32 @@ function handleGmEntitySet(gm, data) {
   e.wander = Number.isNaN(wander) ? DEFAULT_WANDER : wander;
   e.sensor = Number.isNaN(sensor) ? DEFAULT_SENSOR : sensor;
   e.lines = kind === "npc" ? cleanLines(src.lines) : [];
+  if (kind === "enemy") {
+    e.boss = !!src.boss;
+    e.ivs = cleanIvs(src.ivs);
+    e.accessories = cleanAccessories(src.accessories);
+    e.loot = cleanLoot(src.loot);
+    const moveCheck = cleanEnemyMoves(src.moves);
+    e.moves = moveCheck.moves;
+    if (moveCheck.unknown.length > 0) sendSocket(gm.socket, { type: "gm_notice", text: "Unknown moves ignored: " + moveCheck.unknown.join(", ") });
+  } else {
+    e.boss = false;
+    e.ivs = null;
+    e.accessories = null;
+    e.loot = [];
+    e.moves = [];
+  }
   e.state = "idle";
   broadcastEntity(e, oldLayer, oldCol, oldRow);
   scheduleEntitySave();
+}
+
+function capacityOf(p) {
+  return p._sheet && p._sheet.capacity ? p._sheet.capacity : 10;
+}
+
+function sendLoot(p, e) {
+  sendPlayer(p, { type: "loot_open", id: e.id, name: e.name, items: e.loot.map((stack) => ({ name: stack.name, count: stack.count })) });
 }
 
 function handleInteract(p) {
@@ -1492,15 +1598,23 @@ function handleInteract(p) {
   let bestDist = Infinity;
   for (const id in entities) {
     const e = entities[id];
-    if (e.kind !== "npc" || e.layer !== p.layer) continue;
+    if ((e.kind !== "npc" && e.kind !== "corpse") || e.layer !== p.layer) continue;
     const dist = Math.max(Math.abs(e.col - p.col), Math.abs(e.row - p.row));
-    if (dist <= 1 && dist < bestDist) {
+    if (dist <= 1 && (dist < bestDist || (dist === bestDist && e.kind === "corpse"))) {
       bestDist = dist;
       best = e;
     }
   }
   if (!best) {
     sendPlayer(p, { type: "interact_none" });
+    return;
+  }
+  if (best.kind === "corpse") {
+    if (worldCombat.isInFight(p)) {
+      sendPlayer(p, { type: "c_notice", text: "You can't loot during battle." });
+      return;
+    }
+    sendLoot(p, best);
     return;
   }
   if (best.lines.length === 0) {
@@ -1511,6 +1625,54 @@ function handleInteract(p) {
   best._lineIdx = best._lineIdx + 1;
   best._nextSpeech = Date.now() + SPEECH_MIN_MS + Math.random() * (SPEECH_MAX_MS - SPEECH_MIN_MS);
   saySpeech(best, text);
+}
+
+function handleLootTake(p, data) {
+  const e = entities[String(data.id)];
+  if (!e || e.kind !== "corpse" || e.layer !== p.layer) {
+    sendPlayer(p, { type: "loot_close" });
+    return;
+  }
+  if (worldCombat.isInFight(p)) {
+    sendPlayer(p, { type: "c_notice", text: "You can't loot during battle." });
+    return;
+  }
+  if (Math.max(Math.abs(e.col - p.col), Math.abs(e.row - p.row)) > 1) {
+    sendPlayer(p, { type: "item_result", ok: false, text: "You are too far away to loot that." });
+    sendPlayer(p, { type: "loot_close" });
+    return;
+  }
+  const wantedName = data.all ? null : String(data.name || "");
+  let bagFull = false;
+  for (const stack of e.loot.slice()) {
+    if (wantedName !== null && stack.name !== wantedName) continue;
+    const units = wantedName !== null && !data.all ? Math.max(1, Math.min(stack.count, parseInt(data.count, 10) || stack.count)) : stack.count;
+    for (let i = 0; i < units; i++) {
+      let mine = null;
+      for (const entry of p._inv) {
+        if (entry.name === stack.name) { mine = entry; break; }
+      }
+      if (!mine && p._inv.length >= capacityOf(p)) {
+        bagFull = true;
+        break;
+      }
+      if (mine) mine.count = mine.count + 1;
+      else p._inv.push({ name: stack.name, count: 1 });
+      stack.count = stack.count - 1;
+      sendPlayer(p, { type: "pickedup", name: stack.name });
+    }
+    if (bagFull) break;
+  }
+  e.loot = e.loot.filter((stack) => stack.count > 0);
+  if (bagFull) sendPlayer(p, { type: "item_result", ok: false, text: "Your bag is full." });
+  if (e.loot.length === 0) {
+    removeEntity(e.id);
+    sendPlayer(p, { type: "loot_close" });
+    sendPlayer(p, { type: "item_result", ok: true, text: "You took everything. The body fades away." });
+  } else {
+    scheduleEntitySave();
+    sendLoot(p, e);
+  }
 }
 
 function worldFreeSpot(layer, col, row, ignoreId) {
@@ -2056,6 +2218,8 @@ function handleWorldConnection(socket, pass) {
       }
     } else if (data.type === "interact") {
       handleInteract(me);
+    } else if (data.type === "loot_take") {
+      handleLootTake(me, data);
     } else if (data.type === "item_use") {
       worldCombat.useItemOutside(me, data);
     } else if (data.type === "exit") {
@@ -2076,11 +2240,15 @@ function handleWorldConnection(socket, pass) {
       }
       if (idx !== -1) {
         const it = worldSession.floorItems[idx];
-        worldSession.floorItems.splice(idx, 1);
         let stack = null;
         for (const entry of me._inv) {
           if (entry.name === it.name) { stack = entry; break; }
         }
+        if (!stack && me._inv.length >= capacityOf(me)) {
+          sendPlayer(me, { type: "item_result", ok: false, text: "Your bag is full." });
+          return;
+        }
+        worldSession.floorItems.splice(idx, 1);
         if (stack) {
           stack.count = stack.count + 1;
         } else {
@@ -2148,6 +2316,7 @@ worldCombat.init({
   broadcastFacing: broadcastFacing,
   hideEntity: hideEntity,
   removeEntity: removeEntity,
+  scheduleEntitySave: scheduleEntitySave,
   publicPlayer: publicPlayer,
   layerSpawn: layerSpawn,
   teleportPlayer: teleportPlayer,

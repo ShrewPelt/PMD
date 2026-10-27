@@ -122,7 +122,12 @@
     min-width: 280px; max-width: 420px; padding: 12px; border-radius: 8px;
     background: rgba(18,18,32,0.96); border: 2px solid #ffffff; color: #ffffff;
   }
-  #itemMenu.hidden { display: none; }
+  #itemMenu.hidden, #lootPanel.hidden { display: none; }
+  #lootPanel {
+    position: fixed; left: 50%; top: 40%; transform: translate(-50%, -50%); z-index: 60;
+    min-width: 280px; max-width: 420px; padding: 12px; border-radius: 8px;
+    background: rgba(18,18,32,0.96); border: 2px solid #d9c27a; color: #ffffff;
+  }
   .imtitle { font-weight: bold; margin-bottom: 8px; }
   .imbtn { display: block; width: 100%; margin-top: 5px; padding: 7px 9px; text-align: left; border-radius: 6px; cursor: pointer; font-size: 13px; color: #ffffff; background: rgba(255,255,255,0.08); border: 1px solid #55557a; }
   .imbtn:hover { background: rgba(255,255,255,0.2); }
@@ -215,6 +220,7 @@
   <div id="cbLog"></div>
 </div>
 <div id="itemMenu" class="hidden"></div>
+<div id="lootPanel" class="hidden"></div>
 <div id="game"></div>
 <div id="chat">
   <input id="chatInput" type="text" autocomplete="off" placeholder="Say something... add an expression like [Happy], [Angry], [Pain]" />
