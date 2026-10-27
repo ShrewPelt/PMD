@@ -10,6 +10,7 @@ let worldAssetsDirty = false;
 let worldLastView = null;
 let worldViewOverGfx = null;
 let worldAssetList = { tiles: [], objects: [], blocking: [] };
+let wgTileCategory = "Default";
 const worldEntityMeta = {};
 const worldEntityLabels = {};
 
@@ -871,6 +872,10 @@ function gmBuildPanel() {
     + "#wgPanel input[type=text],#wgPanel input[type=number]{background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;padding:5px;width:70px}"
     + "#wgPanel input#wgName,#wgPanel input#wgItem{width:150px}"
     + ".wgAsset{display:inline-flex;flex-direction:column;align-items:center;width:62px;margin:2px;padding:4px 2px;background:#2d2d44;border:1px solid #55557a;border-radius:5px;color:#fff;font-size:10px;cursor:pointer}"
+    + ".wgCatTabs{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:4px}"
+    + ".wgCatTab{padding:3px 7px;background:#2d2d44;border:1px solid #55557a;border-radius:5px;color:#fff;font-size:10px;cursor:pointer}"
+    + ".wgCatTab.on{background:#4a6cff;border-color:#fff}"
+    + ".wgCatEmpty{padding:8px 4px;color:#aab;font-size:11px}"
     + ".wgAsset.on{background:#4a6cff;border-color:#fff}"
     + ".wgAsset img{width:36px;height:36px;object-fit:contain;image-rendering:pixelated;margin-bottom:2px}"
     + ".wgPlayer{display:flex;gap:4px;align-items:center;margin:3px 0}.wgPlayer span{flex:1}"
@@ -1071,11 +1076,7 @@ function gmBuildAssetButtons(list) {
   const objBox = document.getElementById("wgObjList");
   tileBox.innerHTML = "";
   objBox.innerHTML = "";
-  const build = (box, kind, names) => {
-    if (names.length === 0) {
-      box.textContent = "No pictures found in assets/" + (kind === "tile" ? "tilemap" : "objects") + ".";
-      return;
-    }
+  const addButtons = (box, kind, names) => {
     for (const name of names) {
       const btn = document.createElement("button");
       btn.className = "wgAsset";
@@ -1094,8 +1095,40 @@ function gmBuildAssetButtons(list) {
       box.appendChild(btn);
     }
   };
-  build(tileBox, "tile", list.tiles || []);
-  build(objBox, "object", list.objects || []);
+  const categories = Array.isArray(list.tileCategories) ? list.tileCategories : [{ name: "Default", tiles: list.tiles || [] }];
+  if (!categories.some((c) => c.name === wgTileCategory)) wgTileCategory = categories.length ? categories[0].name : "Default";
+  const tabs = document.createElement("div");
+  tabs.className = "wgCatTabs";
+  const grid = document.createElement("div");
+  const fillGrid = () => {
+    grid.innerHTML = "";
+    const cat = categories.find((c) => c.name === wgTileCategory);
+    if (!cat || cat.tiles.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "wgCatEmpty";
+      empty.textContent = "No tiles available in this category";
+      grid.appendChild(empty);
+    } else {
+      addButtons(grid, "tile", cat.tiles);
+    }
+    gmRefreshAssetHighlight();
+  };
+  for (const cat of categories) {
+    const tab = document.createElement("button");
+    tab.className = "wgCatTab" + (cat.name === wgTileCategory ? " on" : "");
+    tab.textContent = cat.name;
+    tab.addEventListener("click", () => {
+      wgTileCategory = cat.name;
+      for (const t of tabs.children) t.classList.toggle("on", t === tab);
+      fillGrid();
+    });
+    tabs.appendChild(tab);
+  }
+  tileBox.appendChild(tabs);
+  tileBox.appendChild(grid);
+  fillGrid();
+  if ((list.objects || []).length === 0) objBox.textContent = "No pictures found in assets/objects.";
+  else addButtons(objBox, "object", list.objects);
   gmRefreshAssetHighlight();
 }
 

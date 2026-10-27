@@ -70,6 +70,11 @@ app.get("/items-index.json", (req, res) => {
 app.use(express.static(path.join(__dirname, "public")));
 app.use("/items", express.static(path.join(__dirname, "StorageData", "Items")));
 app.use("/combaticons", express.static(path.join(__dirname, "StorageData", "CombatSprites")));
+app.get("/assets/tilemap/:file", (req, res, next) => {
+  const file = findTileFile(req.params.file);
+  if (!file) return next();
+  res.sendFile(file);
+});
 app.use("/assets", express.static(path.join(__dirname, "assets")));
 
 app.use(express.json());
@@ -459,6 +464,70 @@ function listAssetNames(dir) {
   } catch (e) {
     return [];
   }
+}
+
+const TILE_CATEGORIES = ["Default", "Ocean", "River", "Volcanic", "Underwater", "Forest", "Meadow", "Plains", "Settlements", "Hills", "Mountains", "Sky", "Other"];
+
+function tileCategoryFolders() {
+  const folders = [];
+  const seen = {};
+  const add = (name) => {
+    if (seen[name.toLowerCase()]) return;
+    seen[name.toLowerCase()] = true;
+    folders.push(name);
+  };
+  for (const name of TILE_CATEGORIES) add(name);
+  try {
+    for (const entry of fs.readdirSync(TILE_ASSET_DIR, { withFileTypes: true })) {
+      if (entry.isDirectory()) add(entry.name);
+    }
+  } catch (e) {}
+  return folders;
+}
+
+function tileCategoryList() {
+  const categories = [];
+  for (const folder of tileCategoryFolders()) {
+    const dir = path.join(TILE_ASSET_DIR, folder);
+    if (!fs.existsSync(dir)) {
+      if (TILE_CATEGORIES.includes(folder)) categories.push({ name: folder, tiles: [] });
+      continue;
+    }
+    categories.push({ name: folder, tiles: listAssetNames(dir) });
+  }
+  const rootTiles = listAssetNames(TILE_ASSET_DIR);
+  if (rootTiles.length > 0) {
+    const def = categories.find((c) => c.name === "Default");
+    if (def) {
+      for (const t of rootTiles) if (!def.tiles.includes(t)) def.tiles.push(t);
+      def.tiles.sort();
+    } else {
+      categories.unshift({ name: "Default", tiles: rootTiles });
+    }
+  }
+  return categories;
+}
+
+function allTileNames() {
+  const names = [];
+  for (const cat of tileCategoryList()) {
+    for (const t of cat.tiles) if (!names.includes(t)) names.push(t);
+  }
+  names.sort();
+  return names;
+}
+
+function findTileFile(name) {
+  const clean = path.basename(String(name)).replace(/\.png$/i, "");
+  if (!clean) return null;
+  const rootFile = path.join(TILE_ASSET_DIR, clean + ".png");
+  const order = tileCategoryFolders();
+  for (const folder of order) {
+    const file = path.join(TILE_ASSET_DIR, folder, clean + ".png");
+    if (fs.existsSync(file)) return file;
+  }
+  if (fs.existsSync(rootFile)) return rootFile;
+  return null;
 }
 
 function isBlockingTile(name) {
@@ -1157,7 +1226,7 @@ app.get("/api/world/species", (req, res) => {
 });
 
 app.get("/api/world/assets", (req, res) => {
-  res.json({ tiles: listAssetNames(TILE_ASSET_DIR), objects: listAssetNames(OBJECT_ASSET_DIR), blocking: BLOCKING_TILES });
+  res.json({ tiles: allTileNames(), tileCategories: tileCategoryList(), objects: listAssetNames(OBJECT_ASSET_DIR), blocking: BLOCKING_TILES });
 });
 
 app.post("/api/world/gm", (req, res) => {
@@ -1840,7 +1909,7 @@ function applyCells(layer, cells) {
 
 function applyArt(layer, ops) {
   const L = ensureLayer(layer);
-  const names = listAssetNames(TILE_ASSET_DIR);
+  const names = allTileNames();
   const changedArt = [];
   const logicCells = [];
   for (const op of ops) {
