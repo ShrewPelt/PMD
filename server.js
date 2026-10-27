@@ -450,7 +450,25 @@ const MAX_EDIT_OPS = 6000;
 const TILE_ASSET_DIR = path.join(__dirname, "assets", "tilemap");
 const OBJECT_ASSET_DIR = path.join(__dirname, "assets", "objects");
 const PALETTE_FILE = path.join(WORLD_DIR, "palette.json");
-const PALETTE_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+const PALETTE_CHARS = (() => {
+  let chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  for (let code = 0x00c0; code <= 0x024f; code++) {
+    if (code === 0x00d7 || code === 0x00f7) continue;
+    chars += String.fromCharCode(code);
+  }
+  return chars;
+})();
+const TILE_ROTATIONS = [0, 90, 180, 270];
+
+function parseTileName(full) {
+  const text = String(full || "");
+  const at = text.lastIndexOf("@");
+  if (at > 0) {
+    const rot = parseInt(text.substring(at + 1), 10);
+    if (TILE_ROTATIONS.includes(rot) && String(rot) === text.substring(at + 1)) return { base: text.substring(0, at), rot: rot };
+  }
+  return { base: text, rot: 0 };
+}
 const BLOCKING_TILES = ["Water"];
 
 function listAssetNames(dir) {
@@ -2072,7 +2090,7 @@ function applyArt(layer, ops) {
     if (!Number.isInteger(c) || !Number.isInteger(r)) continue;
     if (c < 0 || c >= LAYER_W || r < 0 || r >= LAYER_H) continue;
     const oldCh = L.art[r][c];
-    const oldName = oldCh === " " ? "" : (tilePalette[oldCh] || "");
+    const oldName = oldCh === " " ? "" : parseTileName(tilePalette[oldCh] || "").base;
     const logic = L.rows[r][c];
     if (name === "") {
       if (oldCh === " ") continue;
@@ -2081,14 +2099,16 @@ function applyArt(layer, ops) {
       changedArt.push([c, r, ""]);
       continue;
     }
-    if (names.indexOf(name) === -1) continue;
-    const ch = paletteChar(name);
+    const parsed = parseTileName(name);
+    if (names.indexOf(parsed.base) === -1) continue;
+    const storedName = parsed.rot === 0 ? parsed.base : parsed.base + "@" + parsed.rot;
+    const ch = paletteChar(storedName);
     if (!ch) continue;
     if (oldCh === ch) continue;
     L.art[r] = L.art[r].substring(0, c) + ch + L.art[r].substring(c + 1);
-    changedArt.push([c, r, name]);
+    changedArt.push([c, r, storedName]);
     if (logic === "P") continue;
-    if (isBlockingTile(name)) {
+    if (isBlockingTile(parsed.base)) {
       if (logic !== "x") logicCells.push([c, r, "x"]);
     } else if (logic === " ") {
       logicCells.push([c, r, "."]);
@@ -2099,7 +2119,7 @@ function applyArt(layer, ops) {
   if (logicCells.length > 0) applyCells(layer, logicCells);
   if (changedArt.length > 0) {
     scheduleLayerSave();
-    sendGms(layer, { type: "gm_art", layer: layer, cells: changedArt });
+    sendGms(layer, { type: "gm_art", layer: layer, cells: changedArt, palette: tilePalette });
     refreshViewsForCells(layer, changedArt);
   }
 }
