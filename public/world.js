@@ -3098,9 +3098,15 @@ function atkOpenLight(target) {
   title.textContent = "Unlit " + target.label + (tooFar ? " (too far, move closer)" : "");
   atkMenuEl.appendChild(title);
   let options = 0;
-  if (types.indexOf("Fire") !== -1) {
+  let fireTyped = false;
+  for (const t of types) {
+    if (String(t).toLowerCase() === "fire") fireTyped = true;
+  }
+  const needsFireType = !VIS.cfg || VIS.cfg.lightRequiresFireType !== false;
+  let blockedByType = false;
+  if (!needsFireType || fireTyped) {
     for (const m of infos) {
-      if (m.type !== "Fire" || m.category === "status" || !(m.power > 0)) continue;
+      if (String(m.type).toLowerCase() !== "fire" || String(m.category).toLowerCase() === "status") continue;
       options++;
       const btn = document.createElement("button");
       btn.textContent = "Light " + target.label + " with " + m.name;
@@ -3129,9 +3135,14 @@ function atkOpenLight(target) {
     });
     atkMenuEl.appendChild(btn);
   }
+  if (needsFireType && !fireTyped) {
+    for (const m of infos) {
+      if (String(m.type).toLowerCase() === "fire" && String(m.category).toLowerCase() !== "status") blockedByType = true;
+    }
+  }
   if (options === 0) {
     const none = document.createElement("div");
-    none.textContent = "You need a Fire-type move or a lit torch to light this.";
+    none.textContent = blockedByType ? "Only Fire-type Pokemon can light this with a move." : "You need a Fire-type move or a lit torch to light this.";
     atkMenuEl.appendChild(none);
   }
   const cancel = document.createElement("button");

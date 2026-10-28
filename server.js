@@ -1129,6 +1129,7 @@ const VISION_VERSION = 2;
 
 const VISION_DEFAULTS = {
   version: VISION_VERSION,
+  lightRequiresFireType: true,
   dayMinutes: 24,
   coneDegrees: 110,
   dayRange: 10,
@@ -1370,17 +1371,28 @@ function lightableFor(name) {
   return null;
 }
 
-function fireMovesOf(p) {
+function isFireTyped(p) {
+  for (const t of typesOfPlayer(p)) {
+    if (String(t).toLowerCase() === "fire") return true;
+  }
+  return false;
+}
+
+function knownFireAttacks(p) {
   const out = [];
-  if (typesOfPlayer(p).indexOf("Fire") === -1) return out;
   const moves = p._sheet && Array.isArray(p._sheet.moves) ? p._sheet.moves : [];
   for (const m of moves) {
     if (!m || !m.name) continue;
-    const data = getMoveData(m.name);
+    const data = getMoveData(m.name) || (m.data && typeof m.data === "object" ? m.data : null);
     if (!data) continue;
-    if (data.type === "Fire" && data.category !== "status" && (Number(data.power) || 0) > 0) out.push(m.name);
+    if (String(data.type).toLowerCase() === "fire" && String(data.category).toLowerCase() !== "status") out.push(m.name);
   }
   return out;
+}
+
+function fireMovesOf(p) {
+  if (VISION.lightRequiresFireType && !isFireTyped(p)) return [];
+  return knownFireAttacks(p);
 }
 
 function playerHasTorch(p) {
@@ -1411,7 +1423,8 @@ function lightObject(p, col, row, obj, pair, moveName) {
   } else if (fireMoves.length > 0) {
     usedMove = fireMoves[0];
   } else if (!playerHasTorch(p)) {
-    sendPlayer(p, { type: "item_result", ok: false, text: "You need a Fire-type move or a lit torch to light this " + label + "." });
+    const reason = knownFireAttacks(p).length > 0 ? "Only Fire-type Pokemon can light this " + label + " with a move." : "You need a Fire-type move or a lit torch to light this " + label + ".";
+    sendPlayer(p, { type: "item_result", ok: false, text: reason });
     return;
   }
   const lowerName = obj.name.toLowerCase();
@@ -1632,6 +1645,15 @@ function journalRestore(p, info, pass) {
   return true;
 }
 
+const COMBAT_LOG_FILE = path.join(WORLD_DIR, "combatlog.json");
+const COMBAT_LOG_PERCENT = 20;
+let combatLogs = readJsonFile(COMBAT_LOG_FILE, {});
+if (!combatLogs || typeof combatLogs !== "object" || Array.isArray(combatLogs)) combatLogs = {};
+
+function saveCombatLogs() {
+  writeJsonFile(COMBAT_LOG_FILE, combatLogs);
+}
+
 function queueWorldSave(p, final) {
   const current = countInventory(p._inv);
   const delta = {};
@@ -1646,11 +1668,15 @@ function queueWorldSave(p, final) {
   const vitalsChanged = p.hp !== p._reportedHp || p.mp !== p._reportedMp;
   const accDirty = !!p._accDirty;
   const coinsPending = p._coinsPending || 0;
-  if (!final && Object.keys(delta).length === 0 && kills.length === 0 && !vitalsChanged && !accDirty && coinsPending === 0) return;
+  if (!final && Object.keys(delta).length === 0 && kills.length === 0 && !vitalsChanged && !accDirty && coinsPending === 0 && !p._coinLossPercent) return;
   p._coinsPending = 0;
   const ailments = p._sheet && Array.isArray(p._sheet.ailments) ? p._sheet.ailments : [];
   const entry = { id: makeToken(), kind: p._npcName ? "npc" : undefined, npcName: p._npcName || undefined, userId: p.userId, name: p.name, slot: p._slot, pass: p._pass, delta: delta, kills: kills, hp: p.hp, mp: p.mp, ailments: ailments, layer: p.layer, col: p.col, row: p.row, final: final, ts: Date.now() };
   if (coinsPending > 0) entry.coins = coinsPending;
+  if (p._coinLossPercent) {
+    entry.coinLossPercent = p._coinLossPercent;
+    p._coinLossPercent = 0;
+  }
   if (accDirty && p._sheet && p._sheet.accessories) {
     const a = p._sheet.accessories;
     entry.accessories = { head: a.head || null, neck: a.neck || null, back: a.back || null };
@@ -1827,9 +1853,14 @@ function companionFollowTick() {
   }
 }
 
-function leaveWorldPlayer(id) {
+function leaveWorldPlayer(id, skipPenalty) {
   const p = worldSession.players[id];
   if (!p) return false;
+  const wasInFight = worldCombat.isInFight(p);
+  if (wasInFight && !skipPenalty && !p._npcName) {
+    combatLogs[p._key] = Date.now();
+    saveCombatLogs();
+  }
   worldCombat.onPlayerLeave(p);
   for (const ce of companionsOf(p)) {
     queueCompanionSave(ce, true);
@@ -3443,10 +3474,22 @@ function startWorldPlayer(socket, pass, info, spawn) {
     _lastActive: Date.now(),
     _idleWarned: false
   };
+  const joinNotices = [];
   const restored = journalRestore(p, info, pass);
   if (restored) {
     p._kills = p._kills || [];
-    sendSocket(socket, { type: "item_result", ok: true, text: "Your inventory was restored from your last session." });
+    joinNotices.push("Your inventory was restored from your last session.");
+  }
+  let combatLogged = false;
+  if (combatLogs[key] && !p._npcName) {
+    delete combatLogs[key];
+    saveCombatLogs();
+    const coinsBefore = p._sheet ? Number(p._sheet.coins) || 0 : 0;
+    const coinLoss = Math.floor(coinsBefore * COMBAT_LOG_PERCENT / 100);
+    if (p._sheet) p._sheet.coins = coinsBefore - coinLoss;
+    p._coinLossPercent = COMBAT_LOG_PERCENT;
+    combatLogged = true;
+    joinNotices.push("You left during a battle last time. Combat logging cost you " + coinLoss + " coins (" + COMBAT_LOG_PERCENT + "%).");
   }
   worldSession.players[id] = p;
   refreshVisibility(p);
@@ -3461,12 +3504,14 @@ function startWorldPlayer(socket, pass, info, spawn) {
   players[id] = publicPlayer(p);
   sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W, p.row - VIEW_HALF_H, w, h), inventory: inventory, sheet: clientSheet(p._sheet), itemFx: ITEM_FX, vision: VISION });
   sendPlayer(p, timeMessage());
+  for (const notice of joinNotices) sendPlayer(p, { type: "item_result", ok: !combatLogged, text: notice });
   if (!restored) p._kills = [];
   p._reportedHp = p.hp;
   p._reportedMp = p.mp;
   sendView(p);
   sendGms(null, { type: "gm_player", player: publicPlayer(p) });
   journalPlayer(p);
+  if (combatLogged) queueWorldSave(p, false);
   spawnCompanions(p, info);
   sendLayerSummaries();
 
@@ -3632,7 +3677,7 @@ setInterval(() => {
 function shutdownWorld() {
   worldCombat.shutdown();
   for (const id of Object.keys(worldSession.players)) {
-    leaveWorldPlayer(worldSession.players[id].id);
+    leaveWorldPlayer(worldSession.players[id].id, true);
   }
   saveWorldState();
   saveLayersNow();
