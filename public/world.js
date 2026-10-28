@@ -2891,6 +2891,79 @@ function itemSend(name, mode, target, dir) {
   itemMenuClose();
 }
 
+function stickStructureLabel(name) {
+  return String(name).replace(/^Lit[_ ]/i, "").replace(/[_ ]?\d+$/, "").replace(/_/g, " ");
+}
+
+function stickMenuTry(name) {
+  const cfg = VIS.cfg && VIS.cfg.torchStick ? VIS.cfg.torchStick : null;
+  if (!cfg || String(name).toLowerCase() !== String(cfg.item).toLowerCase()) return false;
+  if (COMBAT.active) {
+    itemToast("You can't light a " + cfg.item + " during battle.");
+    return true;
+  }
+  const sheet = typeof invSheet === "object" && invSheet ? invSheet : null;
+  const infos = sheet && Array.isArray(sheet.moveInfo) ? sheet.moveInfo : [];
+  const el = itemEl();
+  el.innerHTML = "";
+  const title = document.createElement("div");
+  title.className = "imtitle";
+  title.textContent = name;
+  el.appendChild(title);
+  let count = 0;
+  const addButton = (label, cls, fn) => {
+    const b = document.createElement("button");
+    b.className = "imbtn " + cls;
+    b.textContent = label;
+    b.addEventListener("click", fn);
+    el.appendChild(b);
+  };
+  const send = (payload) => {
+    gmSend(Object.assign({ type: "light_stick" }, payload));
+    itemMenuClose();
+  };
+  for (const m of infos) {
+    if (String(m.type).toLowerCase() !== "fire" || String(m.category).toLowerCase() === "status") continue;
+    count++;
+    addButton("Light " + name + " with " + m.name, "use", () => send({ via: "move", name: m.name }));
+  }
+  const igniters = Array.isArray(VIS.cfg.igniterItems) ? VIS.cfg.igniterItems : [];
+  for (const igniter of igniters) {
+    if (String(igniter).toLowerCase() === String(cfg.item).toLowerCase()) continue;
+    for (const stack of inventoryItems) {
+      if (stack && String(stack.name).toLowerCase() === String(igniter).toLowerCase()) {
+        count++;
+        addButton("Light " + name + " with " + stack.name, "use", () => send({ via: "item", name: stack.name }));
+        break;
+      }
+    }
+  }
+  const range = Number(cfg.range) || 2;
+  const structures = Array.isArray(cfg.structures) ? cfg.structures : [];
+  const seen = {};
+  for (const o of (worldLastView && worldLastView.objects) || []) {
+    if (Math.max(Math.abs(player.col - o.col), Math.abs(player.row - o.row)) > range) continue;
+    let matched = false;
+    for (const part of structures) {
+      if (new RegExp("(^|[^A-Za-z])" + visEscape(part), "i").test(String(o.name))) matched = true;
+    }
+    if (!matched) continue;
+    const label = stickStructureLabel(o.name);
+    count++;
+    seen[label] = true;
+    addButton("Light " + name + " with " + label, "use", () => send({ via: "structure", col: o.col, row: o.row }));
+  }
+  if (count === 0) {
+    const none = document.createElement("div");
+    none.className = "imnone";
+    none.textContent = "You need a Fire-type move, Flint and Steel, or a nearby fire to light this.";
+    el.appendChild(none);
+  }
+  addButton("Cancel", "cancel", itemMenuClose);
+  el.classList.remove("hidden");
+  return true;
+}
+
 function itemMenuTry() {
   if (!worldPlayerMode) return false;
   if (itemMenuOpenNow()) {
@@ -2899,6 +2972,7 @@ function itemMenuTry() {
   }
   if (!inventoryOpen || selectedSlot < 0 || !inventoryItems[selectedSlot]) return false;
   const name = inventoryItems[selectedSlot].name;
+  if (stickMenuTry(name)) return true;
   const fx = itemFx[name];
   if (!fx) {
     itemToast(name + " has no use right now.");
@@ -3102,7 +3176,7 @@ function atkOpenLight(target) {
   for (const t of types) {
     if (String(t).toLowerCase() === "fire") fireTyped = true;
   }
-  const needsFireType = !VIS.cfg || VIS.cfg.lightRequiresFireType !== false;
+  const needsFireType = false;
   let blockedByType = false;
   if (!needsFireType || fireTyped) {
     for (const m of infos) {
@@ -3888,7 +3962,7 @@ const VIS_RES = 0.5;
 const VIS_RT_TILES = 25;
 const VIS_DIR_ANGLE = { right: 0, downright: Math.PI / 4, down: Math.PI / 2, downleft: 3 * Math.PI / 4, left: Math.PI, upleft: -3 * Math.PI / 4, up: -Math.PI / 2, upright: -Math.PI / 4 };
 const VIS_DEFAULT_CFG = { coneDegrees: 110, dayRange: 10, nearRadius: 1.5, nightReach: 0, nightVisionReach: 8, darknessMax: 1, lightObjects: [] };
-const VIS = { cfg: null, objDefs: [], hour: 12, hourAt: Date.now(), dayMs: 1440000, frozen: false, layerMode: "outdoor", nv: false, selfR: 0, selfC: "#ffb347", block: {}, ang: 0, angReady: false, fogRT: null, darkRT: null, lightImg: null, polyGfx: null, glows: [], cm: null, owners: {}, audio: {}, lights: [], lastUi: 0, texReady: false };
+const VIS = { cfg: null, objDefs: [], hour: 12, hourAt: Date.now(), dayMs: 1440000, frozen: false, layerMode: "outdoor", nv: false, selfR: 0, selfC: "#ffb347", block: {}, ang: 0, angReady: false, fogRT: null, darkRT: null, lightImg: null, polyGfx: null, glows: [], flames: {}, glowRT: null, glowPx: 0, glowStamp: null, cm: null, owners: {}, audio: {}, lights: [], lastUi: 0, texReady: false };
 
 function visCfg(key) {
   if (VIS.cfg && VIS.cfg[key] !== undefined) return VIS.cfg[key];
@@ -4134,24 +4208,38 @@ function visCollectLights(t, ox, oy, D, reach) {
 }
 
 function visUpdateGlows(scene, lights, D) {
-  let used = 0;
+  for (const img of VIS.glows) img.setVisible(false);
+  const cam = scene.cameras.main;
+  const wv = cam.worldView;
+  const side = Math.hypot(wv.width, wv.height) + TILE * 4;
+  const need = Math.min(2048, Math.ceil(side * VIS_RES / 64) * 64);
+  if (!VIS.glowRT || VIS.glowPx < need || VIS.glowPx > need * 1.5) {
+    if (VIS.glowRT) VIS.glowRT.destroy();
+    VIS.glowPx = need;
+    VIS.glowRT = scene.add.renderTexture(0, 0, need, need);
+    VIS.glowRT.setOrigin(0, 0);
+    VIS.glowRT.setScale(1 / VIS_RES);
+    VIS.glowRT.setDepth(12);
+    VIS.glowRT.setBlendMode(Phaser.BlendModes.ADD);
+  }
+  if (!VIS.glowStamp) {
+    VIS.glowStamp = scene.add.image(0, 0, "pmdLightGrad");
+    VIS.glowStamp.setVisible(false);
+  }
+  const rt = VIS.glowRT;
+  const half = VIS.glowPx / VIS_RES / 2;
+  const rx = wv.centerX - half;
+  const ry = wv.centerY - half;
+  rt.setPosition(rx, ry);
+  rt.clear();
+  const stamp = VIS.glowStamp;
   for (const light of lights) {
     if (!light.color) continue;
-    let img = VIS.glows[used];
-    if (!img) {
-      img = scene.add.image(0, 0, "pmdLightGrad");
-      img.setDepth(12);
-      img.setBlendMode(Phaser.BlendModes.ADD);
-      VIS.glows.push(img);
-    }
-    used++;
-    img.setVisible(true);
-    img.setPosition(light.x, light.y);
-    img.setScale(light.r * TILE * 2 * 0.8 / 256);
-    img.setTint(visColorInt(light.color, 0xff9a3c));
-    img.setAlpha(0.1 + 0.2 * D);
+    stamp.setScale(light.r * TILE * 2 * 0.8 * VIS_RES / 256);
+    stamp.setTint(visColorInt(light.color, 0xff9a3c));
+    rt.draw(stamp, (light.x - rx) * VIS_RES, (light.y - ry) * VIS_RES);
   }
-  for (let i = used; i < VIS.glows.length; i++) VIS.glows[i].setVisible(false);
+  rt.setAlpha(0.1 + 0.2 * D);
 }
 
 function visApplyGray(scene, amount) {
@@ -4169,15 +4257,72 @@ function visApplyGray(scene, amount) {
   VIS.cm.grayscale(amount);
 }
 
-function visWobble(t) {
+function visFlameDrop(key) {
+  const f = VIS.flames[key];
+  if (!f) return;
+  if (f.img) f.img.destroy();
+  if (f.sp && f.sp.active) f.sp.setCrop();
+  delete VIS.flames[key];
+}
+
+function visFlameUpdate(scene, key, sp, flame, t) {
+  const size = Math.max(0.1, Math.min(0.9, Number(flame.size) || 0.45));
+  const bottom = flame.part === "bottom";
+  let f = VIS.flames[key];
+  if (f && (f.sp !== sp || f.size !== size || f.bottom !== bottom)) {
+    visFlameDrop(key);
+    f = null;
+  }
+  const W = sp.width;
+  const H = sp.height;
+  if (!f) {
+    const img = scene.add.image(sp.x, sp.y, sp.texture.key);
+    if (bottom) {
+      sp.setCrop(0, 0, W, H * (1 - size));
+      img.setCrop(0, H * (1 - size), W, H * size);
+      img.setOrigin(0.5, 1 - size);
+    } else {
+      sp.setCrop(0, H * size, W, H * (1 - size));
+      img.setCrop(0, 0, W, H * size);
+      img.setOrigin(0.5, size);
+    }
+    f = { sp: sp, img: img, size: size, bottom: bottom };
+    VIS.flames[key] = f;
+  }
+  const ph = (sp.cellC || 0) * 5.1 + (sp.cellR || 0) * 2.3;
+  const bs = sp.baseScale || Math.abs(sp.scaleX);
+  const rot = sp.rotation;
+  const off = ((bottom ? 1 - size : size) - 0.5) * H * bs;
+  const img = f.img;
+  img.setPosition(sp.x - off * Math.sin(rot), sp.y + off * Math.cos(rot));
+  img.setScale(bs * (1 + 0.04 * Math.sin(t * 0.009 + ph)), bs * (1 + 0.07 * Math.sin(t * 0.0073 + ph * 1.3)));
+  img.setRotation(rot + 0.045 * Math.sin(t * 0.006 + ph));
+  img.setFlipX(sp.flipX);
+  img.setDepth(sp.depth + 0.01);
+  img.setAlpha(sp.alpha);
+  img.setVisible(sp.visible);
+}
+
+function visWobble(t, scene) {
   for (const key in worldObjectPool) {
     const sp = worldObjectPool[key];
-    if (!sp || !sp.active || !sp.objDef || !sp.objDef.wobble) continue;
+    if (!sp || !sp.active || !sp.objDef) continue;
+    const def = sp.objDef;
+    if (def.flame && scene) {
+      visFlameUpdate(scene, key, sp, def.flame, t);
+      continue;
+    }
+    if (!def.wobble) continue;
     const ph = (sp.cellC || 0) * 5.1 + (sp.cellR || 0) * 2.3;
     const bs = sp.baseScale || sp.scaleX;
     sp.setScale(bs * (1 + 0.045 * Math.sin(t * 0.009 + ph)), bs * (1 + 0.075 * Math.sin(t * 0.0073 + ph * 1.3)));
     const baseRot = sp.objRotRad ? sp.objRotRad : -viewRot;
     sp.setRotation(baseRot + 0.05 * Math.sin(t * 0.006 + ph));
+  }
+  for (const key in VIS.flames) {
+    const f = VIS.flames[key];
+    const sp = worldObjectPool[key];
+    if (!sp || !sp.active || sp !== f.sp || !sp.objDef || !sp.objDef.flame) visFlameDrop(key);
   }
 }
 
@@ -4275,7 +4420,7 @@ function visFrame(scene) {
     const D = visDarkness();
     const lights = visCollectLights(t, 0, 0, D, 0).slice(1);
     visUpdateGlows(scene, lights, D);
-    visWobble(t);
+    visWobble(t, scene);
     visGmUpdateUi(false);
     return;
   }
@@ -4359,7 +4504,7 @@ function visFrame(scene) {
     if (seen) occupied[Math.floor(sp.x / TILE) + "," + Math.floor(sp.y / TILE)] = true;
   }
   visWalkFade(occupied, 1 - Math.exp(-dt / 90));
-  visWobble(t);
+  visWobble(t, scene);
   visSoundFrame(ox, oy);
 }
 

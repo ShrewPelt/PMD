@@ -1125,7 +1125,7 @@ const CLOCK_FILE = path.join(WORLD_DIR, "clock.json");
 const STRUCTURES_DIR = path.join(__dirname, "assets", "structures");
 const SPECIES_TYPES_FILE = path.join(__dirname, "StorageData", "SpeciesTypes.json");
 
-const VISION_VERSION = 3;
+const VISION_VERSION = 4;
 
 const VISION_DEFAULTS = {
   version: VISION_VERSION,
@@ -1158,6 +1158,7 @@ const VISION_DEFAULTS = {
     { unlit: "Unlit_Campfire", lit: "Lit_Campfire", label: "campfire", burnMinutes: 5 }
   ],
   igniterItems: ["Lit Torch", "Flint and Steel"],
+  torchStick: { item: "Stick", result: "Lit Torch", range: 2, structures: ["Lit_Stone_Campfire", "Lit_Campfire", "Metal_Brazier", "Pillar_Brazier", "Hanging_Torch"] },
   sightBlockers: ["Tree", "Wall", "House", "Building", "Pillar", "Statue", "Cliff", "Boulder"],
   nightVisionTypes: ["Dark", "Ghost"],
   nightVisionSpecies: ["Meowth", "Persian", "Zubat", "Golbat", "Crobat", "Hoothoot", "Noctowl", "Murkrow", "Honchkrow", "Umbreon", "Sneasel", "Weavile", "Houndour", "Houndoom", "Poochyena", "Mightyena", "Absol", "Shinx", "Luxio", "Luxray", "Purrloin", "Liepard", "Glameow", "Purugly", "Espurr", "Meowstic", "Litten", "Torracat", "Incineroar", "Rockruff", "Lycanroc", "Sableye", "Skuntank", "Stunky", "Spinarak", "Ariados"]
@@ -1469,6 +1470,84 @@ function lightObject(p, col, row, obj, pair, moveName) {
     saveFires();
   }
   sendPlayer(p, { type: "item_result", ok: true, text: usedMove ? "You light the " + label + " with " + usedMove + "." : "You light the " + label + " with your torch." });
+}
+
+function stickStructureMatch(name) {
+  const cfg = VISION.torchStick;
+  for (const part of cfg.structures) {
+    const re = new RegExp("(^|[^A-Za-z])" + escapeRegex(part), "i");
+    if (re.test(String(name || ""))) return part;
+  }
+  return null;
+}
+
+function handleLightStick(p, data) {
+  const cfg = VISION.torchStick;
+  if (worldCombat.isInFight(p)) {
+    sendPlayer(p, { type: "item_result", ok: false, text: "You can't do that during battle." });
+    return;
+  }
+  let hasStick = false;
+  for (const stack of p._inv) {
+    if (stack && String(stack.name).toLowerCase() === String(cfg.item).toLowerCase() && stack.count > 0) hasStick = true;
+  }
+  if (!hasStick) {
+    sendPlayer(p, { type: "item_result", ok: false, text: "You don't have a " + cfg.item + "." });
+    return;
+  }
+  const via = String(data.via || "");
+  let usedWith = "";
+  if (via === "move") {
+    const moveName = String(data.name || "");
+    if (fireMovesOf(p).indexOf(moveName) === -1) {
+      sendPlayer(p, { type: "item_result", ok: false, text: "You can't light the " + cfg.item + " with " + moveName + "." });
+      return;
+    }
+    usedWith = moveName;
+  } else if (via === "item") {
+    const itemName = String(data.name || "");
+    let allowed = false;
+    for (const igniter of VISION.igniterItems) {
+      if (String(igniter).toLowerCase() === itemName.toLowerCase() && itemName.toLowerCase() !== String(cfg.item).toLowerCase()) allowed = true;
+    }
+    let has = false;
+    for (const stack of p._inv) {
+      if (stack && String(stack.name).toLowerCase() === itemName.toLowerCase() && stack.count > 0) has = true;
+    }
+    if (!allowed || !has) {
+      sendPlayer(p, { type: "item_result", ok: false, text: "You can't light the " + cfg.item + " with that." });
+      return;
+    }
+    usedWith = itemName;
+  } else if (via === "structure") {
+    const col = parseInt(data.col, 10);
+    const row = parseInt(data.row, 10);
+    const L = layers[p.layer];
+    const obj = L && Number.isInteger(col) && Number.isInteger(row) ? L.objects[col + "," + row] : null;
+    if (!obj || !stickStructureMatch(obj.name)) {
+      sendPlayer(p, { type: "item_result", ok: false, text: "There is no fire there to light the " + cfg.item + " with." });
+      return;
+    }
+    if (Math.max(Math.abs(p.col - col), Math.abs(p.row - row)) > (Number(cfg.range) || 2)) {
+      sendPlayer(p, { type: "item_result", ok: false, text: "You are too far from the fire." });
+      return;
+    }
+    usedWith = obj.name.replace(/^Lit[_ ]/i, "").replace(/[_ ]?\d+$/, "").replace(/_/g, " ");
+  } else {
+    return;
+  }
+  let resultStack = null;
+  for (const stack of p._inv) {
+    if (stack && String(stack.name).toLowerCase() === String(cfg.result).toLowerCase()) resultStack = stack;
+  }
+  removeOneItem(p, cfg.item);
+  if (resultStack && resultStack.count > 0) {
+    resultStack.count = resultStack.count + 1;
+  } else {
+    p._inv.push({ name: cfg.result, count: 1 });
+  }
+  syncPlayerInventory(p);
+  sendPlayer(p, { type: "item_result", ok: true, text: "You light the " + cfg.item + " with " + usedWith + ". It is now a " + cfg.result + "." });
 }
 
 function handleLightWithMove(p, data) {
@@ -3570,6 +3649,8 @@ function startWorldPlayer(socket, pass, info, spawn) {
       }
     } else if (data.type === "interact") {
       handleInteract(me);
+    } else if (data.type === "light_stick") {
+      handleLightStick(me, data);
     } else if (data.type === "light_move") {
       handleLightWithMove(me, data);
     } else if (data.type === "loot_take") {
