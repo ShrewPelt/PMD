@@ -610,14 +610,21 @@ function scanObjects(force) {
   const defaultGroups = [];
   if (rootLoose.length > 0) defaultGroups.push({ name: "", objects: rootLoose.map(claim).sort() });
   categories.push({ name: "Default", groups: defaultGroups });
-  for (const folder of rootDirs) {
+  const catRoots = rootDirs.map((folder) => ({ name: folder, dir: path.join(OBJECT_ASSET_DIR, folder) }));
+  let hasStructures = false;
+  for (const entry of catRoots) {
+    if (entry.name.toLowerCase() === "structures") hasStructures = true;
+  }
+  if (!hasStructures && fs.existsSync(STRUCTURES_DIR)) catRoots.push({ name: "Structures", dir: STRUCTURES_DIR });
+  for (const rootEntry of catRoots) {
+    const folder = rootEntry.name;
     if (folder.toLowerCase() === "default") {
       const extra = [];
-      walkTileFolder(path.join(OBJECT_ASSET_DIR, folder), 0, extra);
+      walkTileFolder(rootEntry.dir, 0, extra);
       if (extra.length > 0) categories[0].groups.push({ name: "", objects: extra.map(claim).sort() });
       continue;
     }
-    const catDir = path.join(OBJECT_ASSET_DIR, folder);
+    const catDir = rootEntry.dir;
     const groups = [];
     let entries = [];
     try {
@@ -798,11 +805,11 @@ function makeLayer(name) {
   const rows = [];
   const blank = " ".repeat(LAYER_W);
   for (let r = 0; r < LAYER_H; r++) rows.push(blank);
-  return { name: name || "", rows: rows, art: rows.slice(), objects: {}, passable: {}, portals: {}, spawn: null };
+  return { name: name || "", rows: rows, art: rows.slice(), objects: {}, passable: {}, portals: {}, spawn: null, light: "outdoor" };
 }
 
 function layerHasContent(L) {
-  if (L.name || L.spawn || Object.keys(L.portals).length > 0 || Object.keys(L.objects).length > 0 || Object.keys(L.passable).length > 0) return true;
+  if (L.name || L.spawn || (L.light && L.light !== "outdoor") || Object.keys(L.portals).length > 0 || Object.keys(L.objects).length > 0 || Object.keys(L.passable).length > 0) return true;
   for (const row of L.rows) {
     if (row.trim().length > 0) return true;
   }
@@ -837,6 +844,7 @@ function loadLayers() {
       }
       L.portals = saved.portals && typeof saved.portals === "object" ? saved.portals : {};
       L.spawn = saved.spawn || null;
+      L.light = saved.light === "indoor" || saved.light === "dark" ? saved.light : "outdoor";
       layers[n] = L;
     }
     return;
@@ -920,7 +928,7 @@ function saveLayersNow() {
       const parts = k.split(",");
       passOut.push([parseInt(parts[0], 10), parseInt(parts[1], 10)]);
     }
-    out[key] = { name: L.name, passable: passOut, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), objects: objList, portals: L.portals, spawn: L.spawn };
+    out[key] = { name: L.name, passable: passOut, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), objects: objList, portals: L.portals, spawn: L.spawn, light: L.light || "outdoor" };
   }
   writeJsonFile(LAYERS_FILE, out);
   layersDirty = false;
@@ -1017,7 +1025,8 @@ function countInventory(list) {
 }
 
 function publicPlayer(p) {
-  return { id: p.id, layer: p.layer, col: p.col, row: p.row, direction: p.direction, dex: p.dex, name: p.name, userId: p.userId, hp: p.hp, maxHp: p.maxHp, mp: p.mp, maxMp: p.maxMp };
+  const lightInfo = playerLightInfo(p);
+  return { id: p.id, layer: p.layer, col: p.col, row: p.row, direction: p.direction, dex: p.dex, name: p.name, userId: p.userId, hp: p.hp, maxHp: p.maxHp, mp: p.mp, maxMp: p.maxMp, light: lightInfo.r, lc: lightInfo.c };
 }
 
 function sendSocket(socket, data) {
@@ -1093,7 +1102,11 @@ function objectsInWindow(layer, c0, r0, w, h) {
   for (let r = r0; r < r0 + h; r++) {
     for (let c = c0; c < c0 + w; c++) {
       const obj = L.objects[c + "," + r];
-      if (obj) out.push({ col: c, row: r, name: harvestedShownName(layer, c, r, obj), rot: obj.rot || 0, flip: obj.flip ? 1 : 0 });
+      if (obj) {
+        const walk = !obj.solid || !!(L.passable && L.passable[c + "," + r]);
+        const blocks = !walk && VISION_BLOCK_RE !== null && VISION_BLOCK_RE.test(obj.name);
+        out.push({ col: c, row: r, name: harvestedShownName(layer, c, r, obj), rot: obj.rot || 0, flip: obj.flip ? 1 : 0, w: walk ? 1 : 0, b: blocks ? 1 : 0 });
+      }
     }
   }
   return out;
@@ -1104,6 +1117,407 @@ function artAt(layer, col, row) {
   if (!L) return " ";
   if (row < 0 || row >= LAYER_H || col < 0 || col >= LAYER_W) return " ";
   return L.art[row][col];
+}
+
+
+const VISION_FILE = path.join(WORLD_DIR, "vision.json");
+const CLOCK_FILE = path.join(WORLD_DIR, "clock.json");
+const STRUCTURES_DIR = path.join(__dirname, "assets", "structures");
+const SPECIES_TYPES_FILE = path.join(__dirname, "StorageData", "SpeciesTypes.json");
+
+const VISION_DEFAULTS = {
+  dayMinutes: 24,
+  coneDegrees: 110,
+  dayRange: 10,
+  nearRadius: 1.5,
+  nightReach: 1.5,
+  nightVisionReach: 8,
+  darknessMax: 0.93,
+  fireTypeLight: { radius: 3.5, color: "#ff8a3c" },
+  lightObjects: [
+    { match: "Lit_Campfire", radius: 6.5, color: "#ff9a3c", flicker: 0.16, wobble: true, sound: "SFX/Campfire Crackling.ogg", soundRadius: 9, soundVolume: 0.6 }
+  ],
+  lightItems: [
+    { item: "Lit Torch", radius: 5, color: "#ffb347", burnSeconds: 60, onGround: false },
+    { item: "Lantern", radius: 7, color: "#ffd27a", burnSeconds: 0, onGround: true }
+  ],
+  lightable: [
+    { unlit: "Unlit_Campfire", lit: "Lit_Campfire", label: "campfire", burnMinutes: 5 }
+  ],
+  igniterItems: ["Lit Torch"],
+  sightBlockers: ["Tree", "Wall", "House", "Building", "Pillar", "Statue", "Cliff", "Boulder"],
+  nightVisionTypes: ["Dark", "Ghost"],
+  nightVisionSpecies: ["Meowth", "Persian", "Zubat", "Golbat", "Crobat", "Hoothoot", "Noctowl", "Murkrow", "Honchkrow", "Umbreon", "Sneasel", "Weavile", "Houndour", "Houndoom", "Poochyena", "Mightyena", "Absol", "Shinx", "Luxio", "Luxray", "Purrloin", "Liepard", "Glameow", "Purugly", "Espurr", "Meowstic", "Litten", "Torracat", "Incineroar", "Rockruff", "Lycanroc", "Sableye", "Skuntank", "Stunky", "Spinarak", "Ariados"]
+};
+
+function visionFileText(cfg) {
+  const entries = [];
+  for (const key of Object.keys(cfg)) {
+    const v = cfg[key];
+    if (Array.isArray(v) && v.length > 0 && typeof v[0] === "object") {
+      entries.push('  "' + key + '": [\n' + v.map((e) => "    " + JSON.stringify(e)).join(",\n") + "\n  ]");
+    } else {
+      entries.push('  "' + key + '": ' + JSON.stringify(v));
+    }
+  }
+  return "{\n" + entries.join(",\n") + "\n}\n";
+}
+
+function fillEntryDefaults(list, defList, keyName) {
+  return list.map((entry) => {
+    const found = defList.find((d) => String(d[keyName]).toLowerCase() === String(entry[keyName]).toLowerCase());
+    return found ? Object.assign({}, found, entry) : entry;
+  });
+}
+
+function loadVisionConfig() {
+  let saved = {};
+  let exists = true;
+  try {
+    saved = JSON.parse(fs.readFileSync(VISION_FILE, "utf8"));
+  } catch (e) {
+    exists = false;
+    saved = {};
+  }
+  const cfg = {};
+  for (const key of Object.keys(VISION_DEFAULTS)) {
+    const def = VISION_DEFAULTS[key];
+    const got = saved[key];
+    if (got === undefined || got === null || typeof got !== typeof def || Array.isArray(got) !== Array.isArray(def)) cfg[key] = def;
+    else cfg[key] = got;
+  }
+  cfg.lightItems = fillEntryDefaults(cfg.lightItems, VISION_DEFAULTS.lightItems, "item");
+  cfg.lightable = fillEntryDefaults(cfg.lightable, VISION_DEFAULTS.lightable, "unlit");
+  cfg.lightObjects = fillEntryDefaults(cfg.lightObjects, VISION_DEFAULTS.lightObjects, "match");
+  if (!exists) {
+    try {
+      fs.mkdirSync(WORLD_DIR, { recursive: true });
+      fs.writeFileSync(VISION_FILE, visionFileText(cfg));
+    } catch (e) {
+      console.error("Could not write vision.json: " + e.message);
+    }
+  }
+  return cfg;
+}
+
+function escapeRegex(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const VISION = loadVisionConfig();
+const VISION_BLOCK_RE = VISION.sightBlockers.length > 0 ? new RegExp(VISION.sightBlockers.map(escapeRegex).join("|"), "i") : null;
+const NIGHT_SPECIES_SET = {};
+for (const name of VISION.nightVisionSpecies) NIGHT_SPECIES_SET[String(name).toLowerCase()] = true;
+
+const speciesTypeMap = {};
+try {
+  const rawTypes = JSON.parse(fs.readFileSync(SPECIES_TYPES_FILE, "utf8"));
+  for (const name of Object.keys(rawTypes)) speciesTypeMap[name.toLowerCase()] = rawTypes[name];
+} catch (e) {}
+
+function typesOfSpecies(species) {
+  const found = speciesTypeMap[String(species || "").toLowerCase()];
+  return Array.isArray(found) ? found : [];
+}
+
+function typesOfPlayer(p) {
+  const sheet = p._sheet || {};
+  if (Array.isArray(sheet.types) && sheet.types.length > 0) return sheet.types;
+  return typesOfSpecies(sheet.species);
+}
+
+function fireLightInfo() {
+  return { r: Number(VISION.fireTypeLight.radius) || 0, c: String(VISION.fireTypeLight.color || "#ff8a3c") };
+}
+
+function playerLightInfo(p) {
+  let best = { r: 0, c: "" };
+  if (typesOfPlayer(p).indexOf("Fire") !== -1) best = fireLightInfo();
+  const inv = Array.isArray(p._inv) ? p._inv : [];
+  for (const def of VISION.lightItems) {
+    const want = String(def.item || "").toLowerCase();
+    let has = false;
+    for (const stack of inv) {
+      if (stack && String(stack.name).toLowerCase() === want) {
+        has = true;
+        break;
+      }
+    }
+    if (has && Number(def.radius) > best.r) best = { r: Number(def.radius), c: String(def.color || "#ffb347") };
+  }
+  return best;
+}
+
+const entityLightCache = {};
+
+function entityLightInfo(e) {
+  if (e.kind === "corpse" || e.fainted) return { r: 0, c: "" };
+  const key = String(e.species || "").toLowerCase();
+  if (entityLightCache[key] === undefined) {
+    entityLightCache[key] = typesOfSpecies(e.species).indexOf("Fire") !== -1 ? fireLightInfo() : { r: 0, c: "" };
+  }
+  return entityLightCache[key];
+}
+
+function playerNightVision(p) {
+  const species = String((p._sheet && p._sheet.species) || "").toLowerCase();
+  if (NIGHT_SPECIES_SET[species]) return true;
+  const types = typesOfPlayer(p);
+  for (const t of VISION.nightVisionTypes) {
+    if (types.indexOf(t) !== -1) return true;
+  }
+  return false;
+}
+
+function loadClock() {
+  const base = { dayMinutes: VISION.dayMinutes, baseHour: 8, baseAt: Date.now(), frozen: false };
+  try {
+    const saved = JSON.parse(fs.readFileSync(CLOCK_FILE, "utf8"));
+    if (typeof saved.dayMinutes === "number" && saved.dayMinutes >= 1) base.dayMinutes = saved.dayMinutes;
+    if (typeof saved.baseHour === "number") base.baseHour = saved.baseHour;
+    if (typeof saved.baseAt === "number") base.baseAt = saved.baseAt;
+    if (typeof saved.frozen === "boolean") base.frozen = saved.frozen;
+  } catch (e) {}
+  return base;
+}
+
+const worldClock = loadClock();
+
+function clockHour() {
+  if (worldClock.frozen) return worldClock.baseHour;
+  const dayMs = worldClock.dayMinutes * 60000;
+  const elapsed = (Date.now() - worldClock.baseAt) / dayMs * 24;
+  return (((worldClock.baseHour + elapsed) % 24) + 24) % 24;
+}
+
+function saveClock() {
+  writeJsonFile(CLOCK_FILE, worldClock);
+}
+
+function timeMessage() {
+  return { type: "time", hour: clockHour(), dayMs: worldClock.dayMinutes * 60000, frozen: worldClock.frozen };
+}
+
+function broadcastTime() {
+  const msg = timeMessage();
+  for (const id in worldSession.players) sendPlayer(worldSession.players[id], msg);
+  sendGms(null, msg);
+}
+
+function handleGmTime(gm, data) {
+  const now = Date.now();
+  const currentHour = clockHour();
+  if (typeof data.dayMinutes === "number" && isFinite(data.dayMinutes) && data.dayMinutes >= 1 && data.dayMinutes <= 1440) {
+    worldClock.baseHour = currentHour;
+    worldClock.baseAt = now;
+    worldClock.dayMinutes = Math.round(data.dayMinutes * 100) / 100;
+  }
+  if (typeof data.frozen === "boolean") {
+    worldClock.baseHour = clockHour();
+    worldClock.baseAt = now;
+    worldClock.frozen = data.frozen;
+  }
+  if (typeof data.hour === "number" && isFinite(data.hour)) {
+    worldClock.baseHour = ((data.hour % 24) + 24) % 24;
+    worldClock.baseAt = now;
+  }
+  saveClock();
+  broadcastTime();
+}
+
+function handleGmLightMode(gm, data) {
+  const mode = String(data.mode || "");
+  if (mode !== "outdoor" && mode !== "indoor" && mode !== "dark") return;
+  const L = ensureLayer(gm.layer);
+  L.light = mode;
+  scheduleLayerSave();
+  for (const id in worldSession.players) {
+    const q = worldSession.players[id];
+    if (q.layer === gm.layer) sendView(q);
+  }
+  sendGms(gm.layer, { type: "gm_light_mode", layer: gm.layer, mode: mode });
+}
+
+function checkLightChange(p) {
+  const info = playerLightInfo(p);
+  const sig = info.r + "|" + info.c;
+  if (p._lightSig === sig) return;
+  const msg = { type: "p_light", id: p.id, light: info.r, lc: info.c };
+  sendPlayer(p, msg);
+  for (const id in p._seen) {
+    const q = worldSession.players[id];
+    if (q) sendPlayer(q, msg);
+  }
+  sendView(p);
+}
+
+function lightableFor(name) {
+  const lower = String(name || "").toLowerCase();
+  for (const pair of VISION.lightable) {
+    const unlit = String(pair.unlit || "").toLowerCase();
+    if (unlit && lower.indexOf(unlit) !== -1) return pair;
+  }
+  return null;
+}
+
+function fireMovesOf(p) {
+  const out = [];
+  if (typesOfPlayer(p).indexOf("Fire") === -1) return out;
+  const moves = p._sheet && Array.isArray(p._sheet.moves) ? p._sheet.moves : [];
+  for (const m of moves) {
+    if (!m || !m.name) continue;
+    const data = getMoveData(m.name);
+    if (!data) continue;
+    if (data.type === "Fire" && data.category !== "status" && (Number(data.power) || 0) > 0) out.push(m.name);
+  }
+  return out;
+}
+
+function playerHasTorch(p) {
+  const inv = Array.isArray(p._inv) ? p._inv : [];
+  for (const igniter of VISION.igniterItems) {
+    const want = String(igniter).toLowerCase();
+    for (const stack of inv) {
+      if (stack && String(stack.name).toLowerCase() === want) return true;
+    }
+  }
+  return false;
+}
+
+function lightObject(p, col, row, obj, pair, moveName) {
+  if (worldCombat.isInFight(p)) {
+    sendPlayer(p, { type: "item_result", ok: false, text: "You can't do that during battle." });
+    return;
+  }
+  const label = pair.label || "fire";
+  const fireMoves = fireMovesOf(p);
+  let usedMove = "";
+  if (moveName) {
+    if (fireMoves.indexOf(moveName) === -1) {
+      sendPlayer(p, { type: "item_result", ok: false, text: "You can't light the " + label + " with " + moveName + "." });
+      return;
+    }
+    usedMove = moveName;
+  } else if (fireMoves.length > 0) {
+    usedMove = fireMoves[0];
+  } else if (!playerHasTorch(p)) {
+    sendPlayer(p, { type: "item_result", ok: false, text: "You need a Fire-type move or a lit torch to light this " + label + "." });
+    return;
+  }
+  const lowerName = obj.name.toLowerCase();
+  const at = lowerName.indexOf(String(pair.unlit).toLowerCase());
+  const litName = obj.name.substring(0, at) + pair.lit + obj.name.substring(at + String(pair.unlit).length);
+  if (allObjectNames().indexOf(litName) === -1) {
+    sendPlayer(p, { type: "item_result", ok: false, text: "The lit " + label + " image is missing (" + pair.lit + ")." });
+    return;
+  }
+  applyObjects(p.layer, [[col, row, litName, obj.solid ? 1 : 0, obj.rot || 0, obj.flip ? 1 : 0]]);
+  const burnMs = (Number(pair.burnMinutes) || 0) * 60000;
+  if (burnMs > 0) {
+    fires[p.layer + "," + col + "," + row] = Date.now() + burnMs;
+    saveFires();
+  }
+  sendPlayer(p, { type: "item_result", ok: true, text: usedMove ? "You light the " + label + " with " + usedMove + "." : "You light the " + label + " with your torch." });
+}
+
+function handleLightWithMove(p, data) {
+  const col = parseInt(data.col, 10);
+  const row = parseInt(data.row, 10);
+  if (!Number.isInteger(col) || !Number.isInteger(row)) return;
+  const L = layers[p.layer];
+  const obj = L ? L.objects[col + "," + row] : null;
+  if (!obj) return;
+  const pair = lightableFor(obj.name);
+  if (!pair) return;
+  if (Math.max(Math.abs(p.col - col), Math.abs(p.row - row)) > 2) {
+    sendPlayer(p, { type: "item_result", ok: false, text: "Move closer to the " + (pair.label || "fire") + "." });
+    return;
+  }
+  lightObject(p, col, row, obj, pair, String(data.move || ""));
+}
+
+const FIRES_FILE = path.join(WORLD_DIR, "fires.json");
+let fires = {};
+try {
+  const savedFires = JSON.parse(fs.readFileSync(FIRES_FILE, "utf8"));
+  if (savedFires && typeof savedFires === "object") fires = savedFires;
+} catch (e) {}
+
+function saveFires() {
+  writeJsonFile(FIRES_FILE, fires);
+}
+
+function extinguishFire(key) {
+  const parts = key.split(",").map((v) => parseInt(v, 10));
+  const layer = parts[0];
+  const col = parts[1];
+  const row = parts[2];
+  const L = layers[layer];
+  const obj = L ? L.objects[col + "," + row] : null;
+  if (!obj) return;
+  for (const pair of VISION.lightable) {
+    const re = new RegExp("(^|[^A-Za-z])" + escapeRegex(pair.lit), "i");
+    if (!re.test(obj.name)) continue;
+    const unlitName = obj.name.replace(re, (m, pre) => pre + pair.unlit);
+    if (allObjectNames().indexOf(unlitName) === -1) return;
+    applyObjects(layer, [[col, row, unlitName, obj.solid ? 1 : 0, obj.rot || 0, obj.flip ? 1 : 0]]);
+    return;
+  }
+}
+
+function fireTick() {
+  const now = Date.now();
+  let changed = false;
+  for (const key of Object.keys(fires)) {
+    if (fires[key] <= now) {
+      extinguishFire(key);
+      delete fires[key];
+      changed = true;
+    }
+  }
+  if (changed) saveFires();
+}
+
+function removeOneItem(p, name) {
+  const want = String(name).toLowerCase();
+  for (let i = 0; i < p._inv.length; i++) {
+    const stack = p._inv[i];
+    if (stack && String(stack.name).toLowerCase() === want) {
+      stack.count = stack.count - 1;
+      if (stack.count <= 0) p._inv.splice(i, 1);
+      return true;
+    }
+  }
+  return false;
+}
+
+function lightCarryTick() {
+  const now = Date.now();
+  for (const id of Object.keys(worldSession.players)) {
+    const p = worldSession.players[id];
+    if (!p) continue;
+    if (!p._burn) p._burn = {};
+    for (const def of VISION.lightItems) {
+      const burnMs = (Number(def.burnSeconds) || 0) * 1000;
+      if (burnMs <= 0) continue;
+      const has = p._inv.some((stack) => stack && String(stack.name).toLowerCase() === String(def.item).toLowerCase());
+      if (!has) {
+        delete p._burn[def.item];
+        continue;
+      }
+      if (!p._burn[def.item]) {
+        p._burn[def.item] = now + burnMs;
+        continue;
+      }
+      if (now >= p._burn[def.item]) {
+        delete p._burn[def.item];
+        removeOneItem(p, def.item);
+        sendPlayer(p, { type: "item_result", ok: false, text: "Your " + def.item + " burned out." });
+        syncPlayerInventory(p);
+      }
+    }
+    checkLightChange(p);
+  }
 }
 
 function sendView(p) {
@@ -1124,7 +1538,10 @@ function sendView(p) {
     rows.push(line);
     artRows.push(artLine);
   }
-  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, art: artRows, palette: tilePalette, objects: objectsInWindow(p.layer, c0, r0, w, h), entities: entitiesInWindow(p.layer, c0, r0, w, h), items: itemsInWindow(p.layer, c0, r0, w, h) });
+  const selfLight = playerLightInfo(p);
+  p._lightSig = selfLight.r + "|" + selfLight.c;
+  const layerObj = layers[p.layer];
+  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, art: artRows, palette: tilePalette, objects: objectsInWindow(p.layer, c0, r0, w, h), entities: entitiesInWindow(p.layer, c0, r0, w, h), items: itemsInWindow(p.layer, c0, r0, w, h), lm: layerObj && layerObj.light ? layerObj.light : "outdoor", nv: playerNightVision(p) ? 1 : 0, sl: selfLight.r, slc: selfLight.c });
 }
 
 function notifyItem(layer, col, row, data) {
@@ -1588,7 +2005,8 @@ function scheduleEntitySave() {
 }
 
 function publicEntity(e) {
-  return { id: e.id, kind: e.kind, name: e.name, dex: e.dex, layer: e.layer, col: e.col, row: e.row, direction: e.direction, state: e.state, fainted: !!e.fainted };
+  const lightInfo = entityLightInfo(e);
+  return { id: e.id, kind: e.kind, name: e.name, dex: e.dex, layer: e.layer, col: e.col, row: e.row, direction: e.direction, state: e.state, fainted: !!e.fainted, light: lightInfo.r, lc: lightInfo.c };
 }
 
 function gmEntity(e) {
@@ -1943,6 +2361,7 @@ function syncPlayerInventory(p) {
   sendPlayer(p, { type: "inv_sync", inventory: p._inv.map((s) => ({ name: s.name, count: s.count })), sheet: clientSheet(p._sheet) });
   sendGms(null, { type: "gm_player", player: publicPlayer(p) });
   queueWorldSave(p, false);
+  checkLightChange(p);
 }
 
 function handleGmInv(gm, data) {
@@ -2060,6 +2479,11 @@ function handleObjectInteract(p) {
     if (!obj) continue;
     if (isCoinPile(obj.name)) {
       collectCoinPile(p, cell[0], cell[1], obj);
+      return true;
+    }
+    const lightPair = lightableFor(obj.name);
+    if (lightPair) {
+      lightObject(p, cell[0], cell[1], obj, lightPair);
       return true;
     }
     const item = berryItemForObject(obj.name);
@@ -2532,7 +2956,7 @@ function sendGmLayer(gm) {
     objList.push([parseInt(parts[0], 10), parseInt(parts[1], 10), L.objects[k].name, L.objects[k].solid ? 1 : 0, L.objects[k].rot || 0, L.objects[k].flip ? 1 : 0]);
   }
   const passList = Object.keys(L.passable || {}).map((k) => k.split(",").map((v) => parseInt(v, 10)));
-  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, passable: passList, name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer && !entities[id].down).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: null, spawns: spawnList(), floorItems: items, layers: layerSummaries() });
+  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, passable: passList, name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer && !entities[id].down).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: null, spawns: spawnList(), floorItems: items, layers: layerSummaries(), light: L.light || "outdoor" });
 }
 
 function handleGmMessage(gm, data) {
@@ -2730,6 +3154,16 @@ function handleGmMessage(gm, data) {
     return;
   }
 
+  if (data.type === "gm_time") {
+    handleGmTime(gm, data);
+    return;
+  }
+
+  if (data.type === "gm_light_mode") {
+    handleGmLightMode(gm, data);
+    return;
+  }
+
   if (data.type === "gmchat") {
     const text = String(data.text || "").slice(0, 300);
     for (const id in worldSession.players) {
@@ -2746,7 +3180,8 @@ function handleWorldGmConnection(socket, info) {
   socket.playerId = null;
   worldGms.push(gm);
 
-  sendSocket(socket, { type: "init", id: null, role: "gm", world: true, turn: 1, players: {}, floorItems: [] });
+  sendSocket(socket, { type: "init", id: null, role: "gm", world: true, turn: 1, players: {}, floorItems: [], vision: VISION });
+  sendSocket(socket, timeMessage());
   const list = [];
   for (const id in worldSession.players) list.push(publicPlayer(worldSession.players[id]));
   sendSocket(socket, { type: "gm_players", players: list });
@@ -2929,7 +3364,8 @@ function startWorldPlayer(socket, pass, info, spawn) {
     if (q) players[seenId] = publicPlayer(q);
   }
   players[id] = publicPlayer(p);
-  sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W, p.row - VIEW_HALF_H, w, h), inventory: inventory, sheet: clientSheet(p._sheet), itemFx: ITEM_FX });
+  sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W, p.row - VIEW_HALF_H, w, h), inventory: inventory, sheet: clientSheet(p._sheet), itemFx: ITEM_FX, vision: VISION });
+  sendPlayer(p, timeMessage());
   p._kills = [];
   p._reportedHp = p.hp;
   p._reportedMp = p.mp;
@@ -2965,6 +3401,8 @@ function startWorldPlayer(socket, pass, info, spawn) {
       }
     } else if (data.type === "interact") {
       handleInteract(me);
+    } else if (data.type === "light_move") {
+      handleLightWithMove(me, data);
     } else if (data.type === "loot_take") {
       handleLootTake(me, data);
     } else if (data.type === "attack_start") {
@@ -3077,6 +3515,9 @@ worldCombat.init({
 setInterval(saveWorldState, WORLD_SAVE_INTERVAL);
 setInterval(entityTick, ENTITY_TICK_MS);
 setInterval(idleTick, 2000);
+setInterval(fireTick, 5000);
+setInterval(lightCarryTick, 2000);
+setInterval(broadcastTime, 20000);
 setInterval(companionFollowTick, COMPANION_FOLLOW_MS);
 setInterval(saveEntitiesNow, WORLD_SAVE_INTERVAL);
 

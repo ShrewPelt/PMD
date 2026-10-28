@@ -246,16 +246,22 @@ function worldSyncPool(scene, pool, wanted, kind) {
         sp = scene.add.image(w.c * TILE + TILE / 2 - 1, w.r * TILE + TILE / 2 - 1, tex);
         const scale = (TILE - 2) / Math.max(sp.width, sp.height);
         sp.setScale(scale);
-        sp.setDepth(3);
+        sp.baseScale = scale;
+        sp.setDepth(w.walk ? 11 : 3);
       }
       sp.texKey = tex;
       pool[key] = sp;
     }
-    sp.setAlpha(w.alpha === undefined ? 1 : w.alpha);
+    if (kind === "tile" || !w.walk) sp.setAlpha(w.alpha === undefined ? 1 : w.alpha);
     if (kind === "tile") {
       sp.setFlipX(parsed.flip);
       sp.setAngle(parsed.rot);
     } else {
+      sp.cellC = w.c;
+      sp.cellR = w.r;
+      sp.walkObj = !!w.walk;
+      sp.setDepth(w.walk ? 11 : 3);
+      sp.objDef = visDefForName(w.name);
       sp.setFlipX(!!w.flip);
       sp.objRotRad = (w.rot || 0) * Math.PI / 180;
       sp.setRotation(sp.objRotRad ? sp.objRotRad : -viewRot);
@@ -482,6 +488,11 @@ function drawPlayerView(scene, data) {
     worldViewOverGfx.setDepth(2);
   }
   worldLastView = data;
+  VIS.layerMode = data.lm || "outdoor";
+  VIS.nv = !!data.nv;
+  VIS.selfR = data.sl || 0;
+  VIS.selfC = data.slc || "#ffb347";
+  VIS.block = {};
   worldViewGfx.clear();
   worldViewOverGfx.clear();
   const wantedArt = {};
@@ -492,6 +503,7 @@ function drawPlayerView(scene, data) {
     for (let c = 0; c < line.length; c++) {
       const col = data.c0 + c;
       const row = data.r0 + r;
+      if (line[c] === "#") VIS.block[col + "," + row] = true;
       worldDrawBase(worldViewGfx, col, row, line[c]);
       worldDrawOverlay(worldViewOverGfx, col, row, line[c], true);
       const artChar = artLine[c];
@@ -501,7 +513,8 @@ function drawPlayerView(scene, data) {
     }
   }
   for (const o of data.objects || []) {
-    wantedObjs[o.col + "," + o.row] = { name: o.name, c: o.col, r: o.row, rot: o.rot || 0, flip: !!o.flip };
+    if (o.b) VIS.block[o.col + "," + o.row] = true;
+    wantedObjs[o.col + "," + o.row] = { name: o.name, c: o.col, r: o.row, rot: o.rot || 0, flip: !!o.flip, walk: !!o.w };
   }
   worldSyncPool(scene, worldArtPool, wantedArt, "tile");
   worldSyncPool(scene, worldObjectPool, wantedObjs, "object");
@@ -711,6 +724,7 @@ document.addEventListener("keydown", (ev) => {
 
 function worldFrame(scene) {
   entityLabelsFrame(scene);
+  visFrame(scene);
   if (worldGmMode) {
     gmSyncArt(scene);
     gmUpdateHoverTile(scene);
@@ -1601,12 +1615,19 @@ function gmBuildPanel() {
     + "<div style='margin-top:6px;color:#c8c8ff'><b>Players</b></div><div id='wgPlayers'></div>"
     + "<div class='wgTpBox'>Teleport selected player | X <input type='number' id='wgTpX' step='1' style='width:60px'> Y <input type='number' id='wgTpY' step='1' style='width:60px'> <button class='wgBtn' id='wgTpGo'>Teleport</button> <button class='wgBtn' id='wgTpSpawn'>Send to spawn</button></div>"
     + "</div>"
+    + "<div class='wgSecHead' data-wgsec='time'><span class='wgArrow'></span>Time and light</div><div class='wgSecBody' data-wgbody='time'>"
+    + "<div id='wgTimeLabel' style='color:#c8c8ff;margin-bottom:4px'>World time: --:--</div>"
+    + "<div><input type='range' id='wgTimeSlider' min='0' max='23.75' step='0.25' value='12' style='width:150px;vertical-align:middle'> <span id='wgTimeSliderLabel'>12:00</span> <button class='wgBtn' id='wgTimeSet'>Set time</button></div>"
+    + "<div><button class='wgBtn' data-wgtime='6'>Dawn</button><button class='wgBtn' data-wgtime='12'>Noon</button><button class='wgBtn' data-wgtime='19'>Dusk</button><button class='wgBtn' data-wgtime='0'>Midnight</button></div>"
+    + "<div style='margin-top:4px'><button class='wgBtn' id='wgTimeFreeze'>Freeze time</button> Day length (min) <input type='number' id='wgDayMin' min='1' max='1440' step='1' style='width:55px'> <button class='wgBtn' id='wgDayMinSet'>Set</button></div>"
+    + "<div style='margin-top:6px'>This layer's lighting:<br><select id='wgLightMode' style='background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;padding:4px;width:96%'><option value='outdoor'>Outdoor (follows world time)</option><option value='indoor'>Indoor (always bright)</option><option value='dark'>Dark (always pitch dark)</option></select></div>"
+    + "</div>"
     + "<div id='wgStatus'></div>"
     + "<div id='wgHelp'>Right-drag, middle-drag or hold Space to pan. Mouse wheel zooms. Lines snap straight; hold Shift for any angle. Portal: click the start tile, switch layer if needed, then click the destination. The green ring is the layer's spawn point. Red crossed tiles are invisible barriers that players cannot see.</div>";
   document.body.appendChild(panel);
   WG.panel = panel;
 
-  const secDefaults = { layer: true, build: true, tiles: true, objects: true, spawn: false, creatures: false, items: false, moderation: false };
+  const secDefaults = { layer: true, build: true, tiles: true, objects: true, spawn: false, creatures: false, items: false, moderation: false, time: false };
   let secState = {};
   try {
     secState = JSON.parse(localStorage.getItem("pmdGmSections") || "{}") || {};
@@ -1629,6 +1650,7 @@ function gmBuildPanel() {
       try { localStorage.setItem("pmdGmSections", JSON.stringify(secState)); } catch (e) {}
     });
   });
+  visGmBindUi();
   document.getElementById("wgToggleCreative").addEventListener("click", () => {
     const creative = document.getElementById("wgCreative");
     const coords = document.getElementById("wgCoords");
@@ -1969,6 +1991,9 @@ function gmLoadLayer(scene, data) {
     WG.art[r] = String(data.art[r]).padEnd(WORLD_COLS, " ").slice(0, WORLD_COLS);
   }
   WG.palette = data.palette || {};
+  VIS.layerMode = data.light || "outdoor";
+  const lightSelect = document.getElementById("wgLightMode");
+  if (lightSelect) lightSelect.value = VIS.layerMode;
   WG.objects = {};
   for (const o of data.objects || []) {
     WG.objects[o[0] + "," + o[1]] = { name: o[2], solid: o[3] !== 0, rot: o[4] || 0, flip: o[5] === 1 };
@@ -2980,12 +3005,97 @@ function atkPointer(scene, pointer) {
   if (typeof itemMenuOpenNow === "function" && itemMenuOpenNow()) return;
   if (lootState) return;
   const wp = scene.cameras.main.getWorldPoint(pointer.x, pointer.y);
-  const target = atkFindTarget(Math.floor(wp.x / TILE), Math.floor(wp.y / TILE));
+  const clickCol = Math.floor(wp.x / TILE);
+  const clickRow = Math.floor(wp.y / TILE);
+  const target = atkFindTarget(clickCol, clickRow);
   if (!target) {
+    const lightable = atkFindLightable(clickCol, clickRow);
+    if (lightable) {
+      atkOpenLight(lightable);
+      return;
+    }
     atkClose();
     return;
   }
   atkOpen(target);
+}
+
+function atkFindLightable(c, r) {
+  if (!worldLastView || !VIS.cfg || !Array.isArray(VIS.cfg.lightable)) return null;
+  for (const o of worldLastView.objects || []) {
+    if (o.col !== c || o.row !== r) continue;
+    for (const pair of VIS.cfg.lightable) {
+      if (String(o.name).toLowerCase().indexOf(String(pair.unlit).toLowerCase()) !== -1) return { col: c, row: r, label: pair.label || "fire" };
+    }
+  }
+  return null;
+}
+
+function atkOpenLight(target) {
+  atkInject();
+  atkTarget = null;
+  const sheet = typeof invSheet === "object" && invSheet ? invSheet : null;
+  const infos = sheet && Array.isArray(sheet.moveInfo) ? sheet.moveInfo : [];
+  const types = sheet && Array.isArray(sheet.types) ? sheet.types : [];
+  const dist = Math.max(Math.abs(player.col - target.col), Math.abs(player.row - target.row));
+  const tooFar = dist > 2;
+  atkMenuEl.innerHTML = "";
+  const title = document.createElement("div");
+  title.className = "atkTitle";
+  title.textContent = "Unlit " + target.label + (tooFar ? " (too far, move closer)" : "");
+  atkMenuEl.appendChild(title);
+  let options = 0;
+  if (types.indexOf("Fire") !== -1) {
+    for (const m of infos) {
+      if (m.type !== "Fire" || m.category === "status" || !(m.power > 0)) continue;
+      options++;
+      const btn = document.createElement("button");
+      btn.textContent = "Light " + target.label + " with " + m.name;
+      btn.disabled = tooFar;
+      btn.addEventListener("click", () => {
+        gmSend({ type: "light_move", col: target.col, row: target.row, move: m.name });
+        atkClose();
+      });
+      atkMenuEl.appendChild(btn);
+    }
+  }
+  const igniters = VIS.cfg && Array.isArray(VIS.cfg.igniterItems) ? VIS.cfg.igniterItems : [];
+  for (const igniter of igniters) {
+    let has = false;
+    for (const stack of inventoryItems) {
+      if (String(stack.name).toLowerCase() === String(igniter).toLowerCase()) has = true;
+    }
+    if (!has) continue;
+    options++;
+    const btn = document.createElement("button");
+    btn.textContent = "Light " + target.label + " with " + igniter;
+    btn.disabled = tooFar;
+    btn.addEventListener("click", () => {
+      gmSend({ type: "light_move", col: target.col, row: target.row, move: "" });
+      atkClose();
+    });
+    atkMenuEl.appendChild(btn);
+  }
+  if (options === 0) {
+    const none = document.createElement("div");
+    none.textContent = "You need a Fire-type move or a lit torch to light this.";
+    atkMenuEl.appendChild(none);
+  }
+  const cancel = document.createElement("button");
+  cancel.className = "atkCancel";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", atkClose);
+  atkMenuEl.appendChild(cancel);
+  atkMenuEl.classList.remove("hidden");
+  if (sceneRef) {
+    if (!atkRingGfx) {
+      atkRingGfx = sceneRef.add.graphics();
+      atkRingGfx.setDepth(150);
+    }
+    atkRingGfx.clear();
+    atkRingGfx.lineStyle(3, 0xffa040, 1);
+    atkRingGfx.strokeRect(target.col * TILE + 2, target.row * TILE + 2, TILE - 4, TILE - 4);
+  }
 }
 
 const WGD = { drag: null, ghost: null, inspect: null, inspEl: null, creativeEl: null, searchEl: null, gridEl: null };
@@ -3457,6 +3567,22 @@ function bushWobble(scene, data) {
 }
 
 window.worldHook = function (scene, data) {
+  if (data.type === "time") {
+    visSetTime(data);
+    return true;
+  }
+  if (data.type === "p_light") {
+    visSetOwner(data.id, data.light, data.lc);
+    return true;
+  }
+  if (data.type === "gm_light_mode") {
+    if (worldGmMode && data.layer === WG.layer) {
+      VIS.layerMode = data.mode;
+      const lightSel = document.getElementById("wgLightMode");
+      if (lightSel) lightSel.value = data.mode;
+    }
+    return true;
+  }
   if (data.type === "obj_wobble") {
     bushWobble(scene, data);
     return true;
@@ -3471,6 +3597,7 @@ window.worldHook = function (scene, data) {
   }
   if (data.type === "init" && data.world) {
     if (data.itemFx) itemFx = data.itemFx;
+    if (data.vision) visSetConfig(data.vision);
     if (data.role === "gm") {
       enterGmWorld(scene);
       return true;
@@ -3479,6 +3606,7 @@ window.worldHook = function (scene, data) {
     if (data.players) {
       for (const pid in data.players) {
         if (data.players[pid] && data.players[pid].name) worldPlayerNames[pid] = data.players[pid].name;
+        if (data.players[pid]) visSetOwner(pid, data.players[pid].light, data.players[pid].lc);
       }
     }
     return false;
@@ -3486,6 +3614,7 @@ window.worldHook = function (scene, data) {
 
   if (data.type === "join" && data.player && data.player.name) {
     worldPlayerNames[data.player.id] = data.player.name;
+    visSetOwner(data.player.id, data.player.light, data.player.lc);
     return false;
   }
 
@@ -3547,10 +3676,12 @@ window.worldHook = function (scene, data) {
   if (worldPlayerMode) {
     if (data.type === "view") {
       drawPlayerView(scene, data);
+      for (const ent of data.entities || []) visSetOwner(ent.id, ent.light, ent.lc);
       entitiesReconcile(scene, data.entities || []);
       return true;
     }
     if (data.type === "e_move") {
+      visSetOwner(data.entity.id, data.entity.light, data.entity.lc);
       entityUpsert(scene, data.entity);
       return true;
     }
@@ -3577,6 +3708,7 @@ window.worldHook = function (scene, data) {
       for (const id of Object.keys(otherPlayers)) removeOtherPlayer(id);
       for (const p of data.players) {
         if (p.id !== myId) addOtherPlayer(scene, p);
+        visSetOwner(p.id, p.light, p.lc);
       }
       state = "input";
       updateReadout("layer " + data.layer);
@@ -3687,3 +3819,486 @@ window.worldHook = function (scene, data) {
 
   return false;
 };
+
+const VIS_RES = 0.5;
+const VIS_RT_TILES = 25;
+const VIS_DIR_ANGLE = { right: 0, downright: Math.PI / 4, down: Math.PI / 2, downleft: 3 * Math.PI / 4, left: Math.PI, upleft: -3 * Math.PI / 4, up: -Math.PI / 2, upright: -Math.PI / 4 };
+const VIS_DEFAULT_CFG = { coneDegrees: 110, dayRange: 10, nearRadius: 1.5, nightReach: 1.5, nightVisionReach: 8, darknessMax: 0.93, lightObjects: [] };
+const VIS = { cfg: null, objDefs: [], hour: 12, hourAt: Date.now(), dayMs: 1440000, frozen: false, layerMode: "outdoor", nv: false, selfR: 0, selfC: "#ffb347", block: {}, ang: 0, angReady: false, fogRT: null, darkRT: null, lightImg: null, polyGfx: null, glows: [], cm: null, owners: {}, audio: {}, lights: [], lastUi: 0, texReady: false };
+
+function visCfg(key) {
+  if (VIS.cfg && VIS.cfg[key] !== undefined) return VIS.cfg[key];
+  return VIS_DEFAULT_CFG[key];
+}
+
+function visEscape(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function visSetConfig(cfg) {
+  VIS.cfg = cfg;
+  VIS.objDefs = [];
+  const list = cfg && Array.isArray(cfg.lightObjects) ? cfg.lightObjects : [];
+  for (const def of list) {
+    if (!def || !def.match) continue;
+    VIS.objDefs.push({ def: def, re: new RegExp("(^|[^A-Za-z])" + visEscape(def.match), "i") });
+  }
+}
+
+function visDefForName(name) {
+  const text = String(name || "");
+  for (const entry of VIS.objDefs) {
+    if (entry.re.test(text)) return entry.def;
+  }
+  return null;
+}
+
+function visSetOwner(id, radius, color) {
+  if (id === undefined || id === null) return;
+  if (radius > 0) VIS.owners[String(id)] = { r: radius, c: color || "#ff8a3c" };
+  else delete VIS.owners[String(id)];
+}
+
+function visSetTime(data) {
+  VIS.hour = Number(data.hour) || 0;
+  VIS.hourAt = Date.now();
+  if (data.dayMs) VIS.dayMs = data.dayMs;
+  VIS.frozen = !!data.frozen;
+  visGmUpdateUi(true);
+}
+
+function visHourNow() {
+  if (VIS.frozen) return VIS.hour;
+  return (((VIS.hour + (Date.now() - VIS.hourAt) / VIS.dayMs * 24) % 24) + 24) % 24;
+}
+
+function visSmooth(t) {
+  const x = Math.max(0, Math.min(1, t));
+  return x * x * (3 - 2 * x);
+}
+
+function visDarknessFor(h) {
+  if (h >= 7 && h < 18) return 0;
+  if (h >= 18 && h < 21) return visSmooth((h - 18) / 3);
+  if (h >= 21 || h < 5) return 1;
+  return 1 - visSmooth((h - 5) / 2);
+}
+
+function visDarkness() {
+  if (VIS.layerMode === "indoor") return 0;
+  if (VIS.layerMode === "dark") return 1;
+  return visDarknessFor(visHourNow());
+}
+
+function visColorInt(text, fallback) {
+  const v = parseInt(String(text || "").replace("#", ""), 16);
+  return isNaN(v) ? fallback : v;
+}
+
+function visLerpColor(a, b, t) {
+  const ar = (a >> 16) & 255;
+  const ag = (a >> 8) & 255;
+  const ab = a & 255;
+  const br = (b >> 16) & 255;
+  const bg = (b >> 8) & 255;
+  const bb = b & 255;
+  return (Math.round(ar + (br - ar) * t) << 16) | (Math.round(ag + (bg - ag) * t) << 8) | Math.round(ab + (bb - ab) * t);
+}
+
+function visAngleDiff(a, b) {
+  let d = a - b;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
+function visEnsureTexture(scene) {
+  if (VIS.texReady && scene.textures.exists("pmdLightGrad")) return;
+  if (!scene.textures.exists("pmdLightGrad")) {
+    const tex = scene.textures.createCanvas("pmdLightGrad", 256, 256);
+    const ctx = tex.getContext();
+    const grad = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
+    grad.addColorStop(0, "rgba(255,255,255,1)");
+    grad.addColorStop(0.35, "rgba(255,255,255,0.95)");
+    grad.addColorStop(0.65, "rgba(255,255,255,0.6)");
+    grad.addColorStop(0.85, "rgba(255,255,255,0.25)");
+    grad.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 256, 256);
+    tex.refresh();
+  }
+  VIS.texReady = true;
+}
+
+function visEnsureOverlays(scene) {
+  visEnsureTexture(scene);
+  if (VIS.fogRT) return;
+  const px = Math.ceil(VIS_RT_TILES * TILE * VIS_RES);
+  VIS.fogRT = scene.add.renderTexture(0, 0, px, px);
+  VIS.fogRT.setOrigin(0, 0);
+  VIS.fogRT.setScale(1 / VIS_RES);
+  VIS.fogRT.setDepth(20);
+  VIS.darkRT = scene.add.renderTexture(0, 0, px, px);
+  VIS.darkRT.setOrigin(0, 0);
+  VIS.darkRT.setScale(1 / VIS_RES);
+  VIS.darkRT.setDepth(21);
+  VIS.lightImg = scene.add.image(0, 0, "pmdLightGrad");
+  VIS.lightImg.setVisible(false);
+  VIS.polyGfx = scene.add.graphics();
+  VIS.polyGfx.setVisible(false);
+}
+
+function visRayDist(ox, oy, ang, maxDist) {
+  const dx = Math.cos(ang);
+  const dy = Math.sin(ang);
+  let col = Math.floor(ox / TILE);
+  let row = Math.floor(oy / TILE);
+  const stepC = dx > 0 ? 1 : -1;
+  const stepR = dy > 0 ? 1 : -1;
+  const adx = Math.abs(dx);
+  const ady = Math.abs(dy);
+  const tDeltaC = adx < 1e-9 ? Infinity : TILE / adx;
+  const tDeltaR = ady < 1e-9 ? Infinity : TILE / ady;
+  let tMaxC = adx < 1e-9 ? Infinity : ((dx > 0 ? (col + 1) * TILE - ox : ox - col * TILE) / adx);
+  let tMaxR = ady < 1e-9 ? Infinity : ((dy > 0 ? (row + 1) * TILE - oy : oy - row * TILE) / ady);
+  let t = 0;
+  let guard = 0;
+  while (t < maxDist && guard < 64) {
+    guard++;
+    if (tMaxC < tMaxR) {
+      t = tMaxC;
+      tMaxC += tDeltaC;
+      col += stepC;
+    } else {
+      t = tMaxR;
+      tMaxR += tDeltaR;
+      row += stepR;
+    }
+    if (t >= maxDist) return maxDist;
+    if (VIS.block[col + "," + row]) return Math.min(maxDist, t + TILE * 0.4);
+  }
+  return maxDist;
+}
+
+function visFan(g, ox, oy, rx, ry, angA, angB, stepRad, range) {
+  const count = Math.max(1, Math.ceil(Math.abs(angB - angA) / stepRad));
+  let prevX = 0;
+  let prevY = 0;
+  const cx = (ox - rx) * VIS_RES;
+  const cy = (oy - ry) * VIS_RES;
+  for (let i = 0; i <= count; i++) {
+    const a = angA + (angB - angA) * i / count;
+    const d = visRayDist(ox, oy, a, range);
+    const px = (ox + Math.cos(a) * d - rx) * VIS_RES;
+    const py = (oy + Math.sin(a) * d - ry) * VIS_RES;
+    if (i > 0) g.fillTriangle(cx, cy, prevX, prevY, px, py);
+    prevX = px;
+    prevY = py;
+  }
+}
+
+function visLit(x, y) {
+  for (const light of VIS.lights) {
+    const d = Math.hypot(x - light.x, y - light.y) / TILE;
+    if (d <= light.vis) return true;
+  }
+  return false;
+}
+
+function visCanSee(ox, oy, tx, ty, half) {
+  const dist = Math.hypot(tx - ox, ty - oy);
+  const tiles = dist / TILE;
+  if (tiles <= visCfg("nearRadius")) return true;
+  if (tiles > visCfg("dayRange") + 0.6) return false;
+  const ang = Math.atan2(ty - oy, tx - ox);
+  if (Math.abs(visAngleDiff(ang, VIS.ang)) > half) return false;
+  if (!visLit(tx, ty)) return false;
+  return visRayDist(ox, oy, ang, dist) >= dist - 0.5;
+}
+
+function visCollectLights(t, ox, oy, D, reach) {
+  const lights = [];
+  const selfR = Math.max(reach, VIS.selfR);
+  lights.push({ x: ox, y: oy, r: selfR, vis: D < 0.001 ? selfR : selfR * 0.85, color: VIS.selfR > 0 ? VIS.selfC : null, self: true });
+  for (const key in worldObjectPool) {
+    const sp = worldObjectPool[key];
+    if (!sp || !sp.active || !sp.objDef) continue;
+    const def = sp.objDef;
+    const ph = (sp.cellC || 0) * 7.3 + (sp.cellR || 0) * 3.1;
+    const flick = 1 + (def.flicker || 0.12) * (Math.sin(t * 0.017 + ph) * 0.6 + Math.sin(t * 0.0043 + ph * 1.7) * 0.4);
+    const r = (def.radius || 5) * flick;
+    lights.push({ x: sp.x, y: sp.y, r: r, vis: r * 0.85, color: def.color || "#ff9a3c" });
+  }
+  const itemDefs = VIS.cfg && Array.isArray(VIS.cfg.lightItems) ? VIS.cfg.lightItems : [];
+  if (itemDefs.length > 0 && Array.isArray(floorItems)) {
+    for (const it of floorItems) {
+      let found = null;
+      for (const def of itemDefs) {
+        if (def.onGround && String(def.item).toLowerCase() === String(it.name).toLowerCase()) found = def;
+      }
+      if (!found) continue;
+      const r = found.radius || 5;
+      lights.push({ x: it.col * TILE + TILE / 2, y: it.row * TILE + TILE / 2, r: r, vis: r * 0.85, color: found.color || "#ffd27a" });
+    }
+  }
+  for (const id in VIS.owners) {
+    const sp = otherPlayers[id];
+    if (!sp || sp === "loading" || !sp.active) continue;
+    const o = VIS.owners[id];
+    const flick = 1 + 0.1 * Math.sin(t * 0.015 + sp.x * 0.01);
+    const r = o.r * flick;
+    lights.push({ x: sp.x, y: sp.y, r: r, vis: r * 0.85, color: o.c });
+  }
+  return lights;
+}
+
+function visUpdateGlows(scene, lights, D) {
+  let used = 0;
+  for (const light of lights) {
+    if (!light.color) continue;
+    let img = VIS.glows[used];
+    if (!img) {
+      img = scene.add.image(0, 0, "pmdLightGrad");
+      img.setDepth(12);
+      img.setBlendMode(Phaser.BlendModes.ADD);
+      VIS.glows.push(img);
+    }
+    used++;
+    img.setVisible(true);
+    img.setPosition(light.x, light.y);
+    img.setScale(light.r * TILE * 2 * 0.8 / 256);
+    img.setTint(visColorInt(light.color, 0xff9a3c));
+    img.setAlpha(0.1 + 0.2 * D);
+  }
+  for (let i = used; i < VIS.glows.length; i++) VIS.glows[i].setVisible(false);
+}
+
+function visApplyGray(scene, amount) {
+  const cam = scene.cameras.main;
+  if (!cam.postFX) return;
+  if (amount <= 0.01) {
+    if (VIS.cm) {
+      cam.postFX.remove(VIS.cm);
+      VIS.cm = null;
+    }
+    return;
+  }
+  if (!VIS.cm) VIS.cm = cam.postFX.addColorMatrix();
+  VIS.cm.reset();
+  VIS.cm.grayscale(amount);
+}
+
+function visWobble(t) {
+  for (const key in worldObjectPool) {
+    const sp = worldObjectPool[key];
+    if (!sp || !sp.active || !sp.objDef || !sp.objDef.wobble) continue;
+    const ph = (sp.cellC || 0) * 5.1 + (sp.cellR || 0) * 2.3;
+    const bs = sp.baseScale || sp.scaleX;
+    sp.setScale(bs * (1 + 0.045 * Math.sin(t * 0.009 + ph)), bs * (1 + 0.075 * Math.sin(t * 0.0073 + ph * 1.3)));
+    const baseRot = sp.objRotRad ? sp.objRotRad : -viewRot;
+    sp.setRotation(baseRot + 0.05 * Math.sin(t * 0.006 + ph));
+  }
+}
+
+function visSoundFrame(px, py) {
+  const wanted = {};
+  for (const key in worldObjectPool) {
+    const sp = worldObjectPool[key];
+    if (!sp || !sp.active || !sp.objDef || !sp.objDef.sound) continue;
+    const def = sp.objDef;
+    const d = Math.hypot(sp.x - px, sp.y - py) / TILE;
+    const radius = def.soundRadius || 8;
+    if (d >= radius) continue;
+    const vol = Math.pow(1 - d / radius, 1.5) * (def.soundVolume !== undefined ? def.soundVolume : 0.6);
+    if (!wanted[def.sound] || vol > wanted[def.sound]) wanted[def.sound] = vol;
+  }
+  for (const file in wanted) {
+    let a = VIS.audio[file];
+    if (!a) {
+      a = new Audio("assets/music/" + file.split("/").map(encodeURIComponent).join("/"));
+      a.loop = true;
+      VIS.audio[file] = a;
+    }
+    a.volume = Math.max(0, Math.min(1, wanted[file]));
+    if (a.paused) {
+      const p = a.play();
+      if (p && p.catch) p.catch(() => {});
+    }
+  }
+  for (const file in VIS.audio) {
+    if (wanted[file] === undefined && !VIS.audio[file].paused) VIS.audio[file].pause();
+  }
+}
+
+function visWalkFade(occupied, k) {
+  for (const key in worldObjectPool) {
+    const sp = worldObjectPool[key];
+    if (!sp || !sp.active || !sp.walkObj) continue;
+    const c = sp.cellC;
+    const r = sp.cellR;
+    let target = 1;
+    if (occupied[c + "," + r]) {
+      target = 0.3;
+    } else {
+      for (let dr = -1; dr <= 1 && target === 1; dr++) {
+        for (let dc = -1; dc <= 1; dc++) {
+          if (occupied[(c + dc) + "," + (r + dr)]) {
+            target = 0.65;
+            break;
+          }
+        }
+      }
+    }
+    sp.setAlpha(sp.alpha + (target - sp.alpha) * k);
+  }
+}
+
+function visWrapBars() {
+  if (VIS.barsWrapped || typeof window.drawEntityBars !== "function") return;
+  VIS.barsWrapped = true;
+  const original = window.drawEntityBars;
+  window.drawEntityBars = function (s) {
+    if (s && s.visible === false) return;
+    original(s);
+  };
+}
+
+function visFrame(scene) {
+  visWrapBars();
+  const t = scene.time.now;
+  if (worldGmMode) {
+    visEnsureTexture(scene);
+    const D = visDarkness();
+    const lights = visCollectLights(t, 0, 0, D, 0).slice(1);
+    visUpdateGlows(scene, lights, D);
+    visWobble(t);
+    visGmUpdateUi(false);
+    return;
+  }
+  if (!worldPlayerMode || !player || !worldLastView) return;
+  const dt = Math.min(100, scene.game.loop.delta || 16);
+  visEnsureOverlays(scene);
+  const D = visDarkness();
+  const half = visCfg("coneDegrees") * Math.PI / 360;
+  const dayRange = visCfg("dayRange");
+  const target = VIS_DIR_ANGLE[player.direction];
+  if (target !== undefined) {
+    if (!VIS.angReady) {
+      VIS.ang = target;
+      VIS.angReady = true;
+    } else {
+      const diff = visAngleDiff(target, VIS.ang);
+      VIS.ang = Math.abs(diff) < 0.01 ? target : VIS.ang + diff * (1 - Math.exp(-dt / 45));
+    }
+  }
+  const reachBase = VIS.nv ? visCfg("nightVisionReach") : visCfg("nightReach");
+  const reach = dayRange + (reachBase - dayRange) * D;
+  const ox = player.x;
+  const oy = player.y;
+  const lights = visCollectLights(t, ox, oy, D, reach);
+  VIS.lights = lights;
+  const rx = ox - VIS_RT_TILES * TILE / 2;
+  const ry = oy - VIS_RT_TILES * TILE / 2;
+  VIS.fogRT.setPosition(rx, ry);
+  VIS.darkRT.setPosition(rx, ry);
+  VIS.fogRT.clear();
+  VIS.fogRT.fill(0x666b78, 0.6);
+  const g = VIS.polyGfx;
+  g.clear();
+  const step = 2 * Math.PI / 180;
+  const spreads = [0.14, 0.07, 0];
+  const alphas = [0.35, 0.65, 1];
+  for (let i = 0; i < spreads.length; i++) {
+    g.fillStyle(0xffffff, alphas[i]);
+    visFan(g, ox, oy, rx, ry, VIS.ang - half - spreads[i], VIS.ang + half + spreads[i], step, dayRange * TILE);
+  }
+  const near = visCfg("nearRadius");
+  g.fillStyle(0xffffff, 0.45);
+  visFan(g, ox, oy, rx, ry, 0, Math.PI * 2, 15 * Math.PI / 180, (near + 0.4) * TILE);
+  g.fillStyle(0xffffff, 1);
+  visFan(g, ox, oy, rx, ry, 0, Math.PI * 2, 15 * Math.PI / 180, near * TILE);
+  VIS.fogRT.erase(g, 0, 0);
+  if (D > 0.004) {
+    VIS.darkRT.setVisible(true);
+    VIS.darkRT.clear();
+    const dusk = 0x4a2c52;
+    const night = 0x050816;
+    VIS.darkRT.fill(visLerpColor(dusk, night, Math.pow(D, 1.4)), D * visCfg("darknessMax"));
+    for (const light of lights) {
+      VIS.lightImg.setScale(light.r * TILE * 2 * VIS_RES / 256);
+      VIS.darkRT.erase(VIS.lightImg, (light.x - rx) * VIS_RES, (light.y - ry) * VIS_RES);
+    }
+  } else {
+    VIS.darkRT.setVisible(false);
+  }
+  visUpdateGlows(scene, lights, D);
+  visApplyGray(scene, VIS.nv ? Math.min(1, D * 1.4) : 0);
+  const occupied = {};
+  occupied[Math.floor(ox / TILE) + "," + Math.floor(oy / TILE)] = true;
+  for (const id in otherPlayers) {
+    const sp = otherPlayers[id];
+    if (!sp || sp === "loading" || !sp.active) continue;
+    const exempt = (typeof combatHolds === "function" && combatHolds(id)) || (COMBAT.active && COMBAT.actors[id]);
+    const seen = exempt || visCanSee(ox, oy, sp.x, sp.y, half);
+    if (sp.visible !== seen) sp.setVisible(seen);
+    const label = worldEntityLabels[id];
+    if (label) label.setVisible(seen);
+    if (seen) occupied[Math.floor(sp.x / TILE) + "," + Math.floor(sp.y / TILE)] = true;
+  }
+  visWalkFade(occupied, 1 - Math.exp(-dt / 90));
+  visWobble(t);
+  visSoundFrame(ox, oy);
+}
+
+function visHourLabel(h) {
+  const hh = Math.floor(h);
+  const mm = Math.floor((h - hh) * 60);
+  return (hh < 10 ? "0" : "") + hh + ":" + (mm < 10 ? "0" : "") + mm;
+}
+
+function visGmUpdateUi(force) {
+  const label = document.getElementById("wgTimeLabel");
+  if (!label) return;
+  const now = Date.now();
+  if (!force && now - VIS.lastUi < 400) return;
+  VIS.lastUi = now;
+  const h = visHourNow();
+  const dark = visDarknessFor(h);
+  const phase = dark > 0.6 ? "Night" : (dark > 0.02 ? (h < 12 ? "Dawn" : "Dusk") : "Day");
+  label.textContent = "World time: " + visHourLabel(h) + " | " + phase + (VIS.frozen ? " | frozen" : "");
+  const freeze = document.getElementById("wgTimeFreeze");
+  if (freeze) freeze.textContent = VIS.frozen ? "Resume time" : "Freeze time";
+  const dayMin = document.getElementById("wgDayMin");
+  if (dayMin && document.activeElement !== dayMin) dayMin.value = Math.round(VIS.dayMs / 600) / 100;
+}
+
+function visGmBindUi() {
+  const slider = document.getElementById("wgTimeSlider");
+  const sliderLabel = document.getElementById("wgTimeSliderLabel");
+  if (!slider) return;
+  slider.addEventListener("input", () => {
+    sliderLabel.textContent = visHourLabel(parseFloat(slider.value));
+  });
+  document.getElementById("wgTimeSet").addEventListener("click", () => {
+    gmSend({ type: "gm_time", hour: parseFloat(slider.value) });
+  });
+  document.querySelectorAll("[data-wgtime]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const h = parseFloat(btn.getAttribute("data-wgtime"));
+      slider.value = h;
+      sliderLabel.textContent = visHourLabel(h);
+      gmSend({ type: "gm_time", hour: h });
+    });
+  });
+  document.getElementById("wgTimeFreeze").addEventListener("click", () => {
+    gmSend({ type: "gm_time", frozen: !VIS.frozen });
+  });
+  document.getElementById("wgDayMinSet").addEventListener("click", () => {
+    const v = parseFloat(document.getElementById("wgDayMin").value);
+    if (isFinite(v) && v >= 1) gmSend({ type: "gm_time", dayMinutes: v });
+  });
+  document.getElementById("wgLightMode").addEventListener("change", (ev) => {
+    VIS.layerMode = ev.target.value;
+    gmSend({ type: "gm_light_mode", mode: ev.target.value });
+  });
+}
