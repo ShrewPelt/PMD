@@ -1125,11 +1125,10 @@ const CLOCK_FILE = path.join(WORLD_DIR, "clock.json");
 const STRUCTURES_DIR = path.join(__dirname, "assets", "structures");
 const SPECIES_TYPES_FILE = path.join(__dirname, "StorageData", "SpeciesTypes.json");
 
-const VISION_VERSION = 2;
+const VISION_VERSION = 3;
 
 const VISION_DEFAULTS = {
   version: VISION_VERSION,
-  lightRequiresFireType: true,
   dayMinutes: 24,
   coneDegrees: 110,
   dayRange: 10,
@@ -1139,16 +1138,26 @@ const VISION_DEFAULTS = {
   darknessMax: 1,
   fireTypeLight: { radius: 3.5, color: "#ff8a3c" },
   lightObjects: [
-    { match: "Lit_Campfire", radius: 6.5, color: "#ff9a3c", flicker: 0.16, wobble: true, sound: "SFX/Campfire Crackling.ogg", soundRadius: 9, soundVolume: 0.6 }
+    { match: "Lit_Stone_Campfire", radius: 6.5, color: "#ff9a3c", flicker: 0.1, flame: { part: "top", size: 0.6 }, sound: "SFX/Campfire Crackling.ogg", soundRadius: 9, soundVolume: 0.6 },
+    { match: "Lit_Campfire", radius: 6.5, color: "#ff9a3c", flicker: 0.1, flame: { part: "top", size: 0.6 }, sound: "SFX/Campfire Crackling.ogg", soundRadius: 9, soundVolume: 0.6 },
+    { match: "Metal_Brazier", radius: 6, color: "#ff8f33", flicker: 0.05, flame: { part: "top", size: 0.5 } },
+    { match: "Pillar_Brazier", radius: 5, color: "#ff9a3c", flicker: 0.05, flame: { part: "top", size: 0.45 } },
+    { match: "Lamp_Post3", radius: 5, color: "#ff6a3a", flicker: 0.04, flame: { part: "top", size: 0.4 } },
+    { match: "Lamp_Post4", radius: 4.5, color: "#ffc266", flicker: 0.04, flame: { part: "top", size: 0.45 } },
+    { match: "Lamp_Post", radius: 6.5, color: "#ffd27a", flicker: 0.04, flame: { part: "top", size: 0.35 } },
+    { match: "Hanging_Torch", radius: 4.5, color: "#ff9a3c", flicker: 0.05, flame: { part: "top", size: 0.45 } },
+    { match: "Hanging_Lantern", radius: 5, color: "#ffd27a", flicker: 0.04, flame: { part: "bottom", size: 0.5 } },
+    { match: "Candle", radius: 2.5, color: "#ffb84d", flicker: 0.06, flame: { part: "top", size: 0.5 } }
   ],
   lightItems: [
     { item: "Lit Torch", radius: 5, color: "#ffb347", burnSeconds: 60, onGround: false },
     { item: "Lantern", radius: 7, color: "#ffd27a", burnSeconds: 0, onGround: true }
   ],
   lightable: [
+    { unlit: "Unlit_Stone_Campfire", lit: "Lit_Stone_Campfire", label: "stone campfire", burnMinutes: 5 },
     { unlit: "Unlit_Campfire", lit: "Lit_Campfire", label: "campfire", burnMinutes: 5 }
   ],
-  igniterItems: ["Lit Torch"],
+  igniterItems: ["Lit Torch", "Flint and Steel"],
   sightBlockers: ["Tree", "Wall", "House", "Building", "Pillar", "Statue", "Cliff", "Boulder"],
   nightVisionTypes: ["Dark", "Ghost"],
   nightVisionSpecies: ["Meowth", "Persian", "Zubat", "Golbat", "Crobat", "Hoothoot", "Noctowl", "Murkrow", "Honchkrow", "Umbreon", "Sneasel", "Weavile", "Houndour", "Houndoom", "Poochyena", "Mightyena", "Absol", "Shinx", "Luxio", "Luxray", "Purrloin", "Liepard", "Glameow", "Purugly", "Espurr", "Meowstic", "Litten", "Torracat", "Incineroar", "Rockruff", "Lycanroc", "Sableye", "Skuntank", "Stunky", "Spinarak", "Ariados"]
@@ -1174,6 +1183,18 @@ function fillEntryDefaults(list, defList, keyName) {
   });
 }
 
+function addMissingEntries(list, defList, keyName) {
+  const out = list.slice();
+  for (const d of defList) {
+    let found = false;
+    for (const entry of out) {
+      if (String(entry[keyName]).toLowerCase() === String(d[keyName]).toLowerCase()) found = true;
+    }
+    if (!found) out.push(d);
+  }
+  return out;
+}
+
 function loadVisionConfig() {
   let saved = {};
   let exists = true;
@@ -1192,8 +1213,16 @@ function loadVisionConfig() {
   }
   let migrated = false;
   if (exists && saved.version !== VISION_VERSION) {
-    cfg.nightReach = VISION_DEFAULTS.nightReach;
-    cfg.darknessMax = VISION_DEFAULTS.darknessMax;
+    if ((Number(saved.version) || 0) < 2) {
+      cfg.nightReach = VISION_DEFAULTS.nightReach;
+      cfg.darknessMax = VISION_DEFAULTS.darknessMax;
+    }
+    cfg.lightObjects = addMissingEntries(cfg.lightObjects, VISION_DEFAULTS.lightObjects, "match");
+    cfg.lightable = addMissingEntries(cfg.lightable, VISION_DEFAULTS.lightable, "unlit");
+    cfg.lightItems = addMissingEntries(cfg.lightItems, VISION_DEFAULTS.lightItems, "item");
+    for (const name of VISION_DEFAULTS.igniterItems) {
+      if (cfg.igniterItems.map((v) => String(v).toLowerCase()).indexOf(String(name).toLowerCase()) === -1) cfg.igniterItems.push(name);
+    }
     cfg.version = VISION_VERSION;
     migrated = true;
   }
@@ -1391,7 +1420,6 @@ function knownFireAttacks(p) {
 }
 
 function fireMovesOf(p) {
-  if (VISION.lightRequiresFireType && !isFireTyped(p)) return [];
   return knownFireAttacks(p);
 }
 
