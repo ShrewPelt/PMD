@@ -2771,8 +2771,8 @@ function handleWorldGmConnection(socket, info) {
 
 const pendingSpawnSockets = {};
 const SPAWN_PICK_WAIT_MS = 300000;
-const IDLE_LOGOUT_MS = Number(process.env.PMD_IDLE_LOGOUT_MS) || 60000;
-const IDLE_WARN_MS = Math.min(IDLE_LOGOUT_MS - 1000, Number(process.env.PMD_IDLE_WARN_MS) || 45000);
+const IDLE_LOGOUT_MS = Number(process.env.PMD_IDLE_LOGOUT_MS) || 300000;
+const IDLE_WARN_MS = Math.min(IDLE_LOGOUT_MS - 1000, Number(process.env.PMD_IDLE_WARN_MS) || 270000);
 
 function closePendingSpawn(userId) {
   const old = pendingSpawnSockets[String(userId)];
@@ -2795,7 +2795,7 @@ function idleTick() {
     }
     const idle = now - (p._lastActive || now);
     if (idle >= IDLE_LOGOUT_MS) {
-      forceLeaveUser(p.userId, "You were logged out for standing still for over a minute. Your character is saved.");
+      forceLeaveUser(p.userId, "You were logged out for being idle for 5 minutes. Your character is saved.");
       sendLayerSummaries();
     } else if (idle >= IDLE_WARN_MS && !p._idleWarned) {
       p._idleWarned = true;

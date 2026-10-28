@@ -1020,6 +1020,7 @@ function gmMakeDraggable(el, handle, storeKey, onMove, filter) {
   handle.addEventListener("pointerdown", (ev) => {
     if (ev.button !== undefined && ev.button !== 0) return;
     if (filter && !filter(ev.target)) return;
+    if (ev.target && ev.target.closest && ev.target.closest("button,input,select,textarea,a")) return;
     const rect = el.getBoundingClientRect();
     drag = { id: ev.pointerId, dx: ev.clientX - rect.left, dy: ev.clientY - rect.top };
     try { handle.setPointerCapture(ev.pointerId); } catch (e) {}
@@ -3675,6 +3676,8 @@ window.worldHook = function (scene, data) {
     }
     if (data.type === "gm_player_leave") {
       delete WG.players[data.id];
+      if (String(WG.selPlayer) === String(data.id)) WG.selPlayer = null;
+      if (WGD.inspect && WGD.inspect.type === "player" && String(WGD.inspect.id) === String(data.id)) gmInspectClose();
       removeOtherPlayer(data.id);
       gmRenderPlayers();
       return true;
