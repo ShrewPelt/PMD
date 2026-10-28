@@ -1125,14 +1125,17 @@ const CLOCK_FILE = path.join(WORLD_DIR, "clock.json");
 const STRUCTURES_DIR = path.join(__dirname, "assets", "structures");
 const SPECIES_TYPES_FILE = path.join(__dirname, "StorageData", "SpeciesTypes.json");
 
+const VISION_VERSION = 2;
+
 const VISION_DEFAULTS = {
+  version: VISION_VERSION,
   dayMinutes: 24,
   coneDegrees: 110,
   dayRange: 10,
   nearRadius: 1.5,
-  nightReach: 1.5,
+  nightReach: 0,
   nightVisionReach: 8,
-  darknessMax: 0.93,
+  darknessMax: 1,
   fireTypeLight: { radius: 3.5, color: "#ff8a3c" },
   lightObjects: [
     { match: "Lit_Campfire", radius: 6.5, color: "#ff9a3c", flicker: 0.16, wobble: true, sound: "SFX/Campfire Crackling.ogg", soundRadius: 9, soundVolume: 0.6 }
@@ -1186,10 +1189,17 @@ function loadVisionConfig() {
     if (got === undefined || got === null || typeof got !== typeof def || Array.isArray(got) !== Array.isArray(def)) cfg[key] = def;
     else cfg[key] = got;
   }
+  let migrated = false;
+  if (exists && saved.version !== VISION_VERSION) {
+    cfg.nightReach = VISION_DEFAULTS.nightReach;
+    cfg.darknessMax = VISION_DEFAULTS.darknessMax;
+    cfg.version = VISION_VERSION;
+    migrated = true;
+  }
   cfg.lightItems = fillEntryDefaults(cfg.lightItems, VISION_DEFAULTS.lightItems, "item");
   cfg.lightable = fillEntryDefaults(cfg.lightable, VISION_DEFAULTS.lightable, "unlit");
   cfg.lightObjects = fillEntryDefaults(cfg.lightObjects, VISION_DEFAULTS.lightObjects, "match");
-  if (!exists) {
+  if (!exists || migrated) {
     try {
       fs.mkdirSync(WORLD_DIR, { recursive: true });
       fs.writeFileSync(VISION_FILE, visionFileText(cfg));

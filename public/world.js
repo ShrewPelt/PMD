@@ -3823,7 +3823,7 @@ window.worldHook = function (scene, data) {
 const VIS_RES = 0.5;
 const VIS_RT_TILES = 25;
 const VIS_DIR_ANGLE = { right: 0, downright: Math.PI / 4, down: Math.PI / 2, downleft: 3 * Math.PI / 4, left: Math.PI, upleft: -3 * Math.PI / 4, up: -Math.PI / 2, upright: -Math.PI / 4 };
-const VIS_DEFAULT_CFG = { coneDegrees: 110, dayRange: 10, nearRadius: 1.5, nightReach: 1.5, nightVisionReach: 8, darknessMax: 0.93, lightObjects: [] };
+const VIS_DEFAULT_CFG = { coneDegrees: 110, dayRange: 10, nearRadius: 1.5, nightReach: 0, nightVisionReach: 8, darknessMax: 1, lightObjects: [] };
 const VIS = { cfg: null, objDefs: [], hour: 12, hourAt: Date.now(), dayMs: 1440000, frozen: false, layerMode: "outdoor", nv: false, selfR: 0, selfC: "#ffb347", block: {}, ang: 0, angReady: false, fogRT: null, darkRT: null, lightImg: null, polyGfx: null, glows: [], cm: null, owners: {}, audio: {}, lights: [], lastUi: 0, texReady: false };
 
 function visCfg(key) {
@@ -3882,6 +3882,18 @@ function visDarknessFor(h) {
   if (h >= 18 && h < 21) return visSmooth((h - 18) / 3);
   if (h >= 21 || h < 5) return 1;
   return 1 - visSmooth((h - 5) / 2);
+}
+
+function visBump(h, a, peak, b) {
+  if (h <= a || h >= b) return 0;
+  if (h < peak) return visSmooth((h - a) / (peak - a));
+  return 1 - visSmooth((h - peak) / (b - peak));
+}
+
+function visWarmth() {
+  if (VIS.layerMode !== "outdoor") return 0;
+  const h = visHourNow();
+  return Math.max(visBump(h, 4.5, 6.3, 8.5), visBump(h, 16, 18.5, 21));
 }
 
 function visDarkness() {
@@ -3946,6 +3958,9 @@ function visEnsureOverlays(scene) {
   VIS.lightImg.setVisible(false);
   VIS.polyGfx = scene.add.graphics();
   VIS.polyGfx.setVisible(false);
+  VIS.tint = scene.add.rectangle(0, 0, VIS_RT_TILES * TILE, VIS_RT_TILES * TILE, 0xff8a3a);
+  VIS.tint.setDepth(19);
+  VIS.tint.setVisible(false);
 }
 
 function visRayDist(ox, oy, ang, maxDist) {
@@ -4008,7 +4023,7 @@ function visLit(x, y) {
 function visCanSee(ox, oy, tx, ty, half) {
   const dist = Math.hypot(tx - ox, ty - oy);
   const tiles = dist / TILE;
-  if (tiles <= visCfg("nearRadius")) return true;
+  if (tiles <= visCfg("nearRadius")) return visLit(tx, ty);
   if (tiles > visCfg("dayRange") + 0.6) return false;
   const ang = Math.atan2(ty - oy, tx - ox);
   if (Math.abs(visAngleDiff(ang, VIS.ang)) > half) return false;
@@ -4153,6 +4168,29 @@ function visWalkFade(occupied, k) {
   }
 }
 
+function visUpdateGhost(scene, D) {
+  if (!scene.cameras.main.postFX) return;
+  if (!VIS.ghost) {
+    VIS.ghost = scene.add.sprite(0, 0, player.texture.key, player.frame.name);
+    VIS.ghost.setDepth(22);
+    VIS.ghost.postFX.addGlow(0x808080, 2, 0, true, 0.1, 6);
+  }
+  const g = VIS.ghost;
+  const alpha = Math.min(0.65, D * D * 0.8);
+  if (alpha <= 0.02) {
+    g.setVisible(false);
+    return;
+  }
+  g.setVisible(true);
+  g.setTexture(player.texture.key, player.frame.name);
+  g.setOrigin(player.originX, player.originY);
+  g.setScale(player.scaleX, player.scaleY);
+  g.setFlipX(player.flipX);
+  g.setPosition(player.x, player.y);
+  g.setRotation(player.rotation);
+  g.setAlpha(alpha);
+}
+
 function visWrapBars() {
   if (VIS.barsWrapped || typeof window.drawEntityBars !== "function") return;
   VIS.barsWrapped = true;
@@ -4201,8 +4239,16 @@ function visFrame(scene) {
   const ry = oy - VIS_RT_TILES * TILE / 2;
   VIS.fogRT.setPosition(rx, ry);
   VIS.darkRT.setPosition(rx, ry);
+  const warmth = visWarmth();
+  if (warmth > 0.01) {
+    VIS.tint.setVisible(true);
+    VIS.tint.setPosition(ox, oy);
+    VIS.tint.setAlpha(warmth * 0.36);
+  } else {
+    VIS.tint.setVisible(false);
+  }
   VIS.fogRT.clear();
-  VIS.fogRT.fill(0x666b78, 0.6);
+  VIS.fogRT.fill(0x666b78, 0.2);
   const g = VIS.polyGfx;
   g.clear();
   const step = 2 * Math.PI / 180;
@@ -4221,8 +4267,8 @@ function visFrame(scene) {
   if (D > 0.004) {
     VIS.darkRT.setVisible(true);
     VIS.darkRT.clear();
-    const dusk = 0x4a2c52;
-    const night = 0x050816;
+    const dusk = 0x4a1c10;
+    const night = 0x000000;
     VIS.darkRT.fill(visLerpColor(dusk, night, Math.pow(D, 1.4)), D * visCfg("darknessMax"));
     for (const light of lights) {
       VIS.lightImg.setScale(light.r * TILE * 2 * VIS_RES / 256);
@@ -4232,6 +4278,7 @@ function visFrame(scene) {
     VIS.darkRT.setVisible(false);
   }
   visUpdateGlows(scene, lights, D);
+  visUpdateGhost(scene, D);
   visApplyGray(scene, VIS.nv ? Math.min(1, D * 1.4) : 0);
   const occupied = {};
   occupied[Math.floor(ox / TILE) + "," + Math.floor(oy / TILE)] = true;
