@@ -1887,7 +1887,7 @@ function walkMusic(dir, rel, out, depth) {
   for (const entry of entries) {
     if (entry.isFile() && /\.ogg$/i.test(entry.name)) {
       const parts = rel.concat([entry.name]);
-      out.push({ name: entry.name.replace(/\.ogg$/i, ""), url: "assets/music/Background/" + parts.map(encodeURIComponent).join("/") });
+      out.push({ name: entry.name.replace(/\.ogg$/i, ""), url: "assets/music/Background/" + parts.map(encodeURIComponent).join("/"), group: rel.length > 0 ? String(rel[0]).toLowerCase() : "" });
     }
   }
   if (depth >= 4) return;

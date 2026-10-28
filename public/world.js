@@ -298,7 +298,18 @@ function worldSyncItems(scene, items) {
   updatePlayerLift();
 }
 
-const MUSIC = { tracks: [], queue: [], current: null, audio: null, state: "stopped", volume: 0.4, unlocked: false, el: null, label: null, playBtn: null };
+const MUSIC = { tracks: [], queue: [], current: null, audio: null, state: "stopped", volume: 0.4, unlocked: false, el: null, label: null, playBtn: null, period: null, fading: [], lastFrame: 0 };
+const MUSIC_FADE_MS = 3000;
+
+function musicCurrentPeriod() {
+  return visDarknessFor(visHourNow()) > 0.02 ? "night" : "day";
+}
+
+function musicPool() {
+  const wantNight = MUSIC.period === "night";
+  const pool = MUSIC.tracks.filter((t) => (t.group === "night") === wantNight);
+  return pool.length > 0 ? pool : MUSIC.tracks;
+}
 
 function musicShuffle(list) {
   const out = list.slice();
@@ -314,7 +325,7 @@ function musicShuffle(list) {
 function musicNextTrack() {
   if (MUSIC.tracks.length === 0) return null;
   if (MUSIC.queue.length === 0) {
-    MUSIC.queue = musicShuffle(MUSIC.tracks);
+    MUSIC.queue = musicShuffle(musicPool());
     if (MUSIC.queue.length > 1 && MUSIC.current && MUSIC.queue[0].url === MUSIC.current.url) {
       const first = MUSIC.queue.shift();
       MUSIC.queue.push(first);
@@ -332,7 +343,8 @@ function musicRefreshUi() {
   else MUSIC.label.textContent = (MUSIC.state === "paused" ? "Paused: " : "Now playing: ") + (MUSIC.current ? MUSIC.current.name : "");
 }
 
-function musicStartTrack() {
+function musicStartTrack(crossfade) {
+  if (MUSIC.period === null) MUSIC.period = musicCurrentPeriod();
   const track = musicNextTrack();
   if (!track) {
     musicRefreshUi();
@@ -340,11 +352,13 @@ function musicStartTrack() {
   }
   if (MUSIC.audio) {
     MUSIC.audio.onended = null;
-    MUSIC.audio.pause();
+    if (crossfade === true && !MUSIC.audio.paused) MUSIC.fading.push(MUSIC.audio);
+    else MUSIC.audio.pause();
   }
   MUSIC.current = track;
   const audio = new Audio(track.url);
-  audio.volume = MUSIC.volume;
+  audio.volume = crossfade === true ? 0 : MUSIC.volume;
+  audio.fadeIn = crossfade === true;
   audio.onended = () => {
     if (MUSIC.state === "playing") musicStartTrack();
   };
@@ -360,6 +374,33 @@ function musicStartTrack() {
       if (MUSIC.audio === audio && MUSIC.state === "playing") MUSIC.state = "blocked";
       musicRefreshUi();
     });
+  }
+}
+
+function musicFrame() {
+  const now = performance.now();
+  const dt = Math.min(500, MUSIC.lastFrame ? now - MUSIC.lastFrame : 16);
+  MUSIC.lastFrame = now;
+  if (MUSIC.tracks.length === 0) return;
+  const period = musicCurrentPeriod();
+  if (MUSIC.period !== null && period !== MUSIC.period) {
+    MUSIC.period = period;
+    MUSIC.queue = [];
+    if (MUSIC.state === "playing") musicStartTrack(true);
+    else if (MUSIC.state === "blocked") musicStartTrack(false);
+  }
+  const step = dt / MUSIC_FADE_MS * MUSIC.volume;
+  for (let i = MUSIC.fading.length - 1; i >= 0; i--) {
+    const old = MUSIC.fading[i];
+    old.volume = Math.max(0, old.volume - step);
+    if (old.volume <= 0.001) {
+      old.pause();
+      MUSIC.fading.splice(i, 1);
+    }
+  }
+  if (MUSIC.audio && MUSIC.audio.fadeIn) {
+    MUSIC.audio.volume = Math.min(MUSIC.volume, MUSIC.audio.volume + step);
+    if (MUSIC.audio.volume >= MUSIC.volume) MUSIC.audio.fadeIn = false;
   }
 }
 
@@ -418,7 +459,7 @@ function musicBuildUi() {
   stopBtn.addEventListener("click", musicStop);
   vol.addEventListener("input", () => {
     MUSIC.volume = Number(vol.value) / 100;
-    if (MUSIC.audio) MUSIC.audio.volume = MUSIC.volume;
+    if (MUSIC.audio && !MUSIC.audio.fadeIn) MUSIC.audio.volume = MUSIC.volume;
     try { localStorage.setItem("pmdMusicVolume", String(MUSIC.volume)); } catch (e) {}
   });
   for (const node of [label, playBtn, nextBtn, stopBtn, vol]) el.appendChild(node);
@@ -723,6 +764,7 @@ document.addEventListener("keydown", (ev) => {
 });
 
 function worldFrame(scene) {
+  musicFrame();
   entityLabelsFrame(scene);
   visFrame(scene);
   if (worldGmMode) {
