@@ -763,10 +763,21 @@ document.addEventListener("keydown", (ev) => {
   }
 });
 
+let worldFrameErrors = 0;
+
+function worldGuard(fn, scene) {
+  try {
+    fn(scene);
+  } catch (e) {
+    worldFrameErrors++;
+    if (worldFrameErrors <= 5) console.error("world frame error", e);
+  }
+}
+
 function worldFrame(scene) {
-  musicFrame();
-  entityLabelsFrame(scene);
-  visFrame(scene);
+  worldGuard(musicFrame, scene);
+  worldGuard(entityLabelsFrame, scene);
+  worldGuard(visFrame, scene);
   if (worldGmMode) {
     gmSyncArt(scene);
     gmUpdateHoverTile(scene);
@@ -3961,8 +3972,10 @@ function visLerpColor(a, b, t) {
 
 function visAngleDiff(a, b) {
   let d = a - b;
-  while (d > Math.PI) d -= Math.PI * 2;
-  while (d < -Math.PI) d += Math.PI * 2;
+  if (!isFinite(d)) return 0;
+  d = d % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
   return d;
 }
 

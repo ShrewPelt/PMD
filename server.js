@@ -1562,6 +1562,76 @@ function notifyItem(layer, col, row, data) {
   sendGms(layer, data);
 }
 
+const JOURNAL_FILE = path.join(WORLD_DIR, "journal.json");
+const JOURNAL_WINDOW_MS = 5 * 60 * 1000;
+const JOURNAL_KEEP_MS = 24 * 60 * 60 * 1000;
+let journal = readJsonFile(JOURNAL_FILE, {});
+if (!journal || typeof journal !== "object" || Array.isArray(journal)) journal = {};
+let journalTimer = null;
+
+function scheduleJournalWrite() {
+  if (journalTimer) return;
+  journalTimer = setTimeout(() => {
+    journalTimer = null;
+    const now = Date.now();
+    for (const key of Object.keys(journal)) {
+      if (now - journal[key].at > JOURNAL_KEEP_MS) delete journal[key];
+    }
+    writeJsonFile(JOURNAL_FILE, journal);
+  }, 400);
+}
+
+function journalSignature(p) {
+  const coins = p._sheet ? Number(p._sheet.coins) || 0 : 0;
+  return JSON.stringify([p._inv, p._reported, p._coinsPending || 0, p._kills || [], p.hp, p.mp, coins]);
+}
+
+function journalPlayer(p) {
+  if (!p._pass || p._npcName) return;
+  journal[p._pass] = {
+    at: Date.now(),
+    inventory: p._inv.map((stack) => ({ name: stack.name, count: stack.count })),
+    reported: p._reported || {},
+    coins: p._sheet ? Number(p._sheet.coins) || 0 : 0,
+    coinsPending: p._coinsPending || 0,
+    kills: Array.isArray(p._kills) ? p._kills.slice() : [],
+    hp: p.hp,
+    mp: p.mp
+  };
+  p._journalSig = journalSignature(p);
+  scheduleJournalWrite();
+}
+
+function journalTick() {
+  for (const id of Object.keys(worldSession.players)) {
+    const p = worldSession.players[id];
+    if (!p || !p._pass || p._npcName) continue;
+    if (journalSignature(p) !== p._journalSig || !journal[p._pass]) {
+      journalPlayer(p);
+    } else {
+      journal[p._pass].at = Date.now();
+    }
+  }
+}
+
+function journalRestore(p, info, pass) {
+  const entry = journal[pass];
+  if (!entry || p._npcName) return false;
+  if (Date.now() - entry.at > JOURNAL_WINDOW_MS) return false;
+  if (!Array.isArray(entry.inventory)) return false;
+  p._inv.length = 0;
+  for (const stack of entry.inventory) {
+    if (stack && stack.name) p._inv.push({ name: String(stack.name), count: Number(stack.count) || 1 });
+  }
+  p._reported = entry.reported && typeof entry.reported === "object" ? entry.reported : countInventory(info.inventory);
+  p._coinsPending = Number(entry.coinsPending) || 0;
+  p._kills = Array.isArray(entry.kills) ? entry.kills.slice() : [];
+  if (p._sheet) p._sheet.coins = Number(entry.coins) || 0;
+  if (Number(entry.hp) > 0) p.hp = Math.min(p.maxHp, Number(entry.hp));
+  if (Number(entry.mp) >= 0) p.mp = Math.min(p.maxMp, Number(entry.mp));
+  return true;
+}
+
 function queueWorldSave(p, final) {
   const current = countInventory(p._inv);
   const delta = {};
@@ -1767,6 +1837,15 @@ function leaveWorldPlayer(id) {
   }
   p._companions = [];
   queueWorldSave(p, true);
+  journalPlayer(p);
+  const passRecord = p._pass ? worldPasses[p._pass] : null;
+  if (passRecord && !p._npcName) {
+    passRecord.inventory = p._inv.map((stack) => ({ name: stack.name, count: stack.count }));
+    if (passRecord.sheet && p._sheet) passRecord.sheet.coins = Number(p._sheet.coins) || 0;
+    passRecord.hp = p.hp;
+    passRecord.mp = p.mp;
+    writeJsonFile(PASSES_FILE, worldPasses);
+  }
   worldState.positions[p._key] = { layer: p.layer, col: p.col, row: p.row, direction: p.direction };
   for (const otherId in p._seen) {
     const q = worldSession.players[otherId];
@@ -2371,6 +2450,7 @@ function syncPlayerInventory(p) {
   sendPlayer(p, { type: "inv_sync", inventory: p._inv.map((s) => ({ name: s.name, count: s.count })), sheet: clientSheet(p._sheet) });
   sendGms(null, { type: "gm_player", player: publicPlayer(p) });
   queueWorldSave(p, false);
+  journalPlayer(p);
   checkLightChange(p);
 }
 
@@ -3363,6 +3443,11 @@ function startWorldPlayer(socket, pass, info, spawn) {
     _lastActive: Date.now(),
     _idleWarned: false
   };
+  const restored = journalRestore(p, info, pass);
+  if (restored) {
+    p._kills = p._kills || [];
+    sendSocket(socket, { type: "item_result", ok: true, text: "Your inventory was restored from your last session." });
+  }
   worldSession.players[id] = p;
   refreshVisibility(p);
 
@@ -3376,11 +3461,12 @@ function startWorldPlayer(socket, pass, info, spawn) {
   players[id] = publicPlayer(p);
   sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W, p.row - VIEW_HALF_H, w, h), inventory: inventory, sheet: clientSheet(p._sheet), itemFx: ITEM_FX, vision: VISION });
   sendPlayer(p, timeMessage());
-  p._kills = [];
+  if (!restored) p._kills = [];
   p._reportedHp = p.hp;
   p._reportedMp = p.mp;
   sendView(p);
   sendGms(null, { type: "gm_player", player: publicPlayer(p) });
+  journalPlayer(p);
   spawnCompanions(p, info);
   sendLayerSummaries();
 
@@ -3453,6 +3539,7 @@ function startWorldPlayer(socket, pass, info, spawn) {
         }
         notifyItem(me.layer, it.col, it.row, { type: "itemremoved", col: it.col, row: it.row });
         sendPlayer(me, { type: "pickedup", name: it.name });
+        journalPlayer(me);
       }
     } else if (data.type === "drop") {
       if (worldCombat.isInFight(me)) {
@@ -3482,6 +3569,7 @@ function startWorldPlayer(socket, pass, info, spawn) {
       worldSession.floorItems.push({ layer: me.layer, col: me.col, row: me.row, name: name });
       notifyItem(me.layer, me.col, me.row, { type: "itemadded", col: me.col, row: me.row, name: name });
       sendPlayer(me, { type: "dropok", name: name });
+      journalPlayer(me);
     } else if (data.type === "chat") {
       const text = String(data.text || "").slice(0, 200);
       const message = { type: "chat", id: me.id, dex: me.dex, name: me.name, text: text };
@@ -3527,6 +3615,8 @@ setInterval(entityTick, ENTITY_TICK_MS);
 setInterval(idleTick, 2000);
 setInterval(fireTick, 5000);
 setInterval(lightCarryTick, 2000);
+setInterval(journalTick, 2000);
+setInterval(scheduleJournalWrite, 30000);
 setInterval(broadcastTime, 20000);
 setInterval(companionFollowTick, COMPANION_FOLLOW_MS);
 setInterval(saveEntitiesNow, WORLD_SAVE_INTERVAL);
