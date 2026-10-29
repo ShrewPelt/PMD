@@ -1671,6 +1671,7 @@ function gmBuildPanel() {
     + "<div style='margin-top:4px'>Sensor range <input type='number' id='wgESensor' value='5' min='1' max='5'> (enemies, max 5)</div>"
     + "<div id='wgEEnemyBox' style='margin-top:6px;padding:6px;border:1px solid #55557a;border-radius:6px'>"
     + "<div><b>Enemy build</b></div>"
+    + "<div style='margin-top:4px'>When it faints <select id='wgERespawnMode'><option value='once'>Fight once (gone for good)</option><option value='timed'>Comes back after a while</option></select> <input type='number' id='wgERespawnSec' value='300' min='1' max='604800' style='width:70px'> sec</div>"
     + "<div style='margin-top:4px'><label><input type='checkbox' id='wgEBoss'> Boss (no body left behind, items are only for its own use)</label></div>"
     + "<div style='margin-top:4px'>IVs 0-31 (blank = 15):<br>"
     + "HP <input type='number' class='wgIv' id='wgEIvHp' min='0' max='31' style='width:44px'> "
@@ -1859,6 +1860,7 @@ function gmReadCreatureForm(existing, col, row) {
     sensor: document.getElementById("wgESensor").value,
     lines: document.getElementById("wgELines").value.split("\n"),
     boss: document.getElementById("wgEBoss").checked,
+    respawn: document.getElementById("wgERespawnMode").value === "timed" ? (parseInt(document.getElementById("wgERespawnSec").value, 10) || 300) : 0,
     ivs: gmReadIvs(),
     accessories: { head: document.getElementById("wgEAccHead").value, neck: document.getElementById("wgEAccNeck").value, back: document.getElementById("wgEAccBack").value },
     loot: gmParseLoot(document.getElementById("wgEItems").value),
@@ -1885,6 +1887,8 @@ function gmShowSelection() {
   document.getElementById("wgESensor").value = picked.sensor;
   document.getElementById("wgELines").value = (picked.lines || []).join("\n");
   document.getElementById("wgEBoss").checked = !!picked.boss;
+  document.getElementById("wgERespawnMode").value = picked.respawn > 0 ? "timed" : "once";
+  if (picked.respawn > 0) document.getElementById("wgERespawnSec").value = picked.respawn;
   for (const pair of GM_IV_FIELDS) {
     document.getElementById(pair[1]).value = picked.ivs && typeof picked.ivs[pair[0]] === "number" ? picked.ivs[pair[0]] : "";
   }
@@ -3140,7 +3144,7 @@ function atkOpen(target) {
   atkMenuEl.innerHTML = "";
   const title = document.createElement("div");
   title.className = "atkTitle";
-  title.textContent = (target.type === "player" ? "Challenge " : "Attack ") + target.name + " (" + dist + " tile" + (dist === 1 ? "" : "s") + " away). Pick a move:";
+  title.textContent = (target.type === "player" ? "Challenge " : target.type === "dummy" ? "Practice on " : "Attack ") + target.name + " (" + dist + " tile" + (dist === 1 ? "" : "s") + " away). Pick a move:";
   atkMenuEl.appendChild(title);
   if (infos.length === 0) {
     const none = document.createElement("div");
@@ -3159,6 +3163,10 @@ function atkOpen(target) {
     btn.textContent = (i + 1) + ". " + m.name + " | " + m.type + " " + m.category + (m.power > 0 ? " P" + m.power : "") + " | MP " + m.mpCost + " | R" + m.range + note;
     btn.disabled = blocked;
     btn.addEventListener("click", () => {
+      if (target.type === "dummy") {
+        gmSend({ type: "dummy_attack", col: target.col, row: target.row, move: i });
+        return;
+      }
       gmSend({ type: "attack_start", targetType: target.type, id: target.id, move: i });
       atkClose();
     });
@@ -3197,11 +3205,56 @@ function atkPointer(scene, pointer) {
       atkOpenLight(lightable);
       return;
     }
+    const dummy = atkFindDummy(clickCol, clickRow);
+    if (dummy) {
+      atkOpen(dummy);
+      return;
+    }
     if (farmClickTry(clickCol, clickRow)) return;
     atkClose();
     return;
   }
   atkOpen(target);
+}
+
+function atkFindDummy(c, r) {
+  if (!worldLastView) return null;
+  for (const o of worldLastView.objects || []) {
+    if (o.col !== c || o.row !== r) continue;
+    if (String(o.name).toLowerCase() === "dummy") return { id: "dummy", type: "dummy", name: "Dummy", col: c, row: r };
+  }
+  return null;
+}
+
+function dummyFloatText(data) {
+  if (!sceneRef) return;
+  const label = data.damage > 0 ? String(data.damage) : "0";
+  const txt = sceneRef.add.text(data.col * TILE + TILE / 2, data.row * TILE - 4, label, { fontFamily: "monospace", fontSize: "22px", fontStyle: "bold", color: data.damage > 0 ? "#ffd84a" : "#cfcfcf", stroke: "#000000", strokeThickness: 4 });
+  txt.setOrigin(0.5, 1);
+  txt.setDepth(400);
+  sceneRef.tweens.add({
+    targets: txt,
+    y: txt.y - 46,
+    alpha: 0,
+    duration: 1200,
+    ease: "Cubic.easeOut",
+    onComplete: () => txt.destroy()
+  });
+  bushWobble(sceneRef, { col: data.col, row: data.row, ms: 450 });
+}
+
+function dummyMessage(data) {
+  if (data.type === "dummy_result") {
+    const lines = Array.isArray(data.lines) ? data.lines : [];
+    itemToast(data.move + " dealt " + data.damage + " damage to the Dummy." + (lines.length ? " " + lines.join(" ") : ""));
+    updateReadout(data.move + " dealt " + data.damage + " damage to the Dummy.");
+    return true;
+  }
+  if (data.type === "dummy_hit") {
+    dummyFloatText(data);
+    return true;
+  }
+  return false;
 }
 
 function atkFindLightable(c, r) {
@@ -4517,6 +4570,7 @@ window.worldHook = function (scene, data) {
     else if (inventoryOpen) refreshInventoryPanel();
     return true;
   }
+  if (dummyMessage(data)) return true;
   if (farmMessage(data)) return true;
   if (freeMessage(data)) return true;
   if (chestMessage(data)) return true;

@@ -2185,41 +2185,134 @@ function companionFollowTick() {
   }
 }
 
+function findWorldNpcEntity(npcName) {
+  const want = String(npcName || "").trim().toLowerCase();
+  if (!want) return null;
+  for (const id in entities) {
+    const e = entities[id];
+    if (e.kind !== "npc") continue;
+    if (String(e.name || "").trim().toLowerCase() === want) return e;
+  }
+  return null;
+}
+
+function restoreNpcEntity(p) {
+  const want = String(p._npcName || "").trim();
+  if (!want) return;
+  if (findWorldNpcEntity(want)) return;
+  const tpl = p._npcTpl || null;
+  const sheet = p._sheet || {};
+  const found = speciesDexLower[String(sheet.species || (tpl && tpl.species) || "").toLowerCase()] || null;
+  const id = "e" + entityNextId;
+  entityNextId = entityNextId + 1;
+  const spot = worldFreeSpot(p.layer, p.col, p.row, p.id);
+  const e = {
+    id: id,
+    kind: "npc",
+    name: tpl && tpl.name ? tpl.name : want,
+    species: found ? found.name : (tpl ? tpl.species : sheet.species || ""),
+    dex: found ? found.dex : (tpl ? tpl.dex : p.dex),
+    level: Math.max(1, Math.min(100, parseInt(sheet.level, 10) || (tpl ? tpl.level : 5))),
+    layer: p.layer,
+    col: spot.col,
+    row: spot.row,
+    homeCol: spot.col,
+    homeRow: spot.row,
+    direction: p.direction || "down",
+    state: "idle",
+    wander: tpl && Number.isInteger(tpl.wander) ? tpl.wander : DEFAULT_WANDER,
+    sensor: tpl && Number.isInteger(tpl.sensor) ? tpl.sensor : DEFAULT_SENSOR,
+    lines: tpl && Array.isArray(tpl.lines) ? tpl.lines : [],
+    boss: false,
+    ivs: tpl ? tpl.ivs || null : null,
+    accessories: tpl ? tpl.accessories || null : null,
+    loot: tpl && Array.isArray(tpl.loot) ? tpl.loot : [],
+    moves: tpl && Array.isArray(tpl.moves) ? tpl.moves : [],
+    respawn: 0,
+    _nextSpeech: Date.now() + SPEECH_MIN_MS,
+    _lineIdx: 0
+  };
+  entities[id] = e;
+  broadcastEntity(e, null, 0, 0);
+  scheduleEntitySave();
+}
+
 function leaveWorldPlayer(id, skipPenalty) {
   const p = worldSession.players[id];
   if (!p) return false;
-  const wasInFight = worldCombat.isInFight(p);
-  if (wasInFight && !skipPenalty && !p._npcName) {
-    combatLogs[p._key] = Date.now();
-    saveCombatLogs();
-  }
-  worldCombat.onPlayerLeave(p);
-  for (const ce of companionsOf(p)) {
-    queueCompanionSave(ce, true);
-    removeEntity(ce.id);
-  }
-  p._companions = [];
-  queueWorldSave(p, true);
-  journalPlayer(p);
-  const passRecord = p._pass ? worldPasses[p._pass] : null;
-  if (passRecord && !p._npcName) {
-    passRecord.inventory = p._inv.map((stack) => ({ name: stack.name, count: stack.count }));
-    if (passRecord.sheet && p._sheet) passRecord.sheet.coins = Number(p._sheet.coins) || 0;
-    passRecord.hp = p.hp;
-    passRecord.mp = p.mp;
-    writeJsonFile(PASSES_FILE, worldPasses);
-  }
-  worldState.positions[p._key] = { layer: p.layer, col: p.col, row: p.row, direction: p.direction };
-  for (const otherId in p._seen) {
-    const q = worldSession.players[otherId];
-    if (q) {
-      delete q._seen[id];
-      sendPlayer(q, { type: "leave", id: id });
+  try {
+    const wasInFight = worldCombat.isInFight(p);
+    if (wasInFight && !skipPenalty && !p._npcName) {
+      combatLogs[p._key] = Date.now();
+      saveCombatLogs();
     }
+  } catch (err) {
+    console.error("leave: combat log step failed", err);
+  }
+  try {
+    worldCombat.onPlayerLeave(p);
+  } catch (err) {
+    console.error("leave: combat cleanup failed", err);
+  }
+  try {
+    for (const ce of companionsOf(p)) {
+      queueCompanionSave(ce, true);
+      removeEntity(ce.id);
+    }
+    p._companions = [];
+  } catch (err) {
+    console.error("leave: companion step failed", err);
+  }
+  try {
+    queueWorldSave(p, true);
+  } catch (err) {
+    console.error("leave: world save step failed", err);
+  }
+  try {
+    journalPlayer(p);
+  } catch (err) {
+    console.error("leave: journal step failed", err);
+  }
+  try {
+    const passRecord = p._pass ? worldPasses[p._pass] : null;
+    if (passRecord && !p._npcName) {
+      passRecord.inventory = p._inv.map((stack) => ({ name: stack.name, count: stack.count }));
+      if (passRecord.sheet && p._sheet) passRecord.sheet.coins = Number(p._sheet.coins) || 0;
+      passRecord.hp = p.hp;
+      passRecord.mp = p.mp;
+      writeJsonFile(PASSES_FILE, worldPasses);
+    }
+  } catch (err) {
+    console.error("leave: pass record step failed", err);
+  }
+  try {
+    worldState.positions[p._key] = { layer: p.layer, col: p.col, row: p.row, direction: p.direction };
+  } catch (err) {
+    console.error("leave: position step failed", err);
+  }
+  try {
+    for (const otherId in p._seen) {
+      const q = worldSession.players[otherId];
+      if (q) {
+        delete q._seen[id];
+        sendPlayer(q, { type: "leave", id: id });
+      }
+    }
+  } catch (err) {
+    console.error("leave: visibility step failed", err);
   }
   delete worldSession.players[id];
-  sendGms(null, { type: "gm_player_leave", id: id });
-  saveWorldState();
+  try {
+    if (p._npcName) restoreNpcEntity(p);
+  } catch (err) {
+    console.error("leave: npc restore failed", err);
+  }
+  try {
+    sendGms(null, { type: "gm_player_leave", id: id });
+    saveWorldState();
+  } catch (err) {
+    console.error("leave: final step failed", err);
+  }
   return true;
 }
 
@@ -2435,6 +2528,8 @@ for (const saved of Array.isArray(entityStore.list) ? entityStore.list : []) {
   entities[saved.id] = saved;
 }
 
+const respawnQueue = Array.isArray(entityStore.respawns) ? entityStore.respawns.filter((r) => r && r.tpl && typeof r.at === "number") : [];
+
 let entitySaveTimer = null;
 
 function saveEntitiesNow() {
@@ -2446,9 +2541,9 @@ function saveEntitiesNow() {
   for (const id of Object.keys(entities)) {
     const e = entities[id];
     if (e.kind === "companion") continue;
-    list.push({ id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, fainted: e.fainted || false, faintUntil: e.faintUntil || 0 });
+    list.push({ id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, fainted: e.fainted || false, faintUntil: e.faintUntil || 0 });
   }
-  writeJsonFile(ENTITIES_FILE, { nextId: entityNextId, list: list });
+  writeJsonFile(ENTITIES_FILE, { nextId: entityNextId, list: list, respawns: respawnQueue });
 }
 
 function scheduleEntitySave() {
@@ -2462,7 +2557,7 @@ function publicEntity(e) {
 }
 
 function gmEntity(e) {
-  return { id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, state: e.state, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, fainted: !!e.fainted };
+  return { id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, state: e.state, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, fainted: !!e.fainted };
 }
 
 function entityAt(layer, col, row, ignoreId) {
@@ -2590,8 +2685,46 @@ function nearestPlayerTo(e) {
   return best ? { player: best, dist: bestDist } : null;
 }
 
+function queueEnemyRespawn(e) {
+  if (!e || e.kind !== "enemy") return;
+  const seconds = parseInt(e.respawn, 10);
+  if (!Number.isInteger(seconds) || seconds <= 0) return;
+  const tpl = { kind: "enemy", name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, homeCol: e.homeCol, homeRow: e.homeRow, direction: "down", wander: e.wander, sensor: e.sensor, lines: [], boss: !!e.boss, ivs: e.ivs ? JSON.parse(JSON.stringify(e.ivs)) : null, accessories: e.accessories ? JSON.parse(JSON.stringify(e.accessories)) : null, loot: Array.isArray(e.loot) ? JSON.parse(JSON.stringify(e.loot)) : [], moves: Array.isArray(e.moves) ? e.moves.slice() : [], respawn: seconds };
+  respawnQueue.push({ srcId: e.id, at: Date.now() + seconds * 1000, tpl: tpl });
+  scheduleEntitySave();
+}
+
+function cancelEnemyRespawn(srcId) {
+  let changed = false;
+  for (let i = respawnQueue.length - 1; i >= 0; i--) {
+    if (respawnQueue[i].srcId === srcId) {
+      respawnQueue.splice(i, 1);
+      changed = true;
+    }
+  }
+  if (changed) scheduleEntitySave();
+}
+
+function respawnTick(now) {
+  for (let i = respawnQueue.length - 1; i >= 0; i--) {
+    const r = respawnQueue[i];
+    if (now < r.at) continue;
+    const t = r.tpl;
+    const spot = worldFreeSpot(t.layer, t.homeCol, t.homeRow, null);
+    if (!spot) continue;
+    respawnQueue.splice(i, 1);
+    const id = "e" + entityNextId;
+    entityNextId = entityNextId + 1;
+    const e = { id: id, kind: "enemy", name: t.name, species: t.species, dex: t.dex, level: t.level, layer: t.layer, col: spot.col, row: spot.row, homeCol: t.homeCol, homeRow: t.homeRow, direction: "down", state: "idle", wander: t.wander, sensor: t.sensor, lines: [], boss: t.boss, ivs: t.ivs, accessories: t.accessories, loot: t.loot, moves: t.moves, respawn: t.respawn, _nextSpeech: now + SPEECH_MIN_MS, _lineIdx: 0 };
+    entities[id] = e;
+    broadcastEntity(e, null, 0, 0);
+    scheduleEntitySave();
+  }
+}
+
 function entityTick() {
   const now = Date.now();
+  respawnTick(now);
   for (const id in entities) {
     const e = entities[id];
     if (e.down) {
@@ -2780,6 +2913,8 @@ function handleGmEntitySet(gm, data) {
     e.loot = cleanLoot(src.loot);
     const moveCheck = cleanEnemyMoves(src.moves);
     e.moves = moveCheck.moves;
+    const respawnSeconds = parseInt(src.respawn, 10);
+    e.respawn = kind === "enemy" && Number.isInteger(respawnSeconds) && respawnSeconds > 0 ? Math.min(respawnSeconds, 604800) : 0;
     if (moveCheck.unknown.length > 0) sendSocket(gm.socket, { type: "gm_notice", text: "Unknown moves ignored: " + moveCheck.unknown.join(", ") });
   }
   e.state = "idle";
@@ -3584,6 +3719,12 @@ function farmOptionsAt(p, col, row, sel) {
 function farmInReach(p, col, row) {
   const reach = Number(FARM.reach) || 2;
   return Math.max(Math.abs(p.col - col), Math.abs(p.row - row)) <= reach;
+}
+
+function isDummyAt(layer, col, row) {
+  const L = layers[layer];
+  const obj = L ? L.objects[col + "," + row] : null;
+  return !!obj && String(obj.name).toLowerCase() === "dummy";
 }
 
 function handleFarmQuery(p, data) {
@@ -4744,7 +4885,10 @@ function handleGmMessage(gm, data) {
   }
 
   if (data.type === "gm_entity_del") {
-    if (typeof data.id === "string" && !(entities[data.id] && entities[data.id].kind === "companion")) removeEntity(data.id);
+    if (typeof data.id === "string" && !(entities[data.id] && entities[data.id].kind === "companion")) {
+      cancelEnemyRespawn(data.id);
+      removeEntity(data.id);
+    }
     return;
   }
 
@@ -5043,6 +5187,12 @@ function handleWorldConnection(socket, pass) {
   forceLeaveUser(info.userId, "You opened the world in another window.");
   closePendingSpawn(info.userId);
 
+  const takeover = info.npcName ? findWorldNpcEntity(info.npcName) : null;
+  if (takeover) {
+    startWorldPlayer(socket, pass, info, null);
+    return;
+  }
+
   const preKey = info.userId + "|" + info.name;
   const preSaved = worldState.positions[preKey];
   const preLayer = preSaved && Number.isInteger(preSaved.layer) ? preSaved.layer : 0;
@@ -5113,6 +5263,22 @@ function startWorldPlayer(socket, pass, info, spawn) {
       startRow = saved.row;
     }
   }
+  let takenTpl = null;
+  let takenDirection = null;
+  if (info.npcName) {
+    const worldNpc = findWorldNpcEntity(info.npcName);
+    if (worldNpc) {
+      takenTpl = { name: worldNpc.name, species: worldNpc.species, dex: worldNpc.dex, level: worldNpc.level, wander: worldNpc.wander, sensor: worldNpc.sensor, lines: Array.isArray(worldNpc.lines) ? worldNpc.lines.slice() : [], ivs: worldNpc.ivs || null, accessories: worldNpc.accessories || null, loot: Array.isArray(worldNpc.loot) ? worldNpc.loot : [], moves: Array.isArray(worldNpc.moves) ? worldNpc.moves : [] };
+      takenDirection = worldNpc.direction || null;
+      layer = worldNpc.layer;
+      startCol = worldNpc.col;
+      startRow = worldNpc.row;
+      if (worldNpc._fight) {
+        try { worldCombat.onEntityRemoved(worldNpc); } catch (err) {}
+      }
+      removeEntity(worldNpc.id);
+    }
+  }
   const start = worldFreeSpot(layer, startCol, startRow, id);
   const inventory = info.inventory.map((e) => ({ name: e.name, count: e.count }));
 
@@ -5121,7 +5287,7 @@ function startWorldPlayer(socket, pass, info, spawn) {
     layer: layer,
     col: start.col,
     row: start.row,
-    direction: saved && saved.direction ? saved.direction : "down",
+    direction: takenDirection || (saved && saved.direction ? saved.direction : "down"),
     dex: info.dex,
     name: info.name,
     userId: info.userId,
@@ -5132,6 +5298,7 @@ function startWorldPlayer(socket, pass, info, spawn) {
     _key: key,
     _slot: info.slot,
     _npcName: info.npcName || null,
+    _npcTpl: takenTpl,
     _pass: pass,
     _sheet: info.sheet || cleanSheet({}),
     _inv: inventory,
@@ -5215,6 +5382,8 @@ function startWorldPlayer(socket, pass, info, spawn) {
       handleInvCombine(me, data);
     } else if (data.type === "inv_drop") {
       handleInvDrop(me, data);
+    } else if (data.type === "dummy_attack") {
+      worldCombat.dummyAttack(me, data);
     } else if (data.type === "farm_query") {
       handleFarmQuery(me, data);
     } else if (data.type === "farm_do") {
@@ -5344,7 +5513,10 @@ worldCombat.init({
   teleportPlayer: teleportPlayer,
   companionsOf: companionsOf,
   queueCompanionSave: queueCompanionSave,
-  queueWorldSave: queueWorldSave
+  queueWorldSave: queueWorldSave,
+  queueEnemyRespawn: queueEnemyRespawn,
+  cellInView: cellInView,
+  isDummyAt: isDummyAt
 });
 
 setInterval(saveWorldState, WORLD_SAVE_INTERVAL);

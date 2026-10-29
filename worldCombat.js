@@ -423,6 +423,80 @@ function sheetMoveInfo(sheet) {
   return out;
 }
 
+const DUMMY_SPECIES = "Ditto";
+const DUMMY_LEVEL = 50;
+const DUMMY_COOLDOWN_MS = 700;
+const DUMMY_HP = 999999;
+
+function dummyAttack(p, data) {
+  if (!data || typeof data !== "object") return;
+  if (isInFight(p)) {
+    notice(p, "You can't train during a battle.");
+    return;
+  }
+  const col = parseInt(data.col, 10);
+  const row = parseInt(data.row, 10);
+  if (!Number.isInteger(col) || !Number.isInteger(row) || !ctx.isDummyAt(p.layer, col, row)) {
+    notice(p, "There is no dummy there.");
+    return;
+  }
+  const now = Date.now();
+  if (p._dummyAt && now - p._dummyAt < DUMMY_COOLDOWN_MS) return;
+  const sheet = p._sheet || {};
+  const moveIdx = parseInt(data.move, 10);
+  const moveRaw = Array.isArray(sheet.moves) ? sheet.moves[moveIdx] : null;
+  const moveName = moveRaw ? (typeof moveRaw === "string" ? moveRaw : moveRaw.name) : null;
+  if (!moveName) {
+    notice(p, "Pick one of your moves.");
+    return;
+  }
+  if (moveRaw && moveRaw.name && moveRaw.data) registerMove(moveRaw.name, moveRaw.data);
+  if (UNSUPPORTED_MOVES[moveName]) {
+    notice(p, `${moveName} can't be used in the open world yet.`);
+    return;
+  }
+  const md = engine.getMoveData(moveName);
+  if (!md) {
+    notice(p, "That move has no data.");
+    return;
+  }
+  const targetKind = md.target || "enemy";
+  if (targetKind === "self" || targetKind === "all-allies" || targetKind === "ally") {
+    notice(p, `${moveName} can't be used on a dummy.`);
+    return;
+  }
+  const dist = chebyshev(p.col, p.row, col, row);
+  if (dist > rangeOf(md)) {
+    notice(p, `The dummy is out of range for ${moveName} (${dist} tiles, range ${rangeOf(md)}).`);
+    return;
+  }
+  p._dummyAt = now;
+  const dc = col - p.col;
+  const dr = row - p.row;
+  if (dc !== 0 || dr !== 0) {
+    p.direction = Math.abs(dc) >= Math.abs(dr) ? (dc > 0 ? "right" : "left") : (dr > 0 ? "down" : "up");
+    ctx.broadcastFacing(p);
+  }
+  const attacker = buildPlayerCombatant(p);
+  attacker.mp = attacker.maxMp;
+  attacker.energy = 0;
+  const dummy = engine.makeWildPokemon(DUMMY_SPECIES, DUMMY_LEVEL);
+  dummy.name = "Dummy";
+  dummy.maxHp = DUMMY_HP;
+  dummy.hp = DUMMY_HP;
+  dummy.energy = 0;
+  const result = engine.applyMove(attacker, dummy, moveName);
+  const damage = Math.max(0, DUMMY_HP - dummy.hp);
+  const lines = Array.isArray(result.log) ? result.log.slice(0, 8) : [];
+  ctx.sendPlayer(p, { type: "dummy_result", col: col, row: row, move: moveName, damage: damage, lines: lines });
+  const hit = { type: "dummy_hit", col: col, row: row, damage: damage, by: p.name, move: moveName };
+  for (const id in ctx.worldSession.players) {
+    const q = ctx.worldSession.players[id];
+    if (q.id !== p.id && ctx.cellInView(q, p.layer, col, row)) ctx.sendPlayer(q, hit);
+  }
+  ctx.sendPlayer(p, hit);
+}
+
 function startDuel(p, data) {
   if (!data || typeof data !== "object") return;
   if (p._fight && fights[p._fight]) {
@@ -609,6 +683,7 @@ function downEnemy(f, A) {
     ctx.scheduleEntitySave();
     return;
   }
+  if (ctx.queueEnemyRespawn) ctx.queueEnemyRespawn(e);
   const loot = Array.isArray(e.loot) ? e.loot.filter((stack) => stack && stack.count > 0) : [];
   if (!e.boss && loot.length > 0) {
     e.kind = "corpse";
@@ -1816,4 +1891,4 @@ function shutdown() {
   for (const id of Object.keys(fights)) endFight(fights[id], "shutdown");
 }
 
-module.exports = { init, startDuel, sheetMoveInfo, tick, handleMessage, canPlayerMove, afterPlayerMove, onPlayerLeave, onEntityRemoved, fightOf, isInFight, shutdown, useItemOutside, RESPAWN_MS };
+module.exports = { init, startDuel, dummyAttack, sheetMoveInfo, tick, handleMessage, canPlayerMove, afterPlayerMove, onPlayerLeave, onEntityRemoved, fightOf, isInFight, shutdown, useItemOutside, RESPAWN_MS };
