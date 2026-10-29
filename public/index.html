@@ -626,6 +626,7 @@ function create() {
   kb.on("keydown-K", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 3 }); });
   kb.on("keydown-L", (e) => { if (e.repeat || chatActive) return; lockAction(this, { type: "attack", slot: 4 }); });
   kb.on("keydown-T", (e) => { if (e.repeat || chatActive || isGM) return; if (typeof itemMenuTry === "function" && itemMenuTry()) return; if (typeof worldInteract === "function") worldInteract(); });
+  kb.on("keydown-C", (e) => { if (e.repeat || chatActive || isGM) return; if (typeof craftToggle === "function") craftToggle(); });
   kb.on("keydown-I", (e) => { if (e.repeat || chatActive) return; toggleInventory(); });
   kb.on("keydown-F", (e) => { if (e.repeat || chatActive || isGM) return; attemptPickup(); });
   kb.on("keydown-G", (e) => { if (e.repeat || chatActive || isGM) return; attemptDrop(); });
@@ -1412,6 +1413,16 @@ function buildInventoryGrid() {
         badge.className = "badge";
         badge.textContent = stack.count;
         cell.appendChild(badge);
+      }
+      const canText = typeof farmCanSlotText === "function" ? farmCanSlotText(stack.name) : "";
+      if (canText) {
+        const waterBadge = document.createElement("div");
+        waterBadge.className = "badge";
+        waterBadge.style.top = "auto";
+        waterBadge.style.bottom = "2px";
+        waterBadge.style.color = "#7fd0ff";
+        waterBadge.textContent = canText;
+        cell.appendChild(waterBadge);
       }
       cell.style.cursor = "pointer";
       if (i === selectedSlot) {

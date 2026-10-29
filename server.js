@@ -1111,6 +1111,12 @@ function objectsInWindow(layer, c0, r0, w, h) {
   for (let r = r0; r < r0 + h; r++) {
     for (let c = c0; c < c0 + w; c++) {
       const obj = L.objects[c + "," + r];
+      if (!obj) {
+        const farmPlot = farmState.plots[layer + "," + c + "," + r];
+        if (farmPlot) {
+          for (const entry of farmPlotEntries(layer, c, r, farmPlot)) out.push(entry);
+        }
+      }
       if (obj) {
         const walk = !obj.solid || !!(L.passable && L.passable[c + "," + r]);
         const blocks = !walk && VISION_BLOCK_RE !== null && VISION_BLOCK_RE.test(obj.name);
@@ -1364,6 +1370,7 @@ function broadcastTime() {
 }
 
 function handleGmTime(gm, data) {
+  farmClockCheck();
   const now = Date.now();
   const currentHour = clockHour();
   if (typeof data.dayMinutes === "number" && isFinite(data.dayMinutes) && data.dayMinutes >= 1 && data.dayMinutes <= 1440) {
@@ -1379,7 +1386,10 @@ function handleGmTime(gm, data) {
   if (typeof data.hour === "number" && isFinite(data.hour)) {
     worldClock.baseHour = ((data.hour % 24) + 24) % 24;
     worldClock.baseAt = now;
+    farmClockJump(currentHour, clockHour());
   }
+  farmState.lastHour = clockHour();
+  farmState.lastAt = now;
   saveClock();
   broadcastTime();
 }
@@ -1582,13 +1592,10 @@ function handleInvCombine(p, data) {
     syncPlayerInventory(p);
     return;
   }
-  const na = String(first.name).toLowerCase();
-  const nb = String(second.name).toLowerCase();
   let recipe = null;
-  for (const r of VISION.combineRecipes) {
-    const ra = String(r.a).toLowerCase();
-    const rb = String(r.b).toLowerCase();
-    if ((ra === na && rb === nb) || (ra === nb && rb === na)) {
+  const allRecipes = VISION.combineRecipes.concat(FARM.combineRecipes);
+  for (const r of allRecipes) {
+    if ((farmNameMatches(r.a, first.name) && farmNameMatches(r.b, second.name)) || (farmNameMatches(r.a, second.name) && farmNameMatches(r.b, first.name))) {
       recipe = r;
       break;
     }
@@ -1604,30 +1611,37 @@ function handleInvCombine(p, data) {
     syncPlayerInventory(p);
     return;
   }
+  const chargeNeeded = Number(recipe.charge) || 0;
+  if (chargeNeeded > 0 && farmCanWater(p) < chargeNeeded) {
+    sendPlayer(p, { type: "item_result", ok: false, text: "Your Watering Can is empty. Fill it at a water source first." });
+    syncPlayerInventory(p);
+    return;
+  }
   const count = Math.max(1, Number(recipe.resultCount) || 1);
-  let resultStack = null;
-  for (const stack of p._inv) {
-    if (String(stack.name).toLowerCase() === String(recipe.result).toLowerCase()) resultStack = stack;
-  }
-  let freed = 0;
-  const consumeNames = [];
-  if (recipe.consumeA) consumeNames.push(String(recipe.a));
-  if (recipe.consumeB) consumeNames.push(String(recipe.b));
-  for (const cn of consumeNames) {
-    for (const stack of p._inv) {
-      if (String(stack.name).toLowerCase() === cn.toLowerCase() && stack.count <= 1) freed++;
-    }
-  }
-  if (!resultStack && p._inv.length - freed >= capacityOf(p)) {
+  const resultName = farmItem(recipe.result);
+  const returnList = Array.isArray(recipe.returns) ? recipe.returns : [];
+  const takes = [];
+  if (recipe.consumeA) takes.push({ spec: recipe.a, count: 1 });
+  if (recipe.consumeB) takes.push({ spec: recipe.b, count: 1 });
+  const gives = [{ spec: resultName, count: count }];
+  for (const x of returnList) gives.push({ spec: x.item, count: Number(x.count) || 1 });
+  if (!farmInvFits(p, takes, gives)) {
     sendPlayer(p, { type: "item_result", ok: false, text: "Your bag is full." });
     syncPlayerInventory(p);
     return;
   }
+  let resultStack = null;
+  for (const stack of p._inv) {
+    if (String(stack.name).toLowerCase() === resultName.toLowerCase()) resultStack = stack;
+  }
   let insertAt = -1;
-  for (const cn of consumeNames) {
+  const consumeSpecs = [];
+  if (recipe.consumeA) consumeSpecs.push(recipe.a);
+  if (recipe.consumeB) consumeSpecs.push(recipe.b);
+  for (const spec of consumeSpecs) {
     for (let i = 0; i < p._inv.length; i++) {
       const stack = p._inv[i];
-      if (String(stack.name).toLowerCase() === cn.toLowerCase()) {
+      if (farmNameMatches(spec, stack.name)) {
         stack.count = stack.count - 1;
         if (stack.count <= 0) {
           p._inv.splice(i, 1);
@@ -1640,12 +1654,14 @@ function handleInvCombine(p, data) {
   if (resultStack && p._inv.indexOf(resultStack) !== -1) {
     resultStack.count = resultStack.count + count;
   } else {
-    const entry = { name: recipe.result, count: count };
+    const entry = { name: resultName, count: count };
     if (insertAt === -1 || insertAt > p._inv.length) p._inv.push(entry);
     else p._inv.splice(insertAt, 0, entry);
   }
+  for (const x of returnList) farmInvGive(p, x.item, Number(x.count) || 1);
+  if (chargeNeeded > 0) farmSetCanWater(p, farmCanWater(p) - chargeNeeded);
   syncPlayerInventory(p);
-  sendPlayer(p, { type: "item_result", ok: true, text: recipe.text || ("You made " + recipe.result + ".") });
+  sendPlayer(p, { type: "item_result", ok: true, text: recipe.text || ("You made " + resultName + ".") });
 }
 
 function handleInvDrop(p, data) {
@@ -2789,6 +2805,7 @@ function inspectPayload(t) {
 
 function syncPlayerInventory(p) {
   sendPlayer(p, { type: "inv_sync", inventory: p._inv.map((s) => ({ name: s.name, count: s.count })), sheet: clientSheet(p._sheet) });
+  sendFarmCan(p);
   sendGms(null, { type: "gm_player", player: publicPlayer(p) });
   queueWorldSave(p, false);
   journalPlayer(p);
@@ -2908,6 +2925,11 @@ function handleObjectInteract(p) {
   for (const cell of candidates) {
     const obj = L.objects[cell[0] + "," + cell[1]];
     if (!obj) continue;
+    const stationInfo = farmStationOf(obj.name);
+    if (stationInfo) {
+      farmStationQuickAction(p, cell[0], cell[1], obj, stationInfo);
+      return true;
+    }
     if (isCoinPile(obj.name)) {
       collectCoinPile(p, cell[0], cell[1], obj);
       return true;
@@ -2923,6 +2945,965 @@ function handleObjectInteract(p) {
     return true;
   }
   return false;
+}
+
+const FARM_CONFIG_FILE = path.join(WORLD_DIR, "farming.json");
+const FARM_STATE_FILE = path.join(WORLD_DIR, "farm.json");
+
+const FARM_DEFAULTS = {
+  growthHour: 6,
+  dryExpireSeconds: 60,
+  dryExpireWithCrop: true,
+  canCapacity: 10,
+  reach: 2,
+  tillableMatch: "Tillable",
+  waterMatch: "water",
+  showUnavailableRecipes: false,
+  items: {
+    hoe: ["Hoe"],
+    scythe: ["Scythe"],
+    shovel: ["Shovel"],
+    can: ["Watering Can", "Watering_Can"],
+    bowl: ["Bowl"],
+    bowlWater: ["Bowl of Water", "Bow of Water", "Bowl_of_Water", "Bow_of_Water"]
+  },
+  soils: {
+    brown: { label: "Brown earth", dry: ["BrownEarth_Tilled_Soil", "Brown_Earth_Tilled_Soil"], wet: ["Watered_BrownEarth_Tilled_Soil", "BrownEarth_Watered_Tilled_Soil", "Watered_Brown_Earth_Tilled_Soil"] },
+    normal: { label: "Tilled soil", dry: ["Tilled_Soil"], wet: ["Watered_Tilled_Soil", "Tilled_Soil_Watered"] },
+    red: { label: "Red soil", dry: ["Red_Tilled_Soil"], wet: ["Watered_Red_Tilled_Soil", "Red_Watered_Tilled_Soil"] }
+  },
+  soilFolders: {
+    brown: ["Plains", "Meadow"],
+    normal: ["Forest"],
+    red: ["River", "Mountain", "Mountains", "Hills"]
+  },
+  soilFallback: "normal",
+  crops: {
+    wheat: {
+      label: "Wheat",
+      stages: ["Wheat_Stage0", "Wheat_Stage1", "Wheat_Stage2", "Wheat_Grown"],
+      harvest: { item: ["Wheat"], min: 3, max: 4 }
+    }
+  },
+  seeds: [
+    { item: ["Wheat_Seeds_Packet", "Wheat Seeds Packet", "Wheat_Seed_Packet"], crop: "wheat" }
+  ],
+  stations: {
+    mill: {
+      label: "Milling Station",
+      idle: ["Unfilled_Milling_Station"],
+      busy: ["Filled_Milling_Station"],
+      input: ["Wheat_Bundle", "Wheat Bundle"],
+      inputCount: 1,
+      output: ["Wheat_Flour", "Wheat Flour"],
+      outputCount: 1,
+      seconds: 60
+    },
+    oven: {
+      label: "Baking Oven",
+      unlit: ["Unlit_Baking_Oven"],
+      lit: ["Lit_Baking_Oven"],
+      input: ["Wheat_Dough", "Wheat Dough"],
+      output: ["White_Bread", "White Bread"],
+      seconds: 60,
+      litSeconds: 180
+    }
+  },
+  combineRecipes: [
+    {
+      id: "bowl_water",
+      a: ["Bowl"],
+      b: ["Watering Can", "Watering_Can"],
+      result: ["Bowl of Water", "Bow of Water", "Bowl_of_Water", "Bow_of_Water"],
+      resultCount: 1,
+      consumeA: true,
+      consumeB: false,
+      charge: 1,
+      returns: [],
+      text: "You fill the Bowl from your Watering Can."
+    },
+    {
+      id: "wheat_dough_drag",
+      a: ["Bowl of Water", "Bow of Water", "Bowl_of_Water", "Bow_of_Water"],
+      b: ["Wheat_Flour", "Wheat Flour"],
+      result: ["Wheat_Dough", "Wheat Dough"],
+      resultCount: 1,
+      consumeA: true,
+      consumeB: true,
+      charge: 0,
+      returns: [{ item: ["Bowl"], count: 1 }],
+      text: "You knead the flour and water into dough."
+    }
+  ],
+  recipes: [
+    {
+      id: "wheat_bundle",
+      name: "Wheat Bundle",
+      category: "Materials",
+      needs: [{ item: ["Wheat"], count: 3 }, { item: ["Rope"], count: 1 }],
+      gives: { item: ["Wheat_Bundle", "Wheat Bundle"], count: 1 },
+      returns: [],
+      text: "You tie the wheat into a bundle."
+    },
+    {
+      id: "wheat_dough",
+      name: "Wheat Dough",
+      category: "Cooking",
+      needs: [{ item: ["Bowl of Water", "Bow of Water", "Bowl_of_Water", "Bow_of_Water"], count: 1 }, { item: ["Wheat_Flour", "Wheat Flour"], count: 1 }],
+      gives: { item: ["Wheat_Dough", "Wheat Dough"], count: 1 },
+      returns: [{ item: ["Bowl"], count: 1 }],
+      text: "You knead the flour and water into dough."
+    }
+  ]
+};
+
+function farmFill(defaults, saved) {
+  const out = {};
+  for (const key of Object.keys(defaults)) {
+    const d = defaults[key];
+    const s = saved && typeof saved === "object" ? saved[key] : undefined;
+    if (s === undefined) {
+      out[key] = d;
+    } else if (d && typeof d === "object" && !Array.isArray(d) && s && typeof s === "object" && !Array.isArray(s)) {
+      out[key] = farmFill(d, s);
+      for (const extra of Object.keys(s)) {
+        if (out[key][extra] === undefined) out[key][extra] = s[extra];
+      }
+    } else {
+      out[key] = s;
+    }
+  }
+  if (saved && typeof saved === "object") {
+    for (const extra of Object.keys(saved)) {
+      if (out[extra] === undefined) out[extra] = saved[extra];
+    }
+  }
+  return out;
+}
+
+function loadFarmConfig() {
+  let saved = {};
+  try {
+    saved = JSON.parse(fs.readFileSync(FARM_CONFIG_FILE, "utf8"));
+  } catch (e) {
+    saved = {};
+  }
+  const cfg = farmFill(FARM_DEFAULTS, saved);
+  if (Array.isArray(saved.combineRecipes)) cfg.combineRecipes = addMissingEntries(saved.combineRecipes, FARM_DEFAULTS.combineRecipes, "id");
+  if (Array.isArray(saved.recipes)) cfg.recipes = addMissingEntries(saved.recipes, FARM_DEFAULTS.recipes, "id");
+  try {
+    writeJsonFile(FARM_CONFIG_FILE, cfg);
+  } catch (e) {}
+  return cfg;
+}
+
+const FARM = loadFarmConfig();
+
+function loadFarmState() {
+  const raw = readJsonFile(FARM_STATE_FILE, {});
+  const state = { plots: {}, stations: {}, cans: {}, lastHour: null, lastAt: Date.now() };
+  if (raw && typeof raw === "object") {
+    if (raw.plots && typeof raw.plots === "object") state.plots = raw.plots;
+    if (raw.stations && typeof raw.stations === "object") state.stations = raw.stations;
+    if (raw.cans && typeof raw.cans === "object") state.cans = raw.cans;
+    if (typeof raw.lastHour === "number") state.lastHour = raw.lastHour;
+    if (typeof raw.lastAt === "number") state.lastAt = raw.lastAt;
+  }
+  return state;
+}
+
+const farmState = loadFarmState();
+let farmSaveTimer = null;
+
+function saveFarmState() {
+  if (farmSaveTimer) return;
+  farmSaveTimer = setTimeout(() => {
+    farmSaveTimer = null;
+    writeJsonFile(FARM_STATE_FILE, farmState);
+  }, 500);
+}
+
+function farmNorm(text) {
+  return String(text || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function farmSpecList(spec) {
+  if (Array.isArray(spec)) return spec;
+  return [spec];
+}
+
+function farmNameMatches(spec, name) {
+  const wanted = farmNorm(name);
+  for (const candidate of farmSpecList(spec)) {
+    if (farmNorm(candidate) === wanted) return true;
+  }
+  return false;
+}
+
+let farmItemLookupCache = { source: null, map: null };
+
+function farmItem(spec) {
+  const index = currentItemIndex();
+  if (farmItemLookupCache.source !== index) {
+    const map = {};
+    for (const key of Object.keys(index)) map[farmNorm(key)] = key;
+    farmItemLookupCache = { source: index, map: map };
+  }
+  for (const candidate of farmSpecList(spec)) {
+    const found = farmItemLookupCache.map[farmNorm(candidate)];
+    if (found) return found;
+  }
+  return farmSpecList(spec)[0];
+}
+
+let farmObjectLookupCache = { source: null, map: null };
+
+function farmObjectName(spec) {
+  const data = scanObjects(false);
+  if (farmObjectLookupCache.source !== data) {
+    const map = {};
+    for (const key of Object.keys(data.files)) {
+      map[farmNorm(key)] = key;
+      const cut = key.lastIndexOf(" - ");
+      if (cut >= 0 && !map[farmNorm(key.substring(cut + 3))]) map[farmNorm(key.substring(cut + 3))] = key;
+    }
+    farmObjectLookupCache = { source: data, map: map };
+  }
+  for (const candidate of farmSpecList(spec)) {
+    const found = farmObjectLookupCache.map[farmNorm(candidate)];
+    if (found) return found;
+  }
+  return null;
+}
+
+function farmObjectNameMatches(spec, objName) {
+  const text = String(objName || "");
+  const cut = text.lastIndexOf(" - ");
+  const base = cut >= 0 ? text.substring(cut + 3) : text;
+  return farmNameMatches(spec, base) || farmNameMatches(spec, text);
+}
+
+function farmInvCount(p, spec) {
+  let total = 0;
+  for (const stack of p._inv) {
+    if (stack && farmNameMatches(spec, stack.name)) total += stack.count;
+  }
+  return total;
+}
+
+function farmInvStack(p, spec) {
+  for (const stack of p._inv) {
+    if (stack && farmNameMatches(spec, stack.name)) return stack;
+  }
+  return null;
+}
+
+function farmInvTake(p, spec, count) {
+  let left = count;
+  for (let i = 0; i < p._inv.length && left > 0; i++) {
+    const stack = p._inv[i];
+    if (!stack || !farmNameMatches(spec, stack.name)) continue;
+    const used = Math.min(left, stack.count);
+    stack.count -= used;
+    left -= used;
+    if (stack.count <= 0) {
+      p._inv.splice(i, 1);
+      i--;
+    }
+  }
+  return left === 0;
+}
+
+function farmInvGive(p, spec, count) {
+  const name = farmItem(spec);
+  for (const stack of p._inv) {
+    if (stack && String(stack.name).toLowerCase() === name.toLowerCase()) {
+      stack.count += count;
+      return;
+    }
+  }
+  p._inv.push({ name: name, count: count });
+}
+
+function farmInvFits(p, takes, gives) {
+  const sim = p._inv.map((s) => ({ key: farmNorm(s.name), count: s.count }));
+  for (const t of takes) {
+    let left = t.count;
+    for (let i = 0; i < sim.length && left > 0; i++) {
+      if (!farmNameMatches(t.spec, sim[i].key)) continue;
+      const used = Math.min(left, sim[i].count);
+      sim[i].count -= used;
+      left -= used;
+      if (sim[i].count <= 0) {
+        sim.splice(i, 1);
+        i--;
+      }
+    }
+  }
+  for (const g of gives) {
+    const key = farmNorm(farmItem(g.spec));
+    let found = false;
+    for (const s of sim) {
+      if (s.key === key) {
+        s.count += g.count;
+        found = true;
+        break;
+      }
+    }
+    if (!found) sim.push({ key: key, count: g.count });
+  }
+  return sim.length <= capacityOf(p);
+}
+
+function farmCanKey(p) {
+  return String(p._pass || p.id);
+}
+
+function farmCanWater(p) {
+  const v = farmState.cans[farmCanKey(p)];
+  return typeof v === "number" && v > 0 ? v : 0;
+}
+
+function farmSetCanWater(p, value) {
+  farmState.cans[farmCanKey(p)] = Math.max(0, Math.min(Number(FARM.canCapacity) || 10, value));
+  saveFarmState();
+  sendFarmCan(p);
+}
+
+function sendFarmCan(p) {
+  sendPlayer(p, { type: "farm_can", water: farmCanWater(p), cap: Number(FARM.canCapacity) || 10 });
+}
+
+function farmNotice(p, ok, text) {
+  sendPlayer(p, { type: "item_result", ok: ok, text: text });
+}
+
+function farmArtNameAt(layer, col, row) {
+  const ch = artAt(layer, col, row);
+  if (!ch || ch === " ") return "";
+  return parseTileName(tilePalette[ch] || "").base;
+}
+
+function farmTileCategory(tileName) {
+  const wanted = String(tileName || "").toLowerCase();
+  const cats = tileCategoryList();
+  for (const cat of cats) {
+    for (const t of cat.tiles) {
+      if (String(t).toLowerCase() === wanted) return cat.name;
+    }
+  }
+  return "";
+}
+
+function farmSoilKindFor(tileName) {
+  const category = farmTileCategory(tileName).toLowerCase();
+  for (const kind of Object.keys(FARM.soilFolders)) {
+    for (const folder of FARM.soilFolders[kind]) {
+      if (String(folder).toLowerCase() === category) return kind;
+    }
+  }
+  return FARM.soilFallback;
+}
+
+function farmIsTillable(layer, col, row) {
+  if (tileAt(layer, col, row) !== ".") return false;
+  const name = farmArtNameAt(layer, col, row);
+  if (!name) return false;
+  return name.toLowerCase().indexOf(String(FARM.tillableMatch).toLowerCase()) !== -1;
+}
+
+function farmIsWater(layer, col, row) {
+  const name = farmArtNameAt(layer, col, row);
+  if (!name) return false;
+  return name.toLowerCase().indexOf(String(FARM.waterMatch).toLowerCase()) !== -1;
+}
+
+function farmKey(layer, col, row) {
+  return layer + "," + col + "," + row;
+}
+
+function farmPlotAt(layer, col, row) {
+  return farmState.plots[farmKey(layer, col, row)] || null;
+}
+
+function farmCropDef(plot) {
+  return plot && plot.crop ? FARM.crops[plot.crop.type] || null : null;
+}
+
+function farmCropRipe(plot) {
+  const def = farmCropDef(plot);
+  if (!def) return false;
+  return plot.crop.stage >= def.stages.length - 1;
+}
+
+function farmPlotEntries(layer, col, row, plot) {
+  const out = [];
+  const soil = FARM.soils[plot.soil] || FARM.soils[FARM.soilFallback];
+  const soilName = farmObjectName(plot.wet ? soil.wet : soil.dry) || farmSpecList(plot.wet ? soil.wet : soil.dry)[0];
+  out.push({ col: col, row: row, name: soilName, rot: 0, flip: 0, w: 0, b: 0 });
+  const def = farmCropDef(plot);
+  if (def) {
+    const stageIndex = Math.max(0, Math.min(def.stages.length - 1, plot.crop.stage));
+    const cropName = farmObjectName(def.stages[stageIndex]) || def.stages[stageIndex];
+    out.push({ col: col, row: row, name: cropName, rot: 0, flip: 0, w: 0, b: 0, k: 1 });
+  }
+  return out;
+}
+
+function farmRefresh(layer, col, row) {
+  refreshViewsForCells(layer, [[col, row]]);
+}
+
+function farmRemovePlot(layer, col, row) {
+  delete farmState.plots[farmKey(layer, col, row)];
+  saveFarmState();
+  farmRefresh(layer, col, row);
+}
+
+function farmAdvanceDays(days) {
+  const changed = [];
+  for (const key of Object.keys(farmState.plots)) {
+    const plot = farmState.plots[key];
+    const def = farmCropDef(plot);
+    if (!def || !plot.wet) continue;
+    const top = def.stages.length - 1;
+    if (plot.crop.stage >= top) continue;
+    plot.crop.stage = Math.min(top, plot.crop.stage + days);
+    changed.push(key);
+  }
+  if (changed.length === 0) return;
+  saveFarmState();
+  for (const key of changed) {
+    const parts = key.split(",").map((v) => parseInt(v, 10));
+    farmRefresh(parts[0], parts[1], parts[2]);
+  }
+}
+
+function farmCrossings(fromHour, advanced) {
+  const gh = Number(FARM.growthHour);
+  return Math.floor((fromHour + advanced - gh) / 24) - Math.floor((fromHour - gh) / 24);
+}
+
+function farmClockCheck() {
+  const now = Date.now();
+  if (farmState.lastHour === null) {
+    farmState.lastHour = clockHour();
+    farmState.lastAt = now;
+    saveFarmState();
+    return;
+  }
+  let advanced = 0;
+  if (!worldClock.frozen) advanced = (now - farmState.lastAt) / (worldClock.dayMinutes * 60000) * 24;
+  const crossings = advanced > 0 ? farmCrossings(farmState.lastHour, advanced) : 0;
+  farmState.lastHour = clockHour();
+  farmState.lastAt = now;
+  if (crossings > 0) farmAdvanceDays(crossings);
+}
+
+function farmClockJump(beforeHour, afterHour) {
+  const forward = (((afterHour - beforeHour) % 24) + 24) % 24;
+  if (forward > 0) {
+    const crossings = farmCrossings(beforeHour, forward);
+    if (crossings > 0) farmAdvanceDays(crossings);
+  }
+  farmState.lastHour = afterHour;
+  farmState.lastAt = Date.now();
+  saveFarmState();
+}
+
+function farmStationOf(objName) {
+  const mill = FARM.stations.mill;
+  if (farmObjectNameMatches(mill.idle, objName)) return { kind: "mill", phase: "idle" };
+  if (farmObjectNameMatches(mill.busy, objName)) return { kind: "mill", phase: "busy" };
+  const oven = FARM.stations.oven;
+  if (farmObjectNameMatches(oven.unlit, objName)) return { kind: "oven", phase: "unlit" };
+  if (farmObjectNameMatches(oven.lit, objName)) return { kind: "oven", phase: "lit" };
+  return null;
+}
+
+function farmSwapObject(layer, col, row, obj, spec) {
+  const name = farmObjectName(spec);
+  if (!name) return false;
+  applyObjects(layer, [[col, row, name, obj.solid ? 1 : 0, obj.rot || 0, obj.flip ? 1 : 0]]);
+  return true;
+}
+
+function farmStationState(layer, col, row) {
+  return farmState.stations[farmKey(layer, col, row)] || null;
+}
+
+function farmWaterMoves(p) {
+  const out = [];
+  const moves = p._sheet && Array.isArray(p._sheet.moves) ? p._sheet.moves : [];
+  for (const m of moves) {
+    if (!m || !m.name) continue;
+    const data = getMoveData(m.name) || (m.data && typeof m.data === "object" ? m.data : null);
+    if (!data) continue;
+    if (String(data.type).toLowerCase() === "water") out.push(m.name);
+  }
+  return out;
+}
+
+function farmIgniterStacks(p) {
+  const out = [];
+  for (const igniter of VISION.igniterItems) {
+    const stack = farmInvStack(p, igniter);
+    if (stack) out.push(stack);
+  }
+  return out;
+}
+
+function farmSecondsLeft(at) {
+  return Math.max(1, Math.ceil((at - Date.now()) / 1000));
+}
+
+function farmStationOptions(p, col, row, obj, info) {
+  const options = [];
+  let title = "";
+  let hint = "";
+  const now = Date.now();
+  if (info.kind === "mill") {
+    const cfg = FARM.stations.mill;
+    title = cfg.label;
+    const st = farmStationState(p.layer, col, row);
+    if (info.phase === "idle") {
+      const have = farmInvCount(p, cfg.input);
+      const need = Number(cfg.inputCount) || 1;
+      if (have >= need) options.push({ act: "mill_start", arg: "", item: farmItem(cfg.input), label: "Grind " + farmItem(cfg.input).replace(/_/g, " ") + " into " + farmItem(cfg.output).replace(/_/g, " ") });
+      else hint = "You need " + need + " " + farmItem(cfg.input).replace(/_/g, " ") + " to grind.";
+    } else {
+      const readyAt = st && typeof st.readyAt === "number" ? st.readyAt : 0;
+      if (now >= readyAt) options.push({ act: "mill_take", arg: "", item: "", label: "Collect " + farmItem(cfg.output).replace(/_/g, " ") });
+      else hint = "The mill is still grinding (" + farmSecondsLeft(readyAt) + "s left).";
+    }
+  } else {
+    const cfg = FARM.stations.oven;
+    title = cfg.label;
+    let st = farmStationState(p.layer, col, row);
+    const lit = info.phase === "lit";
+    const doughName = farmItem(cfg.input).replace(/_/g, " ");
+    const breadName = farmItem(cfg.output).replace(/_/g, " ");
+    const holding = st && st.dough > 0;
+    if (holding && st.bakeAt && now >= st.bakeAt) {
+      options.push({ act: "oven_take", arg: "", item: "", label: "Take out " + breadName });
+    } else if (holding && st.bakeAt) {
+      hint = "The " + doughName + " is baking (" + farmSecondsLeft(st.bakeAt) + "s left).";
+    }
+    if (!holding && farmInvCount(p, cfg.input) > 0) {
+      options.push({ act: "oven_dough", arg: "", item: farmItem(cfg.input), label: "Put " + doughName + " in the oven" });
+    }
+    if (!lit) {
+      for (const m of knownFireAttacks(p)) options.push({ act: "oven_light", arg: "move:" + m, item: "", label: "Light the oven with " + m });
+      for (const stack of farmIgniterStacks(p)) options.push({ act: "oven_light", arg: "item:" + stack.name, item: stack.name, label: "Light the oven with " + stack.name });
+      if (options.length === 0 && !hint) hint = "You need Flint and Steel, a fire move or a lit torch to light the oven, or " + doughName + " to bake.";
+    }
+    if (options.length === 0 && !hint) hint = "Put " + doughName + " in the oven to bake " + breadName + ".";
+  }
+  return { title: title, options: options, hint: hint };
+}
+
+function farmOptionsAt(p, col, row, sel) {
+  const L = layers[p.layer];
+  const options = [];
+  let title = "";
+  let hint = "";
+  if (!L) return { title: title, options: options, hint: hint };
+  const obj = L.objects[col + "," + row];
+  if (obj) {
+    const info = farmStationOf(obj.name);
+    if (info) {
+      const result = farmStationOptions(p, col, row, obj, info);
+      return result;
+    }
+    return { title: "", options: [], hint: "" };
+  }
+  const plot = farmPlotAt(p.layer, col, row);
+  const canStack = farmInvStack(p, FARM.items.can);
+  if (plot) {
+    const soil = FARM.soils[plot.soil] || FARM.soils[FARM.soilFallback];
+    title = soil.label + (plot.wet ? " (watered)" : " (dry)");
+    const def = farmCropDef(plot);
+    if (def) title += " | " + def.label + " " + (farmCropRipe(plot) ? "ready to harvest" : "stage " + (plot.crop.stage + 1) + " of " + def.stages.length);
+    if (def && farmCropRipe(plot) && farmInvStack(p, FARM.items.scythe)) {
+      options.push({ act: "harvest", arg: "", item: farmItem(FARM.items.scythe), label: "Harvest " + def.label + " with " + farmItem(FARM.items.scythe).replace(/_/g, " ") });
+    }
+    if (!plot.wet) {
+      if (canStack && farmCanWater(p) > 0) options.push({ act: "water_can", arg: "", item: canStack.name, label: "Water with " + canStack.name + " (" + farmCanWater(p) + " left)" });
+      for (const m of farmWaterMoves(p)) options.push({ act: "water_move", arg: m, item: "", label: "Water with " + m });
+    }
+    if (!def) {
+      for (const seed of FARM.seeds) {
+        const stack = farmInvStack(p, seed.item);
+        if (stack && FARM.crops[seed.crop]) options.push({ act: "plant", arg: seed.crop + ":" + stack.name, item: stack.name, label: "Plant " + String(stack.name).replace(/_/g, " ") });
+      }
+    }
+    const shovel = farmInvStack(p, FARM.items.shovel);
+    if (shovel) options.push({ act: "shovel", arg: "", item: shovel.name, label: "Dig up with " + shovel.name });
+    if (options.length === 0) hint = def ? "The " + def.label.toLowerCase() + " is still growing." : "Nothing to do with this soil right now.";
+  } else {
+    const hoe = farmInvStack(p, FARM.items.hoe);
+    if (hoe && farmIsTillable(p.layer, col, row)) {
+      title = "Tillable ground";
+      options.push({ act: "till", arg: "", item: hoe.name, label: "Till soil with " + hoe.name });
+    }
+    const waterHere = farmIsWater(p.layer, col, row) || (col === p.col && row === p.row && farmIsWater(p.layer, p.col, p.row));
+    if (waterHere && canStack) {
+      title = title || "Water";
+      options.push({ act: "fill", arg: "", item: canStack.name, label: "Fill " + canStack.name + " (" + farmCanWater(p) + "/" + FARM.canCapacity + ")" });
+    }
+  }
+  if (sel) {
+    const wanted = farmNorm(sel);
+    options.sort((x, y) => {
+      const xs = farmNorm(x.item) === wanted ? 0 : 1;
+      const ys = farmNorm(y.item) === wanted ? 0 : 1;
+      return xs - ys;
+    });
+  }
+  return { title: title, options: options, hint: hint };
+}
+
+function farmInReach(p, col, row) {
+  const reach = Number(FARM.reach) || 2;
+  return Math.max(Math.abs(p.col - col), Math.abs(p.row - row)) <= reach;
+}
+
+function handleFarmQuery(p, data) {
+  if (worldCombat.isInFight(p)) return;
+  const col = parseInt(data.col, 10);
+  const row = parseInt(data.row, 10);
+  if (!Number.isInteger(col) || !Number.isInteger(row)) return;
+  if (!farmInReach(p, col, row)) return;
+  const result = farmOptionsAt(p, col, row, String(data.sel || ""));
+  if (result.options.length === 0) {
+    if (result.hint) farmNotice(p, false, result.hint);
+    return;
+  }
+  sendPlayer(p, { type: "farm_menu", col: col, row: row, title: result.title, options: result.options.map((o) => ({ act: o.act, arg: o.arg, label: o.label })) });
+}
+
+function handleFarmDo(p, data) {
+  if (worldCombat.isInFight(p)) {
+    farmNotice(p, false, "You can't do that during battle.");
+    return;
+  }
+  const col = parseInt(data.col, 10);
+  const row = parseInt(data.row, 10);
+  if (!Number.isInteger(col) || !Number.isInteger(row)) return;
+  if (!farmInReach(p, col, row)) {
+    farmNotice(p, false, "Move closer.");
+    return;
+  }
+  const act = String(data.act || "");
+  const arg = String(data.arg || "");
+  const result = farmOptionsAt(p, col, row, "");
+  let found = null;
+  for (const o of result.options) {
+    if (o.act === act && o.arg === arg) found = o;
+  }
+  if (!found) {
+    farmNotice(p, false, result.hint || "You can't do that right now.");
+    return;
+  }
+  farmExecute(p, col, row, act, arg);
+}
+
+function farmExecute(p, col, row, act, arg) {
+  const layer = p.layer;
+  const L = layers[layer];
+  const plot = farmPlotAt(layer, col, row);
+  const key = farmKey(layer, col, row);
+  if (act === "till") {
+    const kind = farmSoilKindFor(farmArtNameAt(layer, col, row));
+    farmState.plots[key] = { soil: kind, wet: false, dryAt: Date.now(), crop: null };
+    saveFarmState();
+    farmRefresh(layer, col, row);
+    farmNotice(p, true, "You till the ground.");
+    return;
+  }
+  if (act === "fill") {
+    farmSetCanWater(p, Number(FARM.canCapacity) || 10);
+    farmNotice(p, true, "You fill your Watering Can (" + farmCanWater(p) + "/" + FARM.canCapacity + ").");
+    return;
+  }
+  if (act === "water_can") {
+    if (!plot) return;
+    farmSetCanWater(p, farmCanWater(p) - 1);
+    plot.wet = true;
+    saveFarmState();
+    farmRefresh(layer, col, row);
+    farmNotice(p, true, "You water the soil (" + farmCanWater(p) + " left in the can).");
+    return;
+  }
+  if (act === "water_move") {
+    if (!plot) return;
+    plot.wet = true;
+    saveFarmState();
+    farmRefresh(layer, col, row);
+    farmNotice(p, true, "You water the soil with " + arg + ".");
+    return;
+  }
+  if (act === "plant") {
+    if (!plot || plot.crop) return;
+    const cut = arg.indexOf(":");
+    const cropType = arg.substring(0, cut);
+    const seedName = arg.substring(cut + 1);
+    if (!FARM.crops[cropType]) return;
+    if (!farmInvTake(p, seedName, 1)) return;
+    plot.crop = { type: cropType, stage: 0 };
+    saveFarmState();
+    syncPlayerInventory(p);
+    farmRefresh(layer, col, row);
+    farmNotice(p, true, "You plant the seeds.");
+    return;
+  }
+  if (act === "harvest") {
+    const def = farmCropDef(plot);
+    if (!def || !farmCropRipe(plot)) return;
+    const min = Number(def.harvest.min) || 1;
+    const max = Math.max(min, Number(def.harvest.max) || min);
+    const amount = min + Math.floor(Math.random() * (max - min + 1));
+    if (!farmInvFits(p, [], [{ spec: def.harvest.item, count: amount }])) {
+      farmNotice(p, false, "Your bag is full.");
+      return;
+    }
+    farmInvGive(p, def.harvest.item, amount);
+    plot.crop = null;
+    plot.wet = false;
+    plot.dryAt = Date.now();
+    saveFarmState();
+    syncPlayerInventory(p);
+    farmRefresh(layer, col, row);
+    farmNotice(p, true, "You harvest " + amount + " " + farmItem(def.harvest.item).replace(/_/g, " ") + ".");
+    return;
+  }
+  if (act === "shovel") {
+    if (!plot) return;
+    farmRemovePlot(layer, col, row);
+    farmNotice(p, true, "You dig up the soil.");
+    return;
+  }
+  const obj = L ? L.objects[col + "," + row] : null;
+  if (!obj) return;
+  const info = farmStationOf(obj.name);
+  if (!info) return;
+  const now = Date.now();
+  if (act === "mill_start" && info.kind === "mill" && info.phase === "idle") {
+    const cfg = FARM.stations.mill;
+    const need = Number(cfg.inputCount) || 1;
+    if (farmInvCount(p, cfg.input) < need) return;
+    if (!farmSwapObject(layer, col, row, obj, cfg.busy)) {
+      farmNotice(p, false, "The filled mill image is missing.");
+      return;
+    }
+    farmInvTake(p, cfg.input, need);
+    farmState.stations[key] = { kind: "mill", readyAt: now + (Number(cfg.seconds) || 60) * 1000 };
+    saveFarmState();
+    syncPlayerInventory(p);
+    farmNotice(p, true, "The mill starts grinding. Come back in " + (Number(cfg.seconds) || 60) + " seconds.");
+    return;
+  }
+  if (act === "mill_take" && info.kind === "mill" && info.phase === "busy") {
+    const cfg = FARM.stations.mill;
+    const st = farmStationState(layer, col, row);
+    if (st && now < st.readyAt) return;
+    const amount = Number(cfg.outputCount) || 1;
+    if (!farmInvFits(p, [], [{ spec: cfg.output, count: amount }])) {
+      farmNotice(p, false, "Your bag is full.");
+      return;
+    }
+    farmInvGive(p, cfg.output, amount);
+    farmSwapObject(layer, col, row, obj, cfg.idle);
+    delete farmState.stations[key];
+    saveFarmState();
+    syncPlayerInventory(p);
+    farmNotice(p, true, "You collect " + amount + " " + farmItem(cfg.output).replace(/_/g, " ") + ".");
+    return;
+  }
+  if (info.kind !== "oven") return;
+  const cfg = FARM.stations.oven;
+  let st = farmStationState(layer, col, row);
+  if (!st) {
+    st = { kind: "oven", dough: 0, bakeAt: null, litUntil: 0 };
+    farmState.stations[key] = st;
+  }
+  const bakeMs = (Number(cfg.seconds) || 60) * 1000;
+  const litMs = (Number(cfg.litSeconds) || 180) * 1000;
+  if (act === "oven_light" && info.phase === "unlit") {
+    const cut = arg.indexOf(":");
+    const via = arg.substring(0, cut);
+    const name = arg.substring(cut + 1);
+    if (via === "move" && knownFireAttacks(p).indexOf(name) === -1) return;
+    if (via === "item" && !farmInvStack(p, name)) return;
+    if (!farmSwapObject(layer, col, row, obj, cfg.lit)) {
+      farmNotice(p, false, "The lit oven image is missing.");
+      return;
+    }
+    st.litUntil = now + litMs;
+    if (st.dough > 0 && !st.bakeAt) {
+      st.bakeAt = now + bakeMs;
+      st.litUntil = Math.max(st.litUntil, st.bakeAt + 5000);
+    }
+    saveFarmState();
+    farmNotice(p, true, "You light the oven with " + name + ".");
+    return;
+  }
+  if (act === "oven_dough") {
+    if (st.dough > 0) return;
+    if (!farmInvTake(p, cfg.input, 1)) return;
+    st.dough = 1;
+    st.bakeAt = null;
+    if (info.phase === "lit") {
+      st.bakeAt = now + bakeMs;
+      st.litUntil = Math.max(st.litUntil || 0, st.bakeAt + 5000);
+    }
+    saveFarmState();
+    syncPlayerInventory(p);
+    farmNotice(p, true, info.phase === "lit" ? "You put the dough in. It will bake in " + (bakeMs / 1000) + " seconds." : "You put the dough in. Light the oven to start baking.");
+    return;
+  }
+  if (act === "oven_take") {
+    if (!(st.dough > 0 && st.bakeAt && now >= st.bakeAt)) return;
+    if (!farmInvFits(p, [], [{ spec: cfg.output, count: 1 }])) {
+      farmNotice(p, false, "Your bag is full.");
+      return;
+    }
+    farmInvGive(p, cfg.output, 1);
+    st.dough = 0;
+    st.bakeAt = null;
+    saveFarmState();
+    syncPlayerInventory(p);
+    farmNotice(p, true, "You take out a fresh " + farmItem(cfg.output).replace(/_/g, " ") + ".");
+    return;
+  }
+}
+
+function farmStationQuickAction(p, col, row, obj, info) {
+  if (worldCombat.isInFight(p)) {
+    farmNotice(p, false, "You can't do that during battle.");
+    return;
+  }
+  const result = farmStationOptions(p, col, row, obj, info);
+  if (result.options.length === 0) {
+    farmNotice(p, false, result.hint || "Nothing to do here.");
+    return;
+  }
+  const first = result.options[0];
+  farmExecute(p, col, row, first.act, first.arg);
+}
+
+function farmTick() {
+  farmClockCheck();
+  const now = Date.now();
+  const expireMs = (Number(FARM.dryExpireSeconds) || 60) * 1000;
+  for (const key of Object.keys(farmState.plots)) {
+    const plot = farmState.plots[key];
+    const parts = key.split(",").map((v) => parseInt(v, 10));
+    const layer = parts[0];
+    const col = parts[1];
+    const row = parts[2];
+    const L = layers[layer];
+    if (!L || L.objects[col + "," + row] || tileAt(layer, col, row) !== ".") {
+      farmRemovePlot(layer, col, row);
+      continue;
+    }
+    if (plot.wet) continue;
+    if (plot.crop && !FARM.dryExpireWithCrop) continue;
+    if (now - (plot.dryAt || now) >= expireMs) farmRemovePlot(layer, col, row);
+  }
+  for (const key of Object.keys(farmState.stations)) {
+    const st = farmState.stations[key];
+    const parts = key.split(",").map((v) => parseInt(v, 10));
+    const layer = parts[0];
+    const col = parts[1];
+    const row = parts[2];
+    const L = layers[layer];
+    const obj = L ? L.objects[col + "," + row] : null;
+    const info = obj ? farmStationOf(obj.name) : null;
+    if (!info || info.kind !== st.kind) {
+      delete farmState.stations[key];
+      saveFarmState();
+      continue;
+    }
+    if (st.kind === "oven" && info.phase === "lit" && !(st.dough > 0) && now >= (st.litUntil || 0)) {
+      farmSwapObject(layer, col, row, obj, FARM.stations.oven.unlit);
+      delete farmState.stations[key];
+      saveFarmState();
+    }
+  }
+}
+
+function farmCraftRecipes(p) {
+  const out = [];
+  for (const r of FARM.recipes) {
+    const needs = r.needs.map((n) => ({ item: farmItem(n.item), count: Number(n.count) || 1, have: farmInvCount(p, n.item) }));
+    let available = true;
+    for (const n of needs) {
+      if (n.have < n.count) available = false;
+    }
+    if (!available && !FARM.showUnavailableRecipes) continue;
+    out.push({
+      id: r.id,
+      name: r.name || farmItem(r.gives.item).replace(/_/g, " "),
+      category: r.category || "Other",
+      icon: farmItem(r.gives.item),
+      count: Number(r.gives.count) || 1,
+      needs: needs,
+      returns: (r.returns || []).map((x) => ({ item: farmItem(x.item), count: Number(x.count) || 1 })),
+      available: available
+    });
+  }
+  return out;
+}
+
+function sendCraftMenu(p) {
+  const recipes = farmCraftRecipes(p);
+  const pages = [];
+  for (const r of recipes) {
+    let page = null;
+    for (const pg of pages) {
+      if (pg.name === r.category) page = pg;
+    }
+    if (!page) {
+      page = { name: r.category, recipes: [] };
+      pages.push(page);
+    }
+    page.recipes.push(r);
+  }
+  pages.sort((a, b) => a.name.localeCompare(b.name));
+  sendPlayer(p, { type: "craft_menu", pages: pages });
+}
+
+function handleCraftMake(p, data) {
+  if (worldCombat.isInFight(p)) {
+    farmNotice(p, false, "You can't craft during battle.");
+    return;
+  }
+  const id = String(data.id || "");
+  let recipe = null;
+  for (const r of FARM.recipes) {
+    if (r.id === id) recipe = r;
+  }
+  if (!recipe) return;
+  for (const n of recipe.needs) {
+    if (farmInvCount(p, n.item) < (Number(n.count) || 1)) {
+      farmNotice(p, false, "You don't have the ingredients.");
+      sendCraftMenu(p);
+      return;
+    }
+  }
+  const takes = recipe.needs.map((n) => ({ spec: n.item, count: Number(n.count) || 1 }));
+  const gives = [{ spec: recipe.gives.item, count: Number(recipe.gives.count) || 1 }];
+  for (const x of recipe.returns || []) gives.push({ spec: x.item, count: Number(x.count) || 1 });
+  if (!farmInvFits(p, takes, gives)) {
+    farmNotice(p, false, "Your bag is full.");
+    return;
+  }
+  for (const t of takes) farmInvTake(p, t.spec, t.count);
+  for (const g of gives) farmInvGive(p, g.spec, g.count);
+  syncPlayerInventory(p);
+  farmNotice(p, true, recipe.text || ("You made " + farmItem(recipe.gives.item).replace(/_/g, " ") + "."));
+  sendCraftMenu(p);
 }
 
 const COIN_PILE_MIN = 40;
@@ -3884,6 +4865,14 @@ function startWorldPlayer(socket, pass, info, spawn) {
       handleInvCombine(me, data);
     } else if (data.type === "inv_drop") {
       handleInvDrop(me, data);
+    } else if (data.type === "farm_query") {
+      handleFarmQuery(me, data);
+    } else if (data.type === "farm_do") {
+      handleFarmDo(me, data);
+    } else if (data.type === "craft_open") {
+      sendCraftMenu(me);
+    } else if (data.type === "craft_make") {
+      handleCraftMake(me, data);
     } else if (data.type === "light_stick") {
       handleLightStick(me, data);
     } else if (data.type === "light_move") {
@@ -4002,6 +4991,7 @@ setInterval(saveWorldState, WORLD_SAVE_INTERVAL);
 setInterval(entityTick, ENTITY_TICK_MS);
 setInterval(idleTick, 2000);
 setInterval(fireTick, 5000);
+setInterval(farmTick, 1000);
 setInterval(lightCarryTick, 2000);
 setInterval(journalTick, 2000);
 setInterval(scheduleJournalWrite, 30000);

@@ -80,13 +80,13 @@ function entityLabelsFrame(scene) {
     if (meta.kind === "corpse") {
       label.setText(meta.name + " (fainted) T: loot");
       label.setColor("#d9c27a");
-      if (!COMBAT.active || !COMBAT.actors[id]) sp.setAlpha(0.45);
+      if (!COMBAT.active || !COMBAT.actors[id]) visSetBaseAlpha(sp, 0.45);
     } else if (meta.fainted) {
       label.setText(meta.name + " (fainted)");
       label.setColor("#d9c27a");
-      if (!COMBAT.active || !COMBAT.actors[id]) sp.setAlpha(0.45);
+      if (!COMBAT.active || !COMBAT.actors[id]) visSetBaseAlpha(sp, 0.45);
     } else {
-      if (sp.alpha < 1 && (!COMBAT.active || !COMBAT.actors[id])) sp.setAlpha(1);
+      if ((sp.visBase !== undefined ? sp.visBase : sp.alpha) < 1 && (!COMBAT.active || !COMBAT.actors[id])) visSetBaseAlpha(sp, 1);
       label.setText((meta.state === "alert" ? "! " : "") + meta.name);
       label.setColor(meta.state === "alert" ? "#ff5050" : (meta.kind === "enemy" ? "#ffb0b0" : (meta.kind === "companion" ? "#8fd0ff" : "#9fe89f")));
     }
@@ -247,7 +247,7 @@ function worldSyncPool(scene, pool, wanted, kind) {
         const scale = (TILE - 2) / Math.max(sp.width, sp.height);
         sp.setScale(scale);
         sp.baseScale = scale;
-        sp.setDepth(w.walk ? 11 : 3);
+        sp.setDepth(w.over ? 4 : (w.walk ? 11 : 3));
       }
       sp.texKey = tex;
       pool[key] = sp;
@@ -260,7 +260,7 @@ function worldSyncPool(scene, pool, wanted, kind) {
       sp.cellC = w.c;
       sp.cellR = w.r;
       sp.walkObj = !!w.walk;
-      sp.setDepth(w.walk ? 11 : 3);
+      sp.setDepth(w.over ? 4 : (w.walk ? 11 : 3));
       sp.objDef = visDefForName(w.name);
       sp.setFlipX(!!w.flip);
       sp.objRotRad = (w.rot || 0) * Math.PI / 180;
@@ -563,7 +563,7 @@ function drawPlayerView(scene, data) {
   }
   for (const o of data.objects || []) {
     if (o.b) VIS.block[o.col + "," + o.row] = true;
-    wantedObjs[o.col + "," + o.row] = { name: o.name, c: o.col, r: o.row, rot: o.rot || 0, flip: !!o.flip, walk: !!o.w };
+    wantedObjs[o.col + "," + o.row + (o.k ? "|k" : "")] = { name: o.name, c: o.col, r: o.row, rot: o.rot || 0, flip: !!o.flip, walk: !!o.w, over: !!o.k };
   }
   worldSyncPool(scene, worldArtPool, wantedArt, "tile");
   worldSyncPool(scene, worldObjectPool, wantedObjs, "object");
@@ -2353,7 +2353,7 @@ function combatApplyActor(a) {
   spr.maxHp = a.maxHp;
   spr.mp = a.mp;
   spr.maxMp = a.maxMp;
-  spr.setAlpha(a.dead ? 0.35 : 1);
+  visSetBaseAlpha(spr, a.dead ? 0.35 : 1);
   spr.stages = a.dead ? {} : (a.stages || {});
   if (spr === player) {
     playerHp = a.hp;
@@ -3175,6 +3175,7 @@ function atkPointer(scene, pointer) {
       atkOpenLight(lightable);
       return;
     }
+    if (farmClickTry(clickCol, clickRow)) return;
     atkClose();
     return;
   }
@@ -3269,6 +3270,236 @@ function atkOpenLight(target) {
     atkRingGfx.strokeRect(target.col * TILE + 2, target.row * TILE + 2, TILE - 4, TILE - 4);
   }
 }
+
+const FARMC = { can: 0, cap: 10, reach: 2 };
+const CRAFT = { pages: [], page: 0, open: false, el: null, listEl: null, pagerLabel: null };
+
+function farmCanSlotText(name) {
+  if (String(name).toLowerCase().replace(/[^a-z0-9]/g, "") !== "wateringcan") return "";
+  return FARMC.can + "/" + FARMC.cap;
+}
+
+function farmSelectedName() {
+  if (typeof inventoryOpen !== "undefined" && inventoryOpen && selectedSlot >= 0 && inventoryItems[selectedSlot]) return inventoryItems[selectedSlot].name;
+  return "";
+}
+
+function farmClickTry(col, row) {
+  const dist = Math.max(Math.abs(player.col - col), Math.abs(player.row - row));
+  if (dist > FARMC.reach) return false;
+  atkClose();
+  gmSend({ type: "farm_query", col: col, row: row, sel: farmSelectedName() });
+  return true;
+}
+
+function farmOpenMenu(data) {
+  atkInject();
+  atkTarget = null;
+  atkMenuEl.innerHTML = "";
+  const title = document.createElement("div");
+  title.className = "atkTitle";
+  title.style.color = "#9be39b";
+  title.textContent = data.title || "Farming";
+  atkMenuEl.appendChild(title);
+  for (const o of data.options) {
+    const btn = document.createElement("button");
+    btn.textContent = o.label;
+    btn.addEventListener("click", () => {
+      gmSend({ type: "farm_do", col: data.col, row: data.row, act: o.act, arg: o.arg });
+      atkClose();
+    });
+    atkMenuEl.appendChild(btn);
+  }
+  const cancel = document.createElement("button");
+  cancel.className = "atkCancel";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", atkClose);
+  atkMenuEl.appendChild(cancel);
+  atkMenuEl.classList.remove("hidden");
+  if (sceneRef) {
+    if (!atkRingGfx) {
+      atkRingGfx = sceneRef.add.graphics();
+      atkRingGfx.setDepth(150);
+    }
+    atkRingGfx.clear();
+    atkRingGfx.lineStyle(3, 0x6fdc6f, 1);
+    atkRingGfx.strokeRect(data.col * TILE + 2, data.row * TILE + 2, TILE - 4, TILE - 4);
+  }
+}
+
+function craftInject() {
+  if (CRAFT.el) return;
+  const style = document.createElement("style");
+  style.textContent = "#craftPanel{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:380px;max-width:94vw;max-height:72vh;background:rgba(20,20,34,0.97);border:2px solid #c9a24a;border-radius:10px;padding:10px;color:#fff;font-size:13px;z-index:45;display:flex;flex-direction:column;user-select:none}"
+    + "#craftPanel.hidden{display:none}"
+    + "#craftPanel .crHead{display:flex;justify-content:space-between;align-items:center;font-weight:bold;color:#ffd23f;margin-bottom:6px}"
+    + "#craftPanel .crClose{background:#2d2d44;border:1px solid #55557a;border-radius:5px;color:#fff;cursor:pointer;padding:2px 8px}"
+    + "#craftPanel .crPager{display:flex;align-items:center;gap:4px;margin-bottom:6px}"
+    + "#craftPanel .crPager button{padding:3px 10px;background:#2d2d44;border:1px solid #55557a;border-radius:5px;color:#fff;cursor:pointer}"
+    + "#craftPanel .crPager .crTitle{flex:1;text-align:center;color:#ffd23f;font-size:12px}"
+    + "#craftPanel .crList{overflow-y:auto;flex:1;min-height:60px}"
+    + "#craftPanel .crCard{display:flex;align-items:center;gap:8px;background:#2d2d44;border:1px solid #55557a;border-radius:8px;padding:6px 8px;margin:4px 0}"
+    + "#craftPanel .crCard.ok{cursor:pointer;border-color:#6fdc6f}"
+    + "#craftPanel .crCard.ok:hover{background:#3a3a5a}"
+    + "#craftPanel .crCard.no{opacity:0.5;cursor:not-allowed}"
+    + "#craftPanel .crIcon{width:36px;height:36px;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.3);border-radius:6px;font-size:12px;flex:none;overflow:hidden}"
+    + "#craftPanel .crIcon img{width:32px;height:32px;image-rendering:pixelated}"
+    + "#craftPanel .crInfo{flex:1;min-width:0}"
+    + "#craftPanel .crName{font-weight:bold}"
+    + "#craftPanel .crNeeds{display:flex;flex-wrap:wrap;gap:6px;margin-top:3px;align-items:center}"
+    + "#craftPanel .crNeed{display:flex;align-items:center;gap:2px;font-size:11px}"
+    + "#craftPanel .crNeed .crIcon{width:24px;height:24px}"
+    + "#craftPanel .crNeed .crIcon img{width:20px;height:20px}"
+    + "#craftPanel .crNeed.lack{color:#ff8a8a}"
+    + "#craftPanel .crNote{font-size:11px;color:#bbb;margin-top:2px}"
+    + "#craftPanel .crEmpty{padding:14px 6px;text-align:center;color:#bbb}";
+  document.head.appendChild(style);
+  const el = document.createElement("div");
+  el.id = "craftPanel";
+  el.className = "hidden";
+  const head = document.createElement("div");
+  head.className = "crHead";
+  const headText = document.createElement("div");
+  headText.textContent = "Crafting (C)";
+  const close = document.createElement("button");
+  close.className = "crClose";
+  close.textContent = "X";
+  close.addEventListener("click", craftClose);
+  head.appendChild(headText);
+  head.appendChild(close);
+  el.appendChild(head);
+  const pager = document.createElement("div");
+  pager.className = "crPager";
+  const left = document.createElement("button");
+  left.textContent = "<";
+  const right = document.createElement("button");
+  right.textContent = ">";
+  const label = document.createElement("div");
+  label.className = "crTitle";
+  pager.appendChild(left);
+  pager.appendChild(label);
+  pager.appendChild(right);
+  left.addEventListener("click", () => craftStep(-1));
+  right.addEventListener("click", () => craftStep(1));
+  el.appendChild(pager);
+  const list = document.createElement("div");
+  list.className = "crList";
+  el.appendChild(list);
+  document.body.appendChild(el);
+  CRAFT.el = el;
+  CRAFT.listEl = list;
+  CRAFT.pagerLabel = label;
+}
+
+function craftIcon(name) {
+  const box = document.createElement("div");
+  box.className = "crIcon";
+  const path = typeof itemIndex === "object" && itemIndex ? itemIndex[name] : null;
+  if (path) {
+    const img = document.createElement("img");
+    img.src = encodeURI(path);
+    img.draggable = false;
+    box.appendChild(img);
+  } else {
+    box.textContent = String(name).charAt(0).toUpperCase();
+  }
+  return box;
+}
+
+function craftStep(dir) {
+  if (CRAFT.pages.length === 0) return;
+  CRAFT.page = (CRAFT.page + dir + CRAFT.pages.length) % CRAFT.pages.length;
+  craftRender();
+}
+
+function craftRender() {
+  if (!CRAFT.el) return;
+  if (CRAFT.page >= CRAFT.pages.length) CRAFT.page = 0;
+  const page = CRAFT.pages[CRAFT.page];
+  CRAFT.pagerLabel.textContent = page ? page.name + "  (" + (CRAFT.page + 1) + "/" + CRAFT.pages.length + ")" : "No recipes";
+  CRAFT.listEl.innerHTML = "";
+  if (!page) {
+    const none = document.createElement("div");
+    none.className = "crEmpty";
+    none.textContent = "You don't have the ingredients for anything yet.";
+    CRAFT.listEl.appendChild(none);
+    return;
+  }
+  for (const r of page.recipes) {
+    const card = document.createElement("div");
+    card.className = "crCard " + (r.available ? "ok" : "no");
+    card.appendChild(craftIcon(r.icon));
+    const info = document.createElement("div");
+    info.className = "crInfo";
+    const nm = document.createElement("div");
+    nm.className = "crName";
+    nm.textContent = r.name + (r.count > 1 ? " x" + r.count : "");
+    info.appendChild(nm);
+    const needs = document.createElement("div");
+    needs.className = "crNeeds";
+    for (const n of r.needs) {
+      const box = document.createElement("div");
+      box.className = "crNeed" + (n.have < n.count ? " lack" : "");
+      box.title = n.item;
+      box.appendChild(craftIcon(n.item));
+      const t = document.createElement("span");
+      t.textContent = n.have + "/" + n.count;
+      box.appendChild(t);
+      needs.appendChild(box);
+    }
+    info.appendChild(needs);
+    if (r.returns && r.returns.length > 0) {
+      const note = document.createElement("div");
+      note.className = "crNote";
+      note.textContent = "Returns: " + r.returns.map((x) => String(x.item).replace(/_/g, " ") + (x.count > 1 ? " x" + x.count : "")).join(", ");
+      info.appendChild(note);
+    }
+    card.appendChild(info);
+    if (r.available) card.addEventListener("click", () => gmSend({ type: "craft_make", id: r.id }));
+    CRAFT.listEl.appendChild(card);
+  }
+}
+
+function craftOpen() {
+  if (!worldPlayerMode || worldGmMode) return;
+  craftInject();
+  CRAFT.open = true;
+  CRAFT.el.classList.remove("hidden");
+  gmSend({ type: "craft_open" });
+}
+
+function craftClose() {
+  CRAFT.open = false;
+  if (CRAFT.el) CRAFT.el.classList.add("hidden");
+}
+
+function craftToggle() {
+  if (CRAFT.open) craftClose();
+  else craftOpen();
+}
+
+function farmMessage(data) {
+  if (data.type === "farm_menu") {
+    farmOpenMenu(data);
+    return true;
+  }
+  if (data.type === "farm_can") {
+    FARMC.can = data.water;
+    FARMC.cap = data.cap;
+    if (typeof inventoryOpen !== "undefined" && inventoryOpen) refreshInventoryPanel();
+    return true;
+  }
+  if (data.type === "craft_menu") {
+    CRAFT.pages = data.pages || [];
+    if (CRAFT.open) craftRender();
+    return true;
+  }
+  return false;
+}
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && CRAFT.open) craftClose();
+});
 
 const WGD = { drag: null, ghost: null, inspect: null, inspEl: null, creativeEl: null, searchEl: null, gridEl: null };
 
@@ -3986,6 +4217,7 @@ window.worldHook = function (scene, data) {
     else if (inventoryOpen) refreshInventoryPanel();
     return true;
   }
+  if (farmMessage(data)) return true;
   if (data.type === "item_result") {
     itemToast(data.text);
     if (COMBAT.active) combatAddLog(data.text);
@@ -4344,6 +4576,55 @@ function visFan(g, ox, oy, rx, ry, angA, angB, stepRad, range) {
   }
 }
 
+function visSetBaseAlpha(sp, value) {
+  sp.visBase = value;
+  sp.setAlpha(value * (sp.visMul === undefined ? 1 : sp.visMul));
+}
+
+function visClamp01(v) {
+  return v < 0 ? 0 : (v > 1 ? 1 : v);
+}
+
+function visLitWeight(x, y) {
+  let best = 0;
+  for (const light of VIS.lights) {
+    const d = Math.hypot(x - light.x, y - light.y) / TILE;
+    const w = visClamp01((light.vis - d) / 0.9);
+    if (w > best) best = w;
+  }
+  return best;
+}
+
+function visSeeWeight(ox, oy, tx, ty, half) {
+  const dist = Math.hypot(tx - ox, ty - oy);
+  const tiles = dist / TILE;
+  if (tiles <= visCfg("nearRadius")) return visLitWeight(tx, ty);
+  const range = visCfg("dayRange") + 0.6;
+  if (tiles > range) return 0;
+  const ang = Math.atan2(ty - oy, tx - ox);
+  const aw = visClamp01((half - Math.abs(visAngleDiff(ang, VIS.ang))) / 0.14);
+  if (aw <= 0) return 0;
+  const lw = visLitWeight(tx, ty);
+  if (lw <= 0) return 0;
+  if (visRayDist(ox, oy, ang, dist) < dist - 0.5) return 0;
+  return Math.min(visClamp01((range - tiles) / 1.2), aw, lw);
+}
+
+const VIS_SAMPLE_OFFSETS = [[-0.4, -0.4], [0, -0.4], [0.4, -0.4], [-0.4, 0], [0, 0], [0.4, 0], [-0.4, 0.4], [0, 0.4], [0.4, 0.4]];
+
+function visSeeFraction(ox, oy, tx, ty, half) {
+  let total = 0;
+  for (const off of VIS_SAMPLE_OFFSETS) total += visSeeWeight(ox, oy, tx + off[0] * TILE, ty + off[1] * TILE, half);
+  return total / VIS_SAMPLE_OFFSETS.length;
+}
+
+function visFadeStep(sp, target, k) {
+  if (sp.visMul === undefined) sp.visMul = target;
+  else sp.visMul += (target - sp.visMul) * k;
+  if (Math.abs(sp.visMul - target) < 0.01) sp.visMul = target;
+  return sp.visMul;
+}
+
 function visLit(x, y) {
   for (const light of VIS.lights) {
     const d = Math.hypot(x - light.x, y - light.y) / TILE;
@@ -4599,7 +4880,7 @@ function visWrapBars() {
   VIS.barsWrapped = true;
   const original = window.drawEntityBars;
   window.drawEntityBars = function (s) {
-    if (s && s.visible === false) return;
+    if (s && (s.visible === false || (s.visMul !== undefined && s.visMul < 0.6))) return;
     original(s);
   };
 }
@@ -4769,17 +5050,25 @@ function visFrame(scene) {
     const sp = otherPlayers[id];
     if (!sp || sp === "loading" || !sp.active) continue;
     const exempt = (typeof combatHolds === "function" && combatHolds(id)) || (COMBAT.active && COMBAT.actors[id]);
-    const seen = exempt || visCanSee(ox, oy, sp.x, sp.y, half);
-    if (sp.visible !== seen) sp.setVisible(seen);
+    const fadeK = 1 - Math.exp(-dt / 160);
+    const mul = visFadeStep(sp, exempt ? 1 : visSeeFraction(ox, oy, sp.x, sp.y, half), fadeK);
+    sp.setAlpha((sp.visBase !== undefined ? sp.visBase : 1) * mul);
+    const shown = mul > 0.02;
+    if (sp.visible !== shown) sp.setVisible(shown);
     const label = worldEntityLabels[id];
-    if (label) label.setVisible(seen);
-    if (seen) occupied[Math.floor(sp.x / TILE) + "," + Math.floor(sp.y / TILE)] = true;
+    if (label) {
+      label.setVisible(shown);
+      label.setAlpha(mul);
+    }
+    if (mul > 0.5) occupied[Math.floor(sp.x / TILE) + "," + Math.floor(sp.y / TILE)] = true;
   }
   for (const key in floorItemSprites) {
     const isp = floorItemSprites[key];
     if (!isp || !isp.active) continue;
-    const seenItem = visCanSee(ox, oy, isp.x, isp.y, half);
-    if (isp.visible !== seenItem) isp.setVisible(seenItem);
+    const imul = visFadeStep(isp, visSeeFraction(ox, oy, isp.x, isp.y, half), 1 - Math.exp(-dt / 160));
+    isp.setAlpha(imul);
+    const itemShown = imul > 0.02;
+    if (isp.visible !== itemShown) isp.setVisible(itemShown);
   }
   visWalkFade(occupied, 1 - Math.exp(-dt / 90));
   visWobble(t, scene);

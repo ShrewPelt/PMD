@@ -44,6 +44,7 @@
     "#mControls .mRotL{right:calc(env(safe-area-inset-right) + 6px)}",
     "#mControls .mRotR{right:calc(env(safe-area-inset-right) + 50px)}",
     "#mControls .mChat{right:calc(env(safe-area-inset-right) + 94px);font-size:11px}",
+    "#mControls .mCraft{right:calc(env(safe-area-inset-right) + 182px);font-size:10px}",
     "#mControls .mFull{right:calc(env(safe-area-inset-right) + 138px);font-size:11px}",
     "#mControls.inCombat .mJoy,#mControls.inCombat .mPick,#mControls.inCombat .mDrop,#mControls.inCombat .mSmall{display:none}",
     "#mControls.invOpen .mJoy,#mControls.invOpen .mPick,#mControls.invOpen .mDrop,#mControls.invOpen .mSmall{display:none}",
@@ -180,6 +181,7 @@
     makeButton("mSmall mRotL", "↺", () => { if (typeof rotateView === "function") rotateView(1); });
     makeButton("mSmall mRotR", "↻", () => { if (typeof rotateView === "function") rotateView(-1); });
     makeButton("mSmall mChat", "Chat", () => toggleChat());
+    makeButton("mSmall mCraft", "Craft", () => { if (typeof craftToggle === "function") craftToggle(); });
     makeButton("mSmall mFull", "Full", goFullscreen);
     const input = document.getElementById("chatInput");
     input.addEventListener("keydown", (ev) => {
