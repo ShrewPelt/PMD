@@ -1132,7 +1132,7 @@ const CLOCK_FILE = path.join(WORLD_DIR, "clock.json");
 const STRUCTURES_DIR = path.join(__dirname, "assets", "structures");
 const SPECIES_TYPES_FILE = path.join(__dirname, "StorageData", "SpeciesTypes.json");
 
-const VISION_VERSION = 5;
+const VISION_VERSION = 6;
 
 const VISION_DEFAULTS = {
   version: VISION_VERSION,
@@ -1157,7 +1157,7 @@ const VISION_DEFAULTS = {
     { match: "Candle", radius: 2.5, color: "#ffb84d", flicker: 0.06, flame: { part: "top", size: 0.5 } }
   ],
   lightItems: [
-    { item: "Lit Torch", radius: 5, color: "#ffb347", burnSeconds: 60, onGround: false },
+    { item: "Lit Torch", radius: 5, color: "#ffb347", burnSeconds: 60, onGround: true },
     { item: "Lantern", radius: 7, color: "#ffd27a", burnSeconds: 0, onGround: true }
   ],
   lightable: [
@@ -1231,6 +1231,11 @@ function loadVisionConfig() {
     cfg.lightObjects = addMissingEntries(cfg.lightObjects, VISION_DEFAULTS.lightObjects, "match");
     cfg.lightable = addMissingEntries(cfg.lightable, VISION_DEFAULTS.lightable, "unlit");
     cfg.lightItems = addMissingEntries(cfg.lightItems, VISION_DEFAULTS.lightItems, "item");
+    if ((Number(saved.version) || 0) < 6) {
+      for (const entry of cfg.lightItems) {
+        if (String(entry.item).toLowerCase() === "lit torch") entry.onGround = true;
+      }
+    }
     cfg.combineRecipes = addMissingEntries(cfg.combineRecipes, VISION_DEFAULTS.combineRecipes, "id");
     for (const name of VISION_DEFAULTS.igniterItems) {
       if (cfg.igniterItems.map((v) => String(v).toLowerCase()).indexOf(String(name).toLowerCase()) === -1) cfg.igniterItems.push(name);
@@ -1492,6 +1497,13 @@ function stickStructureMatch(name) {
   return null;
 }
 
+function lightBurnMs(name) {
+  for (const def of VISION.lightItems) {
+    if (String(def.item).toLowerCase() === String(name).toLowerCase()) return (Number(def.burnSeconds) || 0) * 1000;
+  }
+  return 0;
+}
+
 function floorItemAt(layer, col, row) {
   for (const fi of worldSession.floorItems) {
     if (fi.layer === layer && fi.col === col && fi.row === row) return true;
@@ -1532,7 +1544,14 @@ function dropStackItem(p, stackIndex) {
   const name = stack.name;
   stack.count = stack.count - 1;
   if (stack.count <= 0) p._inv.splice(stackIndex, 1);
-  worldSession.floorItems.push({ layer: p.layer, col: spot.col, row: spot.row, name: name });
+  const entry = { layer: p.layer, col: spot.col, row: spot.row, name: name };
+  const burnMs = lightBurnMs(name);
+  if (burnMs > 0) {
+    const carried = p._burn && p._burn[name] ? p._burn[name] : Date.now() + burnMs;
+    entry.burnAt = carried;
+    if (p._burn && p._inv.every((s) => String(s.name).toLowerCase() !== String(name).toLowerCase())) delete p._burn[name];
+  }
+  worldSession.floorItems.push(entry);
   notifyItem(p.layer, spot.col, spot.row, { type: "itemadded", col: spot.col, row: spot.row, name: name });
   journalPlayer(p);
   return true;
@@ -1782,8 +1801,25 @@ function removeOneItem(p, name) {
   return false;
 }
 
+function floorBurnTick(now) {
+  for (let i = worldSession.floorItems.length - 1; i >= 0; i--) {
+    const it = worldSession.floorItems[i];
+    const burnMs = lightBurnMs(it.name);
+    if (burnMs <= 0) continue;
+    if (!it.burnAt) {
+      it.burnAt = now + burnMs;
+      continue;
+    }
+    if (now >= it.burnAt) {
+      worldSession.floorItems.splice(i, 1);
+      notifyItem(it.layer, it.col, it.row, { type: "itemremoved", col: it.col, row: it.row });
+    }
+  }
+}
+
 function lightCarryTick() {
   const now = Date.now();
+  floorBurnTick(now);
   for (const id of Object.keys(worldSession.players)) {
     const p = worldSession.players[id];
     if (!p) continue;
@@ -2738,7 +2774,11 @@ function inspectPayload(t) {
   if (t.kind === "player") {
     const p = t.ref;
     const acc = p._sheet && p._sheet.accessories ? p._sheet.accessories : {};
-    return { type: "gm_inspect", target: { type: "player", id: p.id }, name: p.name, inv: p._inv.map((s) => ({ name: s.name, count: s.count })), accessories: { head: acc.head || null, neck: acc.neck || null, back: acc.back || null }, capacity: capacityOf(p) };
+    const sheet = p._sheet || {};
+    let expGained = 0;
+    for (const k of Array.isArray(p._kills) ? p._kills : []) expGained += (Number(k && k.level) || 0) * 12;
+    const stats = { species: sheet.species || "", dex: p.dex, types: Array.isArray(sheet.types) ? sheet.types : [], level: sheet.level || 1, exp: sheet.exp || 0, expGained: expGained, hp: p.hp, maxHp: p.maxHp, mp: p.mp, maxMp: p.maxMp, moves: worldCombat.sheetMoveInfo(sheet) };
+    return { type: "gm_inspect", target: { type: "player", id: p.id }, name: p.name, inv: p._inv.map((s) => ({ name: s.name, count: s.count })), accessories: { head: acc.head || null, neck: acc.neck || null, back: acc.back || null }, capacity: capacityOf(p), stats: stats };
   }
   const e = t.ref;
   const acc = e.accessories || {};
@@ -3522,6 +3562,32 @@ function handleGmMessage(gm, data) {
     return;
   }
 
+  if (data.type === "gm_vitals") {
+    const t = gmTargetOf(data.target);
+    if (!t || t.kind !== "player") return;
+    const p = t.ref;
+    const pick = (value, fallback, lo, hi) => {
+      const n = parseInt(value, 10);
+      if (!Number.isFinite(n)) return fallback;
+      return Math.max(lo, Math.min(hi, n));
+    };
+    const maxHp = pick(data.maxHp, p.maxHp, 1, 9999);
+    const maxMp = pick(data.maxMp, p.maxMp, 0, 9999);
+    p.maxHp = maxHp;
+    p.maxMp = maxMp;
+    p.hp = pick(data.hp, p.hp, 1, maxHp);
+    p.mp = pick(data.mp, p.mp, 0, maxMp);
+    sendPlayer(p, { type: "vitals", hp: p.hp, mp: p.mp, maxHp: p.maxHp, maxMp: p.maxMp });
+    for (const seenId in p._seen) {
+      const q = worldSession.players[seenId];
+      if (q) sendPlayer(q, { type: "p_vitals", id: p.id, hp: p.hp, maxHp: p.maxHp, mp: p.mp, maxMp: p.maxMp });
+    }
+    sendGms(null, { type: "gm_player", player: publicPlayer(p) });
+    queueWorldSave(p, false);
+    sendSocket(gm.socket, inspectPayload(t));
+    return;
+  }
+
   if (data.type === "gm_inv") {
     handleGmInv(gm, data);
     return;
@@ -3853,6 +3919,12 @@ function startWorldPlayer(socket, pass, info, spawn) {
           return;
         }
         worldSession.floorItems.splice(idx, 1);
+        const pickBurnMs = lightBurnMs(it.name);
+        if (pickBurnMs > 0) {
+          if (!me._burn) me._burn = {};
+          const floorBurn = it.burnAt || Date.now() + pickBurnMs;
+          me._burn[it.name] = stack && me._burn[it.name] ? Math.min(me._burn[it.name], floorBurn) : floorBurn;
+        }
         if (stack) {
           stack.count = stack.count + 1;
         } else {

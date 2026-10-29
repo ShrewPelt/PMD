@@ -3582,6 +3582,113 @@ function gmSyncFormFromInspect(data) {
   document.getElementById("wgEAccBack").value = data.accessories.back || "";
 }
 
+function gmRenderPlayerStats(el, data) {
+  const st = data.stats;
+  const box = document.createElement("div");
+  box.style.cssText = "border:1px solid #3a3a55;border-radius:6px;padding:6px;margin-bottom:6px;background:#1a1a2a";
+  const top = document.createElement("div");
+  top.style.cssText = "display:flex;gap:8px;align-items:center";
+  const icon = document.createElement("div");
+  icon.style.cssText = "width:56px;height:56px;flex:none;background:#101018;border:1px solid #55557a;border-radius:4px;display:flex;align-items:center;justify-content:center;overflow:hidden";
+  const img = document.createElement("img");
+  img.style.cssText = "width:100%;height:100%;object-fit:contain;image-rendering:pixelated";
+  img.src = "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/portrait/" + (st.dex || "0004") + "/Normal.png";
+  img.addEventListener("error", () => {
+    img.remove();
+    icon.textContent = String(st.species || "?").charAt(0).toUpperCase();
+  });
+  icon.appendChild(img);
+  const info = document.createElement("div");
+  info.style.cssText = "flex:1;line-height:1.5";
+  const line1 = document.createElement("div");
+  line1.style.cssText = "font-weight:bold;color:#ffd23f";
+  line1.textContent = (st.species || "Unknown") + (st.types && st.types.length ? " (" + st.types.join("/") + ")" : "");
+  const line2 = document.createElement("div");
+  line2.textContent = "Level " + st.level;
+  const line3 = document.createElement("div");
+  line3.textContent = "EXP " + st.exp + (st.expGained > 0 ? " (+" + st.expGained + " this session)" : "");
+  info.appendChild(line1);
+  info.appendChild(line2);
+  info.appendChild(line3);
+  top.appendChild(icon);
+  top.appendChild(info);
+  box.appendChild(top);
+  const makeRow = (label, curVal, maxVal, idPrefix) => {
+    const row = document.createElement("div");
+    row.style.cssText = "margin-top:6px;display:flex;align-items:center;gap:4px";
+    const lab = document.createElement("span");
+    lab.style.cssText = "width:26px;color:#c8c8ff";
+    lab.textContent = label;
+    const cur = document.createElement("input");
+    cur.type = "number";
+    cur.value = curVal;
+    cur.style.cssText = "width:62px;background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;padding:3px";
+    const slash = document.createElement("span");
+    slash.textContent = "/";
+    const max = document.createElement("input");
+    max.type = "number";
+    max.value = maxVal;
+    max.style.cssText = "width:62px;background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;padding:3px";
+    row.appendChild(lab);
+    row.appendChild(cur);
+    row.appendChild(slash);
+    row.appendChild(max);
+    box.appendChild(row);
+    return { cur: cur, max: max };
+  };
+  const hp = makeRow("HP", st.hp, st.maxHp);
+  const mp = makeRow("MP", st.mp, st.maxMp);
+  for (const input of [hp.cur, hp.max, mp.cur, mp.max]) {
+    input.addEventListener("focus", () => { chatActive = true; });
+    input.addEventListener("blur", () => { chatActive = false; });
+  }
+  const actions = document.createElement("div");
+  actions.style.cssText = "margin-top:6px;display:flex;gap:6px";
+  const set = document.createElement("button");
+  set.className = "wgBtn";
+  set.textContent = "Set HP and MP";
+  set.addEventListener("click", () => {
+    gmSend({ type: "gm_vitals", target: data.target, hp: hp.cur.value, maxHp: hp.max.value, mp: mp.cur.value, maxMp: mp.max.value });
+  });
+  const full = document.createElement("button");
+  full.className = "wgBtn";
+  full.textContent = "Full heal";
+  full.addEventListener("click", () => {
+    gmSend({ type: "gm_vitals", target: data.target, hp: hp.max.value, maxHp: hp.max.value, mp: mp.max.value, maxMp: mp.max.value });
+  });
+  const refresh = document.createElement("button");
+  refresh.className = "wgBtn";
+  refresh.textContent = "Refresh";
+  refresh.addEventListener("click", () => gmSend({ type: "gm_inspect", target: data.target }));
+  actions.appendChild(set);
+  actions.appendChild(full);
+  actions.appendChild(refresh);
+  box.appendChild(actions);
+  const movesTitle = document.createElement("div");
+  movesTitle.style.cssText = "margin-top:8px;color:#c8c8ff;font-weight:bold";
+  movesTitle.textContent = "Moves";
+  box.appendChild(movesTitle);
+  if (!st.moves || st.moves.length === 0) {
+    const none = document.createElement("div");
+    none.style.cssText = "color:#99a";
+    none.textContent = "No moves";
+    box.appendChild(none);
+  }
+  for (const m of st.moves || []) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;justify-content:space-between;gap:6px;margin-top:3px;padding:3px 5px;background:#2d2d44;border-radius:4px;font-size:11px";
+    const nm = document.createElement("span");
+    nm.textContent = m.name;
+    const meta = document.createElement("span");
+    meta.style.color = "#aab";
+    meta.textContent = m.type + " | " + m.category + " | Pow " + m.power + " | Acc " + m.accuracy + " | MP " + m.mpCost;
+    row.appendChild(nm);
+    row.appendChild(meta);
+    box.appendChild(row);
+  }
+  el.appendChild(box);
+}
+
 function gmRenderInspector(data) {
   if (!WGD.inspect || !gmSameTarget(WGD.inspect, data.target)) return;
   WGD.lastInspect = data;
@@ -3600,6 +3707,8 @@ function gmRenderInspector(data) {
   head.appendChild(title);
   head.appendChild(close);
   el.appendChild(head);
+
+  if (data.target.type === "player" && data.stats) gmRenderPlayerStats(el, data);
 
   const eqTitle = document.createElement("h5");
   eqTitle.textContent = "Equipped (drop an item on a slot)";
@@ -3776,6 +3885,17 @@ window.worldHook = function (scene, data) {
     visSetTime(data);
     return true;
   }
+  if (data.type === "p_vitals") {
+    const sp = otherPlayers[data.id];
+    if (sp && sp !== "loading") {
+      sp.hp = data.hp;
+      sp.maxHp = data.maxHp;
+      sp.mp = data.mp;
+      sp.maxMp = data.maxMp;
+    }
+    return true;
+  }
+
   if (data.type === "p_light") {
     visSetOwner(data.id, data.light, data.lc);
     return true;

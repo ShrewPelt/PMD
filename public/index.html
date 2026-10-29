@@ -630,8 +630,6 @@ function create() {
   kb.on("keydown-F", (e) => { if (e.repeat || chatActive || isGM) return; attemptPickup(); });
   kb.on("keydown-G", (e) => { if (e.repeat || chatActive || isGM) return; attemptDrop(); });
   kb.on("keydown-R", (e) => { if (e.repeat || chatActive || isGM) return; lockAction(this, { type: "use" }); });
-  kb.on("keydown-O", (e) => { if (e.repeat || chatActive) return; debugHp(-8); });
-  kb.on("keydown-P", (e) => { if (e.repeat || chatActive) return; debugHp(8); });
   kb.on("keydown-SPACE", (e) => {
     if (chatActive) return;
     e.preventDefault();
@@ -1469,16 +1467,6 @@ function toggleInventory() {
     panel.classList.add("hidden");
     updateReadout("inventory closed");
   }
-}
-
-function debugHp(amount) {
-  playerHp = playerHp + amount;
-  if (playerHp < 0) playerHp = 0;
-  if (playerHp > playerMaxHp) playerHp = playerMaxHp;
-  player.hp = playerHp;
-  player.maxHp = playerMaxHp;
-  if (inventoryOpen) refreshInventoryPanel();
-  updateReadout("debug HP " + playerHp + "/" + playerMaxHp);
 }
 
 function describeAction(action) {
