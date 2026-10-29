@@ -34,13 +34,15 @@ function scanItemIcons(dir, root, out) {
 
 function currentItemIndex() {
   const now = Date.now();
-  if (!itemIndexCache.data || now - itemIndexCache.at > 10000) {
+  if (!itemIndexCache.data || now - itemIndexCache.at > 5000) {
     const fresh = {};
-    try {
-      const old = JSON.parse(fs.readFileSync(path.join(__dirname, "public", "items-index.json"), "utf8"));
-      for (const k of Object.keys(old)) fresh[k] = old[k];
-    } catch (e) {}
     scanItemIcons(ITEMS_DIR, ITEMS_DIR, fresh);
+    if (Object.keys(fresh).length === 0) {
+      try {
+        const old = JSON.parse(fs.readFileSync(path.join(__dirname, "public", "items-index.json"), "utf8"));
+        for (const k of Object.keys(old)) fresh[k] = old[k];
+      } catch (e) {}
+    }
     itemIndexCache = { at: now, data: fresh, lower: null };
   }
   return itemIndexCache.data;

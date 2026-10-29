@@ -3347,11 +3347,16 @@ function gmBuildCreative() {
   WGD.inspEl = insp;
   gmMakeDraggable(insp, insp, "pmdInspectorPos", null, (target) => !!(target && target.closest && target.closest(".wgInHead")));
 
-  fetch("items-index.json").then((r) => r.json()).then((data) => {
-    itemIndex = data;
-    gmCreativeFill();
-    if (WGD.inspect && WGD.lastInspect) gmRenderInspector(WGD.lastInspect);
-  }).catch(() => {});
+  const loadIndex = () => {
+    fetch("items-index.json", { cache: "no-store" }).then((r) => r.json()).then((data) => {
+      if (JSON.stringify(data) === JSON.stringify(itemIndex)) return;
+      itemIndex = data;
+      gmCreativeFill();
+      if (WGD.inspect && WGD.lastInspect) gmRenderInspector(WGD.lastInspect);
+    }).catch(() => {});
+  };
+  loadIndex();
+  setInterval(loadIndex, 8000);
   gmCreativeFill();
 }
 
