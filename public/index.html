@@ -1431,10 +1431,11 @@ function buildInventoryGrid() {
       } else {
         cell.textContent = stack.name;
       }
-      if (stack.count > 1) {
+      const shownCount = typeof heldRemaining === "function" ? heldRemaining("inv", i, stack) : stack.count;
+      if (shownCount > 1) {
         const badge = document.createElement("div");
         badge.className = "badge";
-        badge.textContent = stack.count;
+        badge.textContent = shownCount;
         cell.appendChild(badge);
       }
       const canText = typeof farmCanSlotText === "function" ? farmCanSlotText(stack.name) : "";
@@ -1461,6 +1462,12 @@ function buildInventoryGrid() {
         selectSlot(slotIndex);
       });
       cell.addEventListener("dragstart", (ev) => ev.preventDefault());
+      cell.addEventListener("contextmenu", (ev) => {
+        if (typeof CHEST === "object" && CHEST.key && typeof heldStart === "function") {
+          ev.preventDefault();
+          heldStart("inv", slotIndex, ev.shiftKey, ev);
+        }
+      });
       cell.addEventListener("pointerdown", (ev) => invDragDown(ev, slotIndex, cell));
     }
     cell.setAttribute("data-slot", String(i));

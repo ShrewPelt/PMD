@@ -3607,7 +3607,7 @@ function chestInject() {
   el.appendChild(grid);
   const hint = document.createElement("div");
   hint.className = "chHint";
-  hint.textContent = "Drag items between your bag and the chest. Tap a chest item to take it.";
+  hint.textContent = "Drag items between your bag and the chest. Tap a chest item to take it. Right click a stack to pick up 1 (keep right clicking to add more). Shift + right click picks up half. Then left click a slot to place it.";
   el.appendChild(hint);
   document.body.appendChild(el);
   CHEST.el = el;
@@ -3635,10 +3635,11 @@ function chestRender() {
       } else {
         cell.textContent = stack.name;
       }
-      if (stack.count > 1) {
+      const shownCount = heldRemaining("chest", i, stack);
+      if (shownCount > 1) {
         const badge = document.createElement("div");
         badge.className = "badge";
-        badge.textContent = stack.count;
+        badge.textContent = shownCount;
         cell.appendChild(badge);
       }
       cell.classList.add("hasitem");
@@ -3652,6 +3653,10 @@ function chestRender() {
         gmSend({ type: "chest_take", key: CHEST.key, from: slotIndex });
       });
       cell.addEventListener("dragstart", (ev) => ev.preventDefault());
+      cell.addEventListener("contextmenu", (ev) => {
+        ev.preventDefault();
+        heldStart("chest", slotIndex, ev.shiftKey, ev);
+      });
       cell.addEventListener("pointerdown", (ev) => invDragDown(ev, slotIndex, cell, "chest"));
     }
     CHEST.grid.appendChild(cell);
@@ -3671,6 +3676,7 @@ function chestShow(data) {
 }
 
 function chestHide() {
+  heldCancel();
   CHEST.key = null;
   if (CHEST.el) CHEST.el.classList.add("hidden");
 }
@@ -3689,6 +3695,7 @@ function chestMessage(data) {
   if (data.type === "chest_sync") {
     if (CHEST.key === data.key) {
       CHEST.slots = data.slots;
+      heldSync();
       chestRender();
     }
     return true;
@@ -3701,7 +3708,161 @@ function chestMessage(data) {
 }
 
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape" && CHEST.key) chestCloseRequest();
+  if (ev.key === "Escape" && CHEST.key) {
+    if (HELD.active) {
+      heldCancel();
+      return;
+    }
+    chestCloseRequest();
+  }
+});
+
+const HELD = { active: false, source: "chest", slot: -1, name: "", count: 0, ghost: null, styled: false };
+
+function heldStack() {
+  if (!HELD.active) return null;
+  const stack = HELD.source === "chest" ? CHEST.slots[HELD.slot] : (typeof inventoryItems !== "undefined" ? inventoryItems[HELD.slot] : null);
+  if (!stack || String(stack.name).toLowerCase() !== HELD.name.toLowerCase()) return null;
+  return stack;
+}
+
+function heldRemaining(source, slot, stack) {
+  if (HELD.active && HELD.source === source && HELD.slot === slot) return Math.max(0, stack.count - HELD.count);
+  return stack.count;
+}
+
+function heldRefreshViews() {
+  if (CHEST.key) chestRender();
+  if (typeof buildInventoryGrid === "function" && typeof inventoryOpen !== "undefined" && inventoryOpen) buildInventoryGrid();
+}
+
+function heldDrawGhost() {
+  if (!HELD.ghost) return;
+  HELD.ghost.innerHTML = "";
+  const path = typeof itemIndex === "object" && itemIndex ? itemIndex[HELD.name] : null;
+  if (path) {
+    const img = document.createElement("img");
+    img.src = encodeURI(path);
+    img.style.cssText = "width:40px;height:40px;image-rendering:pixelated;display:block";
+    HELD.ghost.appendChild(img);
+  } else {
+    const label = document.createElement("div");
+    label.textContent = HELD.name;
+    label.style.cssText = "font-size:11px;color:#fff;background:#2d2d44;padding:2px 4px;border-radius:4px";
+    HELD.ghost.appendChild(label);
+  }
+  const badge = document.createElement("div");
+  badge.textContent = String(HELD.count);
+  badge.style.cssText = "position:absolute;right:-4px;bottom:-4px;background:#000;color:#ffd23f;font-size:12px;font-weight:bold;padding:0 4px;border-radius:6px;border:1px solid #ffd23f";
+  HELD.ghost.appendChild(badge);
+}
+
+function heldCancel() {
+  if (!HELD.active) return;
+  HELD.active = false;
+  if (HELD.ghost) {
+    HELD.ghost.remove();
+    HELD.ghost = null;
+  }
+  heldRefreshViews();
+}
+
+function heldStart(source, slot, split, ev) {
+  if (!CHEST.key) return;
+  const stack = source === "chest" ? CHEST.slots[slot] : (typeof inventoryItems !== "undefined" ? inventoryItems[slot] : null);
+  if (!stack) return;
+  if (HELD.active && HELD.source === source && HELD.slot === slot && heldStack()) {
+    if (HELD.count < stack.count) HELD.count = HELD.count + 1;
+    heldDrawGhost();
+    heldRefreshViews();
+    return;
+  }
+  if (!HELD.ghost) {
+    const ghost = document.createElement("div");
+    ghost.style.cssText = "position:fixed;z-index:60;pointer-events:none;width:44px;height:44px;display:flex;align-items:center;justify-content:center";
+    document.body.appendChild(ghost);
+    HELD.ghost = ghost;
+  }
+  HELD.active = true;
+  HELD.source = source;
+  HELD.slot = slot;
+  HELD.name = stack.name;
+  HELD.count = split ? Math.max(1, Math.floor(stack.count / 2)) : 1;
+  if (ev) {
+    HELD.ghost.style.left = (ev.clientX - 22) + "px";
+    HELD.ghost.style.top = (ev.clientY - 22) + "px";
+  }
+  heldDrawGhost();
+  heldRefreshViews();
+}
+
+function heldSync() {
+  if (!HELD.active) return;
+  const stack = heldStack();
+  if (!stack || !CHEST.key) {
+    heldCancel();
+    return;
+  }
+  if (HELD.count > stack.count) {
+    HELD.count = stack.count;
+    heldDrawGhost();
+  }
+}
+
+function heldPlace(ev) {
+  const target = ev.target && ev.target.closest ? ev.target : null;
+  if (!target) return false;
+  const slotEl = target.closest("[data-cslot]");
+  const chestPanel = document.getElementById("chestPanel");
+  const invPanel = document.getElementById("inventory");
+  const overChest = !!chestPanel && chestPanel.contains(target);
+  const overInv = !!invPanel && invPanel.contains(target);
+  if (slotEl) {
+    const to = parseInt(slotEl.getAttribute("data-cslot"), 10);
+    if (HELD.source === "chest") {
+      if (to === HELD.slot) {
+        heldCancel();
+        return true;
+      }
+      gmSend({ type: "chest_move", key: CHEST.key, from: HELD.slot, to: to, count: HELD.count });
+    } else {
+      gmSend({ type: "chest_put", key: CHEST.key, from: HELD.slot, to: to, count: HELD.count });
+    }
+    heldCancel();
+    return true;
+  }
+  if (overInv && HELD.source === "chest") {
+    gmSend({ type: "chest_take", key: CHEST.key, from: HELD.slot, count: HELD.count });
+    heldCancel();
+    return true;
+  }
+  if (overChest && HELD.source === "inv") {
+    gmSend({ type: "chest_put", key: CHEST.key, from: HELD.slot, count: HELD.count });
+    heldCancel();
+    return true;
+  }
+  if (overChest || overInv) return true;
+  heldCancel();
+  return false;
+}
+
+document.addEventListener("click", (ev) => {
+  if (!HELD.active) return;
+  if (!heldStack()) {
+    heldCancel();
+    return;
+  }
+  const handled = heldPlace(ev);
+  if (handled) {
+    ev.stopPropagation();
+    ev.preventDefault();
+  }
+}, true);
+
+document.addEventListener("pointermove", (ev) => {
+  if (!HELD.active || !HELD.ghost) return;
+  HELD.ghost.style.left = (ev.clientX - 22) + "px";
+  HELD.ghost.style.top = (ev.clientY - 22) + "px";
 });
 
 const FREE = { speed: 5.2, half: 0.28, lastSend: 0, sentX: 0, sentY: 0, moving: false, wasCombat: false, lastTime: 0, anim: "" };
@@ -4543,6 +4704,7 @@ window.worldHook = function (scene, data) {
       for (const entry of data.inventory) inventoryItems.push({ name: entry.name, count: entry.count });
       selectedSlot = -1;
     }
+    heldSync();
     if (inventoryOpen) refreshInventoryPanel();
     return true;
   }

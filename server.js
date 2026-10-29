@@ -4228,14 +4228,15 @@ function handleChestPut(p, data) {
   }
   const slots = chestSlotsOf(key);
   const preferred = data.to === undefined || data.to === null ? -1 : parseInt(data.to, 10);
-  const total = stack.count;
+  const wanted = parseInt(data.count, 10);
+  const total = Number.isInteger(wanted) && wanted > 0 ? Math.min(wanted, stack.count) : stack.count;
   const left = chestInsert(slots, stack.name, total, preferred);
   const moved = total - left;
   if (moved <= 0) {
     farmNotice(p, false, "The chest is full.");
     return;
   }
-  stack.count = left;
+  stack.count = stack.count - moved;
   if (stack.count <= 0) p._inv.splice(from, 1);
   saveChestData();
   syncPlayerInventory(p);
@@ -4252,6 +4253,8 @@ function handleChestTake(p, data) {
     return;
   }
   const entry = slots[from];
+  const wantedTake = parseInt(data.count, 10);
+  const takeCount = Number.isInteger(wantedTake) && wantedTake > 0 ? Math.min(wantedTake, entry.count) : entry.count;
   let existing = null;
   for (const stack of p._inv) {
     if (String(stack.name).toLowerCase() === String(entry.name).toLowerCase()) existing = stack;
@@ -4260,9 +4263,10 @@ function handleChestTake(p, data) {
     farmNotice(p, false, "Your bag is full.");
     return;
   }
-  if (existing) existing.count += entry.count;
-  else p._inv.push({ name: entry.name, count: entry.count });
-  slots[from] = null;
+  if (existing) existing.count += takeCount;
+  else p._inv.push({ name: entry.name, count: takeCount });
+  entry.count -= takeCount;
+  if (entry.count <= 0) slots[from] = null;
   saveChestData();
   syncPlayerInventory(p);
   chestBroadcast(key);
@@ -4282,6 +4286,24 @@ function handleChestMove(p, data) {
   const a = slots[from];
   const b = slots[to];
   const max = Number(CHEST.maxStack) || 99;
+  const wantedMove = parseInt(data.count, 10);
+  if (Number.isInteger(wantedMove) && wantedMove > 0 && wantedMove < a.count) {
+    if (!b) {
+      slots[to] = { name: a.name, count: wantedMove };
+      a.count -= wantedMove;
+    } else if (String(a.name).toLowerCase() === String(b.name).toLowerCase()) {
+      const put = Math.min(max - b.count, wantedMove);
+      b.count += put;
+      a.count -= put;
+    } else {
+      farmNotice(p, false, "That slot already holds something else.");
+      chestBroadcast(key);
+      return;
+    }
+    saveChestData();
+    chestBroadcast(key);
+    return;
+  }
   if (!b) {
     slots[to] = a;
     slots[from] = null;
