@@ -514,6 +514,13 @@ function enterPlayerWorld(scene) {
     worldViewGfx.setDepth(0);
   }
   scene.input.on("pointerdown", (pointer) => atkPointer(scene, pointer));
+  scene.input.on("pointerdown", (pointer) => visLookDown(pointer));
+  if (!VIS.lookBound) {
+    VIS.lookBound = true;
+    scene.game.canvas.addEventListener("contextmenu", (ev) => {
+      if (worldPlayerMode) ev.preventDefault();
+    });
+  }
   document.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape" && atkTarget) atkClose();
   });
@@ -1571,6 +1578,11 @@ function gmBuildPanel() {
     + ".wgCatTabs{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:4px}"
     + ".wgCatTab{padding:3px 7px;background:#2d2d44;border:1px solid #55557a;border-radius:5px;color:#fff;font-size:10px;cursor:pointer}"
     + ".wgCatTab.on{background:#4a6cff;border-color:#fff}"
+    + ".wgPager{display:flex;align-items:center;gap:4px;margin-bottom:4px}"
+    + ".wgPager button{padding:3px 9px;background:#2d2d44;border:1px solid #55557a;border-radius:5px;color:#fff;font-size:12px;cursor:pointer}"
+    + ".wgPager button:hover{border-color:#fff}"
+    + ".wgPager .wgPageTitle{flex:1;text-align:center;font-size:11px;color:#ffd23f;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+    + ".wgPageBody{max-height:300px;overflow-y:auto}"
     + ".wgCatEmpty{padding:8px 4px;color:#aab;font-size:11px}"
     + ".wgAsset.on{background:#4a6cff;border-color:#fff}"
     + ".wgAsset img{width:36px;height:36px;object-fit:contain;image-rendering:pixelated;margin-bottom:2px}"
@@ -1861,7 +1873,38 @@ function gmShowSelection() {
   document.getElementById("wgEMoves").value = (picked.moves || []).join(", ");
 }
 
-let wgObjCategory = "Default";
+let wgObjPageTitle = "";
+
+function gmMakePager(titles, getIndex, setIndex) {
+  const bar = document.createElement("div");
+  bar.className = "wgPager";
+  const left = document.createElement("button");
+  left.textContent = "<";
+  const right = document.createElement("button");
+  right.textContent = ">";
+  const label = document.createElement("div");
+  label.className = "wgPageTitle";
+  bar.appendChild(left);
+  bar.appendChild(label);
+  bar.appendChild(right);
+  const refresh = () => {
+    const i = getIndex();
+    label.textContent = titles.length === 0 ? "No pages" : titles[i] + "  (" + (i + 1) + "/" + titles.length + ")";
+    label.title = titles[i] || "";
+  };
+  left.addEventListener("click", () => {
+    if (titles.length === 0) return;
+    setIndex((getIndex() - 1 + titles.length) % titles.length);
+    refresh();
+  });
+  right.addEventListener("click", () => {
+    if (titles.length === 0) return;
+    setIndex((getIndex() + 1) % titles.length);
+    refresh();
+  });
+  refresh();
+  return { bar: bar, refresh: refresh };
+}
 
 function buildObjectPicker(objBox, list, addButtons) {
   const cats = (Array.isArray(list.objectCategories) ? list.objectCategories : []).filter((c) => c.groups.some((g) => g.objects.length > 0));
@@ -1870,41 +1913,31 @@ function buildObjectPicker(objBox, list, addButtons) {
     else addButtons(objBox, "object", list.objects);
     return;
   }
-  if (!cats.some((c) => c.name === wgObjCategory)) wgObjCategory = cats[0].name;
-  const tabs = document.createElement("div");
-  tabs.className = "wgCatTabs";
-  const grid = document.createElement("div");
-  const fill = () => {
-    grid.innerHTML = "";
-    const cat = cats.find((c) => c.name === wgObjCategory);
-    if (!cat) return;
+  const pages = [];
+  for (const cat of cats) {
     for (const group of cat.groups) {
       if (group.objects.length === 0) continue;
-      if (group.name) {
-        const head = document.createElement("div");
-        head.className = "wgCatEmpty";
-        head.style.cssText = "color:#ffd23f;margin:6px 0 2px 0;font-weight:bold";
-        head.textContent = group.name;
-        grid.appendChild(head);
-      }
-      const box = document.createElement("div");
-      grid.appendChild(box);
-      addButtons(box, "object", group.objects);
+      pages.push({ title: cat.name + (group.name ? " > " + group.name : ""), objects: group.objects });
     }
+  }
+  let index = pages.findIndex((p) => p.title === wgObjPageTitle);
+  if (index < 0) index = 0;
+  const grid = document.createElement("div");
+  grid.className = "wgPageBody";
+  const fill = () => {
+    grid.innerHTML = "";
+    grid.scrollTop = 0;
+    const page = pages[index];
+    if (!page) return;
+    wgObjPageTitle = page.title;
+    addButtons(grid, "object", page.objects);
     gmRefreshAssetHighlight();
   };
-  for (const cat of cats) {
-    const tab = document.createElement("button");
-    tab.className = "wgCatTab" + (cat.name === wgObjCategory ? " on" : "");
-    tab.textContent = cat.name;
-    tab.addEventListener("click", () => {
-      wgObjCategory = cat.name;
-      for (const t of tabs.children) t.classList.toggle("on", t === tab);
-      fill();
-    });
-    tabs.appendChild(tab);
-  }
-  objBox.appendChild(tabs);
+  const pager = gmMakePager(pages.map((p) => p.title), () => index, (i) => {
+    index = i;
+    fill();
+  });
+  objBox.appendChild(pager.bar);
   objBox.appendChild(grid);
   fill();
 }
@@ -3289,7 +3322,7 @@ function gmBuildCreative() {
 
   const box = document.createElement("div");
   box.id = "wgCreative";
-  box.innerHTML = "<div class='wgCrHead'>Creative items | drag out to place or give, drag anything back here to delete</div><input type='text' id='wgCreSearch' placeholder='Search items'><div id='wgCreGrid'></div>";
+  box.innerHTML = "<div class='wgCrHead'>Creative items | drag out to place or give, drag anything back here to delete</div><input type='text' id='wgCreSearch' placeholder='Search items'><div id='wgCrePager'></div><div id='wgCreGrid'></div>";
   document.body.appendChild(box);
   const coords = document.createElement("div");
   coords.id = "wgCoords";
@@ -3321,17 +3354,49 @@ function gmBuildCreative() {
   gmCreativeFill();
 }
 
+let wgCrePage = 0;
+let wgCrePagerBuilt = "";
+
+function gmItemFolder(path) {
+  const text = String(path || "").replace(/^\/?items\//i, "");
+  const cut = text.lastIndexOf("/");
+  return cut > 0 ? text.substring(0, cut).split("/").join(" > ") : "Other";
+}
+
 function gmCreativeFill() {
   if (!WGD.gridEl) return;
   const query = WGD.searchEl.value.trim().toLowerCase();
   const names = typeof itemIndex === "object" && itemIndex ? Object.keys(itemIndex).sort() : [];
   WGD.gridEl.innerHTML = "";
+  const pagerBox = document.getElementById("wgCrePager");
   if (names.length === 0) {
     WGD.gridEl.textContent = "Loading items...";
     return;
   }
-  let shown = 0;
+  const folders = {};
   for (const name of names) {
+    const folder = gmItemFolder(itemIndex[name]);
+    if (!folders[folder]) folders[folder] = [];
+    folders[folder].push(name);
+  }
+  const titles = Object.keys(folders).sort();
+  if (wgCrePage >= titles.length) wgCrePage = 0;
+  const key = titles.join("|");
+  if (pagerBox && wgCrePagerBuilt !== key) {
+    wgCrePagerBuilt = key;
+    pagerBox.innerHTML = "";
+    const pager = gmMakePager(titles, () => wgCrePage, (i) => {
+      wgCrePage = i;
+      gmCreativeFill();
+    });
+    WGD.pager = pager;
+    pagerBox.appendChild(pager.bar);
+  }
+  if (pagerBox) pagerBox.style.display = query ? "none" : "block";
+  if (WGD.pager) WGD.pager.refresh();
+  const pool = query ? names : (folders[titles[wgCrePage]] || []);
+  let shown = 0;
+  for (const name of pool) {
     if (query && name.toLowerCase().indexOf(query) === -1) continue;
     const cell = document.createElement("div");
     cell.className = "wgCreItem";
@@ -3344,6 +3409,7 @@ function gmCreativeFill() {
     WGD.gridEl.appendChild(cell);
     shown++;
   }
+  WGD.gridEl.scrollTop = 0;
   if (shown === 0) WGD.gridEl.textContent = "No items match that search.";
 }
 
@@ -3962,7 +4028,7 @@ const VIS_RES = 0.5;
 const VIS_RT_TILES = 25;
 const VIS_DIR_ANGLE = { right: 0, downright: Math.PI / 4, down: Math.PI / 2, downleft: 3 * Math.PI / 4, left: Math.PI, upleft: -3 * Math.PI / 4, up: -Math.PI / 2, upright: -Math.PI / 4 };
 const VIS_DEFAULT_CFG = { coneDegrees: 110, dayRange: 10, nearRadius: 1.5, nightReach: 0, nightVisionReach: 8, darknessMax: 1, lightObjects: [] };
-const VIS = { cfg: null, objDefs: [], hour: 12, hourAt: Date.now(), dayMs: 1440000, frozen: false, layerMode: "outdoor", nv: false, selfR: 0, selfC: "#ffb347", block: {}, ang: 0, angReady: false, fogRT: null, darkRT: null, lightImg: null, polyGfx: null, glows: [], flames: {}, glowRT: null, glowPx: 0, glowStamp: null, cm: null, owners: {}, audio: {}, lights: [], lastUi: 0, texReady: false };
+const VIS = { cfg: null, objDefs: [], hour: 12, hourAt: Date.now(), dayMs: 1440000, frozen: false, layerMode: "outdoor", nv: false, selfR: 0, selfC: "#ffb347", block: {}, ang: 0, angReady: false, fogRT: null, darkRT: null, lightImg: null, polyGfx: null, glows: [], look: null, lookMouse: false, touch: null, flames: {}, glowRT: null, glowPx: 0, glowStamp: null, cm: null, owners: {}, audio: {}, lights: [], lastUi: 0, texReady: false };
 
 function visCfg(key) {
   if (VIS.cfg && VIS.cfg[key] !== undefined) return VIS.cfg[key];
@@ -4412,6 +4478,85 @@ function visWrapBars() {
   };
 }
 
+function visLookDown(pointer) {
+  if (!worldPlayerMode || worldGmMode) return;
+  if (pointer.wasTouch) {
+    VIS.touch = { ptr: pointer, x0: pointer.x, y0: pointer.y, t0: Date.now(), active: false };
+  } else if (pointer.rightButtonDown()) {
+    VIS.lookMouse = true;
+    atkClose();
+  }
+}
+
+function visLookBlocked() {
+  if (COMBAT.active || chatActive || lootState) return true;
+  if (typeof itemMenuOpenNow === "function" && itemMenuOpenNow()) return true;
+  return false;
+}
+
+function visFaceAngle(ang) {
+  let best = null;
+  let bestDiff = 99;
+  for (const name in VIS_DIR_ANGLE) {
+    const diff = Math.abs(visAngleDiff(ang, VIS_DIR_ANGLE[name]));
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = name;
+    }
+  }
+  if (best && state === "input" && player.direction !== best) {
+    player.direction = best;
+    player.play(DEX + "_idle_" + best);
+    sendFace();
+  }
+}
+
+function visLookFrame(scene) {
+  const cam = scene.cameras.main;
+  const ptr = scene.input.activePointer;
+  const blocked = visLookBlocked();
+  let ang = null;
+  if (VIS.lookMouse) {
+    if (blocked || ptr.wasTouch || !ptr.rightButtonDown()) {
+      VIS.lookMouse = false;
+    } else {
+      const wp = cam.getWorldPoint(ptr.x, ptr.y);
+      if (Math.hypot(wp.x - player.x, wp.y - player.y) > 6) ang = Math.atan2(wp.y - player.y, wp.x - player.x);
+    }
+  }
+  const t = VIS.touch;
+  if (t) {
+    if (!t.ptr.isDown || blocked) {
+      VIS.touch = null;
+    } else {
+      if (!t.active) {
+        if (Math.hypot(t.ptr.x - t.x0, t.ptr.y - t.y0) > 14) {
+          VIS.touch = null;
+        } else if (Date.now() - t.t0 >= 250) {
+          t.active = true;
+          t.x0 = t.ptr.x;
+          t.y0 = t.ptr.y;
+          atkClose();
+        }
+      }
+      if (VIS.touch && t.active && Math.hypot(t.ptr.x - t.x0, t.ptr.y - t.y0) > 14) {
+        const a = cam.getWorldPoint(t.x0, t.y0);
+        const b = cam.getWorldPoint(t.ptr.x, t.ptr.y);
+        ang = Math.atan2(b.y - a.y, b.x - a.x);
+      }
+    }
+  }
+  if (ang !== null) {
+    VIS.look = { ang: ang, dir: player.direction, col: player.col, row: player.row };
+    visFaceAngle(ang);
+    VIS.look.dir = player.direction;
+    return;
+  }
+  if (VIS.look && !VIS.lookMouse && !(VIS.touch && VIS.touch.active)) {
+    if (player.direction !== VIS.look.dir || player.col !== VIS.look.col || player.row !== VIS.look.row) VIS.look = null;
+  }
+}
+
 function visFrame(scene) {
   visWrapBars();
   const t = scene.time.now;
@@ -4430,7 +4575,8 @@ function visFrame(scene) {
   const D = visDarkness();
   const half = visCfg("coneDegrees") * Math.PI / 360;
   const dayRange = visCfg("dayRange");
-  const target = VIS_DIR_ANGLE[player.direction];
+  visLookFrame(scene);
+  const target = VIS.look ? VIS.look.ang : VIS_DIR_ANGLE[player.direction];
   if (target !== undefined) {
     if (!VIS.angReady) {
       VIS.ang = target;
@@ -4502,6 +4648,12 @@ function visFrame(scene) {
     const label = worldEntityLabels[id];
     if (label) label.setVisible(seen);
     if (seen) occupied[Math.floor(sp.x / TILE) + "," + Math.floor(sp.y / TILE)] = true;
+  }
+  for (const key in floorItemSprites) {
+    const isp = floorItemSprites[key];
+    if (!isp || !isp.active) continue;
+    const seenItem = visCanSee(ox, oy, isp.x, isp.y, half);
+    if (isp.visible !== seenItem) isp.setVisible(seenItem);
   }
   visWalkFade(occupied, 1 - Math.exp(-dt / 90));
   visWobble(t, scene);

@@ -531,6 +531,27 @@ function walkTileFolder(dir, depth, out) {
   }
 }
 
+function collectFolderGroups(dir, parts, depth, parentName, out, claim) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (e) {
+    return;
+  }
+  entries.sort((x, y) => x.name.localeCompare(y.name));
+  const direct = [];
+  for (const entry of entries) {
+    if (entry.isFile() && /\.png$/i.test(entry.name)) {
+      direct.push({ file: path.join(dir, entry.name), base: entry.name.replace(/\.png$/i, ""), parent: path.basename(dir) });
+    }
+  }
+  if (direct.length > 0) out.push({ name: parts.join(" > "), objects: direct.map(claim).sort() });
+  if (depth >= TILE_SCAN_DEPTH) return;
+  for (const entry of entries) {
+    if (entry.isDirectory()) collectFolderGroups(path.join(dir, entry.name), parts.concat([entry.name]), depth + 1, parentName, out, claim);
+  }
+}
+
 function scanTiles(force) {
   const now = Date.now();
   if (!force && tileScanCache.data && now - tileScanCache.at < TILE_SCAN_TTL) return tileScanCache.data;
@@ -619,29 +640,14 @@ function scanObjects(force) {
   for (const rootEntry of catRoots) {
     const folder = rootEntry.name;
     if (folder.toLowerCase() === "default") {
-      const extra = [];
-      walkTileFolder(rootEntry.dir, 0, extra);
-      if (extra.length > 0) categories[0].groups.push({ name: "", objects: extra.map(claim).sort() });
+      const extraGroups = [];
+      collectFolderGroups(rootEntry.dir, [], 0, folder, extraGroups, claim);
+      for (const g of extraGroups) categories[0].groups.push(g);
       continue;
     }
     const catDir = rootEntry.dir;
     const groups = [];
-    let entries = [];
-    try {
-      entries = fs.readdirSync(catDir, { withFileTypes: true });
-    } catch (e) {}
-    entries.sort((x, y) => x.name.localeCompare(y.name));
-    const direct = [];
-    for (const entry of entries) {
-      if (entry.isFile() && /\.png$/i.test(entry.name)) direct.push({ file: path.join(catDir, entry.name), base: entry.name.replace(/\.png$/i, ""), parent: folder });
-    }
-    if (direct.length > 0) groups.push({ name: "", objects: direct.map(claim).sort() });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const found = [];
-      walkTileFolder(path.join(catDir, entry.name), 0, found);
-      if (found.length > 0) groups.push({ name: entry.name, objects: found.map(claim).sort() });
-    }
+    collectFolderGroups(catDir, [], 0, folder, groups, claim);
     categories.push({ name: folder, groups: groups });
   }
   objectScanCache = { at: now, data: { categories: categories, files: files } };
