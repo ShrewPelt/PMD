@@ -775,7 +775,11 @@ function pollMovement() {
 function update() {
   updateViewRotation();
   if (typeof worldFrame === "function") worldFrame(sceneRef);
-  pollMovement();
+  if (typeof freeModeActive === "function" && freeModeActive()) freeMoveFrame();
+  else {
+    if (typeof freeCombatFrame === "function") freeCombatFrame();
+    pollMovement();
+  }
   syncSpriteFacing(player);
   for (const id in otherPlayers) {
     syncSpriteFacing(otherPlayers[id]);
@@ -1011,6 +1015,7 @@ function playerRestingY(col, row) {
 }
 
 function updatePlayerLift() {
+  if (typeof freeModeActive === "function" && freeModeActive()) return;
   player.y = playerRestingY(player.col, player.row);
 }
 
@@ -1643,10 +1648,12 @@ function connectMultiplayer(scene) {
         const sprite = otherPlayers[data.id];
         if (sprite && sprite !== "loading") {
           sprite.direction = data.direction;
-          const tx = tilePixelX(data.col);
-          const ty = tilePixelY(data.row);
-          sprite.play(sprite.dex + "_walk_" + data.direction);
-          scene.tweens.add({ targets: sprite, x: tx, y: ty, duration: 110, onComplete: () => { if (sprite.active && sprite.anims) sprite.play(sprite.dex + "_idle_" + sprite.direction); } });
+          const free = typeof data.fx === "number" && typeof data.fy === "number";
+          const tx = free ? data.fx * TILE : tilePixelX(data.col);
+          const ty = free ? data.fy * TILE : tilePixelY(data.row);
+          scene.tweens.killTweensOf(sprite);
+          sprite.play(sprite.dex + "_walk_" + data.direction, true);
+          scene.tweens.add({ targets: sprite, x: tx, y: ty, duration: free ? 90 : 110, ease: free ? "Linear" : "Quad.easeInOut", onComplete: () => { if (sprite.active && sprite.anims) sprite.play(sprite.dex + "_idle_" + sprite.direction); } });
         }
       }
     } else if (data.type === "moveblocked") {

@@ -446,8 +446,14 @@ const WORLD_GM_SESSION = "worldgm";
 const WORLD_SAVE_INTERVAL = 30000;
 const WORLD_CHECKPOINT_INTERVAL = 60000;
 const LAYER_SAVE_DELAY = 1500;
-const LAYER_W = 1024;
-const LAYER_H = 1024;
+const LAYER_W = 10000;
+const LAYER_H = 10000;
+const BLANK_ROW = " ".repeat(LAYER_W);
+
+function trimRowEnd(row) {
+  if (row === BLANK_ROW) return "";
+  return row.trimEnd();
+}
 const MAX_LAYER = 999;
 const MIN_LAYER = -999;
 const CHAT_RANGE = 10;
@@ -812,15 +818,14 @@ function cleanRot(value) {
 
 function makeLayer(name) {
   const rows = [];
-  const blank = " ".repeat(LAYER_W);
-  for (let r = 0; r < LAYER_H; r++) rows.push(blank);
+  for (let r = 0; r < LAYER_H; r++) rows.push(BLANK_ROW);
   return { name: name || "", rows: rows, art: rows.slice(), objects: {}, passable: {}, portals: {}, spawn: null, light: "outdoor" };
 }
 
 function layerHasContent(L) {
   if (L.name || L.spawn || (L.light && L.light !== "outdoor") || Object.keys(L.portals).length > 0 || Object.keys(L.objects).length > 0 || Object.keys(L.passable).length > 0) return true;
   for (const row of L.rows) {
-    if (row.trim().length > 0) return true;
+    if (row !== BLANK_ROW && row.trim().length > 0) return true;
   }
   return false;
 }
@@ -837,11 +842,11 @@ function loadLayers() {
       const L = makeLayer(saved.name || "");
       const rows = Array.isArray(saved.rows) ? saved.rows : [];
       for (let r = 0; r < LAYER_H && r < rows.length; r++) {
-        L.rows[r] = String(rows[r]).padEnd(LAYER_W, " ").slice(0, LAYER_W);
+        if (String(rows[r]).trim().length > 0) L.rows[r] = String(rows[r]).padEnd(LAYER_W, " ").slice(0, LAYER_W);
       }
       const art = Array.isArray(saved.art) ? saved.art : [];
       for (let r = 0; r < LAYER_H && r < art.length; r++) {
-        L.art[r] = String(art[r]).padEnd(LAYER_W, " ").slice(0, LAYER_W);
+        if (String(art[r]).trim().length > 0) L.art[r] = String(art[r]).padEnd(LAYER_W, " ").slice(0, LAYER_W);
       }
       const objList = Array.isArray(saved.objects) ? saved.objects : [];
       for (const o of objList) {
@@ -937,7 +942,7 @@ function saveLayersNow() {
       const parts = k.split(",");
       passOut.push([parseInt(parts[0], 10), parseInt(parts[1], 10)]);
     }
-    out[key] = { name: L.name, passable: passOut, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), objects: objList, portals: L.portals, spawn: L.spawn, light: L.light || "outdoor" };
+    out[key] = { name: L.name, passable: passOut, rows: L.rows.map(trimRowEnd), art: L.art.map(trimRowEnd), objects: objList, portals: L.portals, spawn: L.spawn, light: L.light || "outdoor" };
   }
   writeJsonFile(LAYERS_FILE, out);
   layersDirty = false;
@@ -981,6 +986,7 @@ function layerSpawn(layer) {
   }
   if (L) {
     for (let r = 0; r < LAYER_H; r++) {
+      if (L.rows[r] === BLANK_ROW) continue;
       const c = L.rows[r].search(/[.P]/);
       if (c !== -1) return { col: c, row: r };
     }
@@ -1872,21 +1878,25 @@ function sendView(p) {
   const r0 = p.row - VIEW_HALF_H;
   const rows = [];
   const artRows = [];
+  const solRows = [];
   for (let r = r0; r < r0 + h; r++) {
     let line = "";
     let artLine = "";
+    let solLine = "";
     for (let c = c0; c < c0 + w; c++) {
       const ch = tileAt(p.layer, c, r);
       line += ch === "x" ? "." : ch;
       artLine += ch === " " ? " " : artAt(p.layer, c, r);
+      solLine += isWalkable(p.layer, c, r) ? "0" : "1";
     }
     rows.push(line);
     artRows.push(artLine);
+    solRows.push(solLine);
   }
   const selfLight = playerLightInfo(p);
   p._lightSig = selfLight.r + "|" + selfLight.c;
   const layerObj = layers[p.layer];
-  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, art: artRows, palette: tilePalette, objects: objectsInWindow(p.layer, c0, r0, w, h), entities: entitiesInWindow(p.layer, c0, r0, w, h), items: itemsInWindow(p.layer, c0, r0, w, h), lm: layerObj && layerObj.light ? layerObj.light : "outdoor", nv: playerNightVision(p) ? 1 : 0, sl: selfLight.r, slc: selfLight.c });
+  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, art: artRows, sol: solRows, palette: tilePalette, objects: objectsInWindow(p.layer, c0, r0, w, h), entities: entitiesInWindow(p.layer, c0, r0, w, h), items: itemsInWindow(p.layer, c0, r0, w, h), lm: layerObj && layerObj.light ? layerObj.light : "outdoor", nv: playerNightVision(p) ? 1 : 0, sl: selfLight.r, slc: selfLight.c });
 }
 
 function notifyItem(layer, col, row, data) {
@@ -4385,6 +4395,88 @@ function teleportPlayer(p, layer, col, row) {
   companionSnap(p);
 }
 
+const FREE_SPEED_TPS = 5.2;
+
+function playerFreePos(p) {
+  if (typeof p._fx === "number" && typeof p._fy === "number" && Math.floor(p._fx) === p.col && Math.floor(p._fy) === p.row) return { x: p._fx, y: p._fy };
+  return { x: p.col + 0.5, y: p.row + 0.5 };
+}
+
+function sendPosCorrect(p) {
+  const cur = playerFreePos(p);
+  p._moveBudget = 0.4;
+  sendPlayer(p, { type: "poscorrect", x: cur.x, y: cur.y, direction: p.direction });
+}
+
+function handleFreePos(p, data) {
+  if (worldCombat.isInFight(p)) {
+    p._fx = p.col + 0.5;
+    p._fy = p.row + 0.5;
+    sendPosCorrect(p);
+    return;
+  }
+  const x = Number(data.x);
+  const y = Number(data.y);
+  if (!isFinite(x) || !isFinite(y)) return;
+  const now = Date.now();
+  const elapsed = Math.min(0.5, Math.max(0, (now - (p._posAt || now - 100)) / 1000));
+  p._posAt = now;
+  const budgetBefore = typeof p._moveBudget === "number" ? p._moveBudget : 0.6;
+  p._moveBudget = Math.min(0.9, budgetBefore + FREE_SPEED_TPS * 1.35 * elapsed);
+  const cur = playerFreePos(p);
+  const dist = Math.hypot(x - cur.x, y - cur.y);
+  if (dist > p._moveBudget + 0.05) {
+    sendPosCorrect(p);
+    return;
+  }
+  const nc = Math.floor(x);
+  const nr = Math.floor(y);
+  if (nc < 0 || nc >= LAYER_W || nr < 0 || nr >= LAYER_H) {
+    sendPosCorrect(p);
+    return;
+  }
+  const tileChanged = nc !== p.col || nr !== p.row;
+  if (tileChanged) {
+    let blocked = !isWalkable(p.layer, nc, nr);
+    if (!blocked) {
+      const hit = entityAt(p.layer, nc, nr);
+      if (hit && !(hit.kind === "companion" && hit.ownerPlayerId === p.id)) blocked = true;
+    }
+    if (!blocked) {
+      for (const id in worldSession.players) {
+        const o = worldSession.players[id];
+        if (o !== p && o.layer === p.layer && o.col === nc && o.row === nr) { blocked = true; break; }
+      }
+    }
+    if (blocked) {
+      sendPosCorrect(p);
+      return;
+    }
+    const L = layers[p.layer];
+    const portal = tileAt(p.layer, nc, nr) === "P" && L ? L.portals[nc + "," + nr] : null;
+    if (portal && validLayerNumber(portal.layer)) {
+      teleportPlayer(p, portal.layer, portal.col, portal.row);
+      return;
+    }
+  }
+  p._moveBudget = Math.max(0, p._moveBudget - dist);
+  if (DELTAS[data.dir]) p.direction = data.dir;
+  p.col = nc;
+  p.row = nr;
+  p._fx = x;
+  p._fy = y;
+  const moved = { type: "moved", id: p.id, col: nc, row: nr, fx: x, fy: y, direction: p.direction };
+  if (tileChanged) {
+    refreshVisibility(p);
+    sendGms(null, { type: "gm_player", player: publicPlayer(p) });
+    sendView(p);
+  }
+  for (const id in p._seen) {
+    const q = worldSession.players[id];
+    if (q) sendPlayer(q, moved);
+  }
+}
+
 function handleWorldMove(p, dir) {
   const gate = worldCombat.canPlayerMove(p);
   if (!gate.ok) {
@@ -4436,6 +4528,8 @@ function handleWorldMove(p, dir) {
   const prevRow = p.row;
   p.col = nc;
   p.row = nr;
+  p._fx = nc + 0.5;
+  p._fy = nr + 0.5;
   if (swapWith) {
     const oc = swapWith.col;
     const or = swapWith.row;
@@ -4624,7 +4718,7 @@ function sendGmLayer(gm) {
     objList.push([parseInt(parts[0], 10), parseInt(parts[1], 10), L.objects[k].name, L.objects[k].solid ? 1 : 0, L.objects[k].rot || 0, L.objects[k].flip ? 1 : 0]);
   }
   const passList = Object.keys(L.passable || {}).map((k) => k.split(",").map((v) => parseInt(v, 10)));
-  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, passable: passList, name: L.name, rows: L.rows.map((row) => row.replace(/ +$/, "")), art: L.art.map((row) => row.replace(/ +$/, "")), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer && !entities[id].down).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: null, spawns: spawnList(), floorItems: items, layers: layerSummaries(), light: L.light || "outdoor" });
+  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, passable: passList, name: L.name, rows: L.rows.map(trimRowEnd), art: L.art.map(trimRowEnd), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer && !entities[id].down).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: null, spawns: spawnList(), floorItems: items, layers: layerSummaries(), light: L.light || "outdoor" });
 }
 
 function handleGmMessage(gm, data) {
@@ -5153,6 +5247,8 @@ function startWorldPlayer(socket, pass, info, spawn) {
       sendLayerSummaries();
     } else if (data.type === "move") {
       handleWorldMove(me, data.dir);
+    } else if (data.type === "pos") {
+      handleFreePos(me, data);
     } else if (data.type === "pickup") {
       if (worldCombat.isInFight(me)) {
         sendPlayer(me, { type: "c_notice", text: "You can't pick things up during battle." });

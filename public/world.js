@@ -1,5 +1,5 @@
-const WORLD_COLS = 1024;
-const WORLD_ROWS = 1024;
+const WORLD_COLS = 10000;
+const WORLD_ROWS = 10000;
 const CHUNK = 32;
 const TOOL_CHARS = { floor: ".", wall: "#", barrier: "x", void: " " };
 const TOOL_PREVIEW = { floor: 0x5a5a88, wall: 0x8a6a4a, barrier: 0xc0392b, void: 0x000000, tile: 0x4a9a4a, tileclear: 0x888888, object: 0xd8a840, objerase: 0xc0392b, passable: 0x3ec13e, passableclear: 0x999999 };
@@ -25,11 +25,16 @@ function entityUpsert(scene, e) {
   sprite.direction = e.direction;
   const tx = tilePixelX(e.col);
   const ty = tilePixelY(e.row);
+  const nowMs = Date.now();
+  const gap = nowMs - (sprite.lastEntityMove || 0);
   if (sprite.x !== tx || sprite.y !== ty) {
-    sprite.play(sprite.dex + "_walk_" + e.direction);
-    scene.tweens.add({ targets: sprite, x: tx, y: ty, duration: 110, onComplete: () => { if (sprite.active) sprite.play(sprite.dex + "_idle_" + sprite.direction); } });
+    const glide = gap <= 900 ? Math.max(110, Math.min(620, gap)) : 420;
+    sprite.lastEntityMove = nowMs;
+    scene.tweens.killTweensOf(sprite);
+    sprite.play(sprite.dex + "_walk_" + e.direction, true);
+    scene.tweens.add({ targets: sprite, x: tx, y: ty, duration: glide, ease: "Linear", onComplete: () => { if (sprite.active && sprite.anims) sprite.play(sprite.dex + "_idle_" + sprite.direction); } });
   } else {
-    sprite.play(sprite.dex + "_idle_" + e.direction);
+    sprite.play(sprite.dex + "_idle_" + e.direction, true);
   }
 }
 
@@ -788,6 +793,7 @@ function worldFrame(scene) {
   worldGuard(visFrame, scene);
   if (worldGmMode) {
     gmSyncArt(scene);
+    gmUpdateGrid(scene);
     gmUpdateHoverTile(scene);
     gmUpdateHoverObject(scene);
     return;
@@ -802,16 +808,32 @@ function gmDrawGrid(scene) {
   if (WG.gridGfx) return;
   const g = scene.add.graphics();
   g.setDepth(-1);
+  WG.gridGfx = g;
+  WG.gridKey = "";
+  gmUpdateGrid(scene);
+}
+
+function gmUpdateGrid(scene) {
+  const g = WG.gridGfx;
+  if (!g) return;
+  const wv = scene.cameras.main.worldView;
+  const c0 = Math.max(0, Math.floor(wv.x / TILE) - 1);
+  const c1 = Math.min(WORLD_COLS, Math.floor((wv.x + wv.width) / TILE) + 2);
+  const r0 = Math.max(0, Math.floor(wv.y / TILE) - 1);
+  const r1 = Math.min(WORLD_ROWS, Math.floor((wv.y + wv.height) / TILE) + 2);
+  const key = c0 + "," + c1 + "," + r0 + "," + r1;
+  if (key === WG.gridKey) return;
+  WG.gridKey = key;
+  g.clear();
   g.lineStyle(1, 0xffffff, 0.06);
-  for (let c = 0; c <= WORLD_COLS; c++) {
-    g.lineBetween(c * TILE, 0, c * TILE, WORLD_ROWS * TILE);
+  for (let c = c0; c <= c1; c++) {
+    g.lineBetween(c * TILE, r0 * TILE, c * TILE, r1 * TILE);
   }
-  for (let r = 0; r <= WORLD_ROWS; r++) {
-    g.lineBetween(0, r * TILE, WORLD_COLS * TILE, r * TILE);
+  for (let r = r0; r <= r1; r++) {
+    g.lineBetween(c0 * TILE, r * TILE, c1 * TILE, r * TILE);
   }
   g.lineStyle(3, 0x6666aa, 0.8);
   g.strokeRect(0, 0, WORLD_COLS * TILE, WORLD_ROWS * TILE);
-  WG.gridGfx = g;
 }
 
 function gmDrawMarkers() {
@@ -2071,11 +2093,11 @@ function gmLoadLayer(scene, data) {
   WG.name = data.name || "";
   WG.rows = blankRows();
   for (let r = 0; r < WORLD_ROWS && r < data.rows.length; r++) {
-    WG.rows[r] = String(data.rows[r]).padEnd(WORLD_COLS, " ").slice(0, WORLD_COLS);
+    if (String(data.rows[r]).trim().length > 0) WG.rows[r] = String(data.rows[r]).padEnd(WORLD_COLS, " ").slice(0, WORLD_COLS);
   }
   WG.art = blankRows();
   for (let r = 0; r < WORLD_ROWS && data.art && r < data.art.length; r++) {
-    WG.art[r] = String(data.art[r]).padEnd(WORLD_COLS, " ").slice(0, WORLD_COLS);
+    if (String(data.art[r]).trim().length > 0) WG.art[r] = String(data.art[r]).padEnd(WORLD_COLS, " ").slice(0, WORLD_COLS);
   }
   WG.palette = data.palette || {};
   VIS.layerMode = data.light || "outdoor";
@@ -3629,6 +3651,156 @@ document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape" && CHEST.key) chestCloseRequest();
 });
 
+const FREE = { speed: 5.2, half: 0.28, lastSend: 0, sentX: 0, sentY: 0, moving: false, wasCombat: false, lastTime: 0, anim: "" };
+
+function freeModeActive() {
+  return typeof worldPlayerMode !== "undefined" && worldPlayerMode && !worldGmMode && !COMBAT.active && !!worldLastView && !!worldLastView.sol;
+}
+
+function freeSolid(c, r) {
+  const v = worldLastView;
+  if (!v || !v.sol) return false;
+  const rr = r - v.r0;
+  const cc = c - v.c0;
+  if (rr < 0 || rr >= v.sol.length) return false;
+  const line = v.sol[rr];
+  if (cc < 0 || cc >= line.length) return false;
+  return line[cc] === "1";
+}
+
+function freeOccupied(c, r) {
+  for (const id in otherPlayers) {
+    const sp = otherPlayers[id];
+    if (!sp || sp === "loading") continue;
+    const meta = worldEntityMeta[id];
+    if (meta && (meta.kind === "companion" || meta.kind === "corpse" || meta.fainted)) continue;
+    if (Math.floor(sp.x / TILE) === c && Math.floor(sp.y / TILE) === r) return true;
+  }
+  return false;
+}
+
+function freeCanStand(px, py) {
+  const h = FREE.half * TILE;
+  const c0 = Math.floor((px - h) / TILE);
+  const c1 = Math.floor((px + h) / TILE);
+  const r0 = Math.floor((py - h) / TILE);
+  const r1 = Math.floor((py + h) / TILE);
+  for (let r = r0; r <= r1; r++) {
+    for (let c = c0; c <= c1; c++) {
+      if (freeSolid(c, r)) return false;
+    }
+  }
+  const curC = Math.floor(player.x / TILE);
+  const curR = Math.floor(player.y / TILE);
+  const nc = Math.floor(px / TILE);
+  const nr = Math.floor(py / TILE);
+  if ((nc !== curC || nr !== curR) && freeOccupied(nc, nr)) return false;
+  return true;
+}
+
+function freeSendPos() {
+  gmSend({ type: "pos", x: player.x / TILE, y: player.y / TILE, dir: player.direction });
+  FREE.lastSend = Date.now();
+  FREE.sentX = player.x;
+  FREE.sentY = player.y;
+}
+
+function freePlay(kind) {
+  const key = DEX + "_" + kind + "_" + player.direction;
+  if (FREE.anim === key) return;
+  FREE.anim = key;
+  player.play(key, true);
+}
+
+function freeMoveFrame() {
+  const now = Date.now();
+  const dt = Math.min(0.1, Math.max(0, (now - (FREE.lastTime || now)) / 1000));
+  FREE.lastTime = now;
+  let sx = 0;
+  let sy = 0;
+  if (moveKeys && !chatActive && !lootState) {
+    sx = (moveKeys.D.isDown ? 1 : 0) - (moveKeys.A.isDown ? 1 : 0);
+    sy = (moveKeys.S.isDown ? 1 : 0) - (moveKeys.W.isDown ? 1 : 0);
+  }
+  if (FREE.snapTween && FREE.snapTween.isPlaying()) return;
+  if (sx === 0 && sy === 0) {
+    if (FREE.moving) {
+      FREE.moving = false;
+      freeSendPos();
+      FREE.anim = "";
+      player.play(DEX + "_idle_" + player.direction);
+    }
+    return;
+  }
+  const turns = (4 - quarterTurns()) % 4;
+  const v = rotateVecClockwise([sx, sy], turns);
+  const len = Math.hypot(v[0], v[1]);
+  const vx = v[0] / len;
+  const vy = v[1] / len;
+  const dir = Math.abs(vx) >= Math.abs(vy) ? (vx > 0 ? "right" : "left") : (vy > 0 ? "down" : "up");
+  const step = FREE.speed * TILE * dt;
+  let nx = player.x;
+  let ny = player.y;
+  if (step > 0) {
+    if (freeCanStand(player.x + vx * step, player.y)) nx = player.x + vx * step;
+    if (freeCanStand(nx, player.y + vy * step)) ny = player.y + vy * step;
+  }
+  const moved = nx !== player.x || ny !== player.y;
+  if (dir !== player.direction) {
+    player.direction = dir;
+    FREE.anim = "";
+  }
+  if (!moved) {
+    if (FREE.moving) {
+      FREE.moving = false;
+      freeSendPos();
+      FREE.anim = "";
+    }
+    player.play(DEX + "_idle_" + player.direction, true);
+    return;
+  }
+  player.x = nx;
+  player.y = ny;
+  player.col = Math.floor(nx / TILE);
+  player.row = Math.floor(ny / TILE);
+  FREE.moving = true;
+  freePlay("walk");
+  if (now - FREE.lastSend >= 50) freeSendPos();
+}
+
+function freeCombatFrame() {
+  const inCombat = typeof COMBAT !== "undefined" && COMBAT.active;
+  if (inCombat && !FREE.wasCombat && typeof worldPlayerMode !== "undefined" && worldPlayerMode && sceneRef) {
+    FREE.moving = false;
+    FREE.anim = "";
+    const tx = tilePixelX(Math.floor(player.x / TILE));
+    const ty = tilePixelY(Math.floor(player.y / TILE));
+    if (Math.abs(player.x - tx) > 1 || Math.abs(player.y - ty) > 1) {
+      player.col = Math.floor(player.x / TILE);
+      player.row = Math.floor(player.y / TILE);
+      sceneRef.tweens.killTweensOf(player);
+      FREE.snapTween = sceneRef.tweens.add({ targets: player, x: tx, y: ty, duration: 110, ease: "Sine.easeOut" });
+    }
+  }
+  FREE.wasCombat = inCombat;
+  FREE.lastTime = Date.now();
+}
+
+function freeMessage(data) {
+  if (data.type === "poscorrect") {
+    player.x = data.x * TILE;
+    player.y = data.y * TILE;
+    player.col = Math.floor(data.x);
+    player.row = Math.floor(data.y);
+    if (data.direction) player.direction = data.direction;
+    FREE.sentX = player.x;
+    FREE.sentY = player.y;
+    FREE.lastSend = Date.now();
+    return true;
+  }
+  return false;
+}
+
 const WGD = { drag: null, ghost: null, inspect: null, inspEl: null, creativeEl: null, searchEl: null, gridEl: null };
 
 function wgIconUrl(name) {
@@ -4346,6 +4518,7 @@ window.worldHook = function (scene, data) {
     return true;
   }
   if (farmMessage(data)) return true;
+  if (freeMessage(data)) return true;
   if (chestMessage(data)) return true;
   if (data.type === "item_result") {
     itemToast(data.text);
