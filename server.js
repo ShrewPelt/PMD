@@ -2925,6 +2925,14 @@ function handleObjectInteract(p) {
   for (const cell of candidates) {
     const obj = L.objects[cell[0] + "," + cell[1]];
     if (!obj) continue;
+    if (chestIsObject(obj.name)) {
+      if (worldCombat.isInFight(p)) {
+        farmNotice(p, false, "You can't do that during battle.");
+        return true;
+      }
+      chestOpen(p, cell[0], cell[1]);
+      return true;
+    }
     const stationInfo = farmStationOf(obj.name);
     if (stationInfo) {
       farmStationQuickAction(p, cell[0], cell[1], obj, stationInfo);
@@ -3574,6 +3582,11 @@ function handleFarmQuery(p, data) {
   const row = parseInt(data.row, 10);
   if (!Number.isInteger(col) || !Number.isInteger(row)) return;
   if (!farmInReach(p, col, row)) return;
+  const chestObj = layers[p.layer] ? layers[p.layer].objects[col + "," + row] : null;
+  if (chestObj && chestIsObject(chestObj.name)) {
+    chestOpen(p, col, row);
+    return;
+  }
   const result = farmOptionsAt(p, col, row, String(data.sel || ""));
   if (result.options.length === 0) {
     if (result.hint) farmNotice(p, false, result.hint);
@@ -3904,6 +3917,249 @@ function handleCraftMake(p, data) {
   syncPlayerInventory(p);
   farmNotice(p, true, recipe.text || ("You made " + farmItem(recipe.gives.item).replace(/_/g, " ") + "."));
   sendCraftMenu(p);
+}
+
+const CHEST_CONFIG_FILE = path.join(WORLD_DIR, "chests.json");
+const CHEST_DATA_FILE = path.join(WORLD_DIR, "chestdata.json");
+
+const CHEST_DEFAULTS = {
+  slots: 20,
+  maxStack: 99,
+  reach: 2,
+  match: ["Chest_Front", "Chest_Side"]
+};
+
+function loadChestConfig() {
+  let saved = {};
+  try {
+    saved = JSON.parse(fs.readFileSync(CHEST_CONFIG_FILE, "utf8"));
+  } catch (e) {
+    saved = {};
+  }
+  const cfg = farmFill(CHEST_DEFAULTS, saved);
+  try {
+    writeJsonFile(CHEST_CONFIG_FILE, cfg);
+  } catch (e) {}
+  return cfg;
+}
+
+const CHEST = loadChestConfig();
+let chestData = readJsonFile(CHEST_DATA_FILE, {});
+if (!chestData || typeof chestData !== "object" || Array.isArray(chestData)) chestData = {};
+let chestSaveTimer = null;
+
+function saveChestData() {
+  if (chestSaveTimer) return;
+  chestSaveTimer = setTimeout(() => {
+    chestSaveTimer = null;
+    writeJsonFile(CHEST_DATA_FILE, chestData);
+  }, 500);
+}
+
+function chestIsObject(name) {
+  return farmObjectNameMatches(CHEST.match, name);
+}
+
+function chestSlotsOf(key) {
+  const total = Number(CHEST.slots) || 20;
+  let slots = chestData[key];
+  if (!Array.isArray(slots)) {
+    slots = [];
+    chestData[key] = slots;
+  }
+  while (slots.length < total) slots.push(null);
+  return slots;
+}
+
+function chestPayload(key) {
+  return chestSlotsOf(key).map((s) => (s && s.name ? { name: s.name, count: s.count } : null));
+}
+
+function chestParseKey(key) {
+  const parts = key.split(",").map((v) => parseInt(v, 10));
+  return { layer: parts[0], col: parts[1], row: parts[2] };
+}
+
+function chestBroadcast(key) {
+  const payload = chestPayload(key);
+  for (const id in worldSession.players) {
+    const q = worldSession.players[id];
+    if (q._chestKey === key) sendPlayer(q, { type: "chest_sync", key: key, slots: payload });
+  }
+}
+
+function chestInReach(p, key) {
+  const c = chestParseKey(key);
+  if (c.layer !== p.layer) return false;
+  return Math.max(Math.abs(p.col - c.col), Math.abs(p.row - c.row)) <= (Number(CHEST.reach) || 2);
+}
+
+function chestOpen(p, col, row) {
+  const key = farmKey(p.layer, col, row);
+  p._chestKey = key;
+  const c = chestParseKey(key);
+  sendPlayer(p, { type: "chest_open", key: key, col: c.col, row: c.row, slots: chestPayload(key), max: Number(CHEST.maxStack) || 99 });
+}
+
+function chestClosePlayer(p) {
+  if (!p._chestKey) return;
+  p._chestKey = null;
+  sendPlayer(p, { type: "chest_close" });
+}
+
+function chestInsert(slots, name, count, preferred) {
+  const max = Number(CHEST.maxStack) || 99;
+  let left = count;
+  if (Number.isInteger(preferred) && preferred >= 0 && preferred < slots.length) {
+    const target = slots[preferred];
+    if (!target) {
+      const put = Math.min(max, left);
+      slots[preferred] = { name: name, count: put };
+      left -= put;
+    } else if (String(target.name).toLowerCase() === name.toLowerCase() && target.count < max) {
+      const put = Math.min(max - target.count, left);
+      target.count += put;
+      left -= put;
+    }
+  }
+  for (let i = 0; i < slots.length && left > 0; i++) {
+    const s = slots[i];
+    if (s && String(s.name).toLowerCase() === name.toLowerCase() && s.count < max) {
+      const put = Math.min(max - s.count, left);
+      s.count += put;
+      left -= put;
+    }
+  }
+  for (let i = 0; i < slots.length && left > 0; i++) {
+    if (!slots[i]) {
+      const put = Math.min(max, left);
+      slots[i] = { name: name, count: put };
+      left -= put;
+    }
+  }
+  return left;
+}
+
+function chestCheck(p, data) {
+  if (worldCombat.isInFight(p)) {
+    farmNotice(p, false, "You can't do that during battle.");
+    return null;
+  }
+  const key = p._chestKey;
+  if (!key || String(data.key || key) !== key) return null;
+  if (!chestInReach(p, key)) {
+    chestClosePlayer(p);
+    return null;
+  }
+  const c = chestParseKey(key);
+  const L = layers[c.layer];
+  const obj = L ? L.objects[c.col + "," + c.row] : null;
+  if (!obj || !chestIsObject(obj.name)) {
+    chestClosePlayer(p);
+    return null;
+  }
+  return key;
+}
+
+function handleChestPut(p, data) {
+  const key = chestCheck(p, data);
+  if (!key) return;
+  const from = parseInt(data.from, 10);
+  if (!Number.isInteger(from) || from < 0 || from >= p._inv.length) {
+    syncPlayerInventory(p);
+    return;
+  }
+  const stack = p._inv[from];
+  if (lightBurnMs(stack.name) > 0) {
+    farmNotice(p, false, "A burning " + stack.name + " can't be stored.");
+    syncPlayerInventory(p);
+    return;
+  }
+  const slots = chestSlotsOf(key);
+  const preferred = data.to === undefined || data.to === null ? -1 : parseInt(data.to, 10);
+  const total = stack.count;
+  const left = chestInsert(slots, stack.name, total, preferred);
+  const moved = total - left;
+  if (moved <= 0) {
+    farmNotice(p, false, "The chest is full.");
+    return;
+  }
+  stack.count = left;
+  if (stack.count <= 0) p._inv.splice(from, 1);
+  saveChestData();
+  syncPlayerInventory(p);
+  chestBroadcast(key);
+}
+
+function handleChestTake(p, data) {
+  const key = chestCheck(p, data);
+  if (!key) return;
+  const slots = chestSlotsOf(key);
+  const from = parseInt(data.from, 10);
+  if (!Number.isInteger(from) || from < 0 || from >= slots.length || !slots[from]) {
+    chestBroadcast(key);
+    return;
+  }
+  const entry = slots[from];
+  let existing = null;
+  for (const stack of p._inv) {
+    if (String(stack.name).toLowerCase() === String(entry.name).toLowerCase()) existing = stack;
+  }
+  if (!existing && p._inv.length >= capacityOf(p)) {
+    farmNotice(p, false, "Your bag is full.");
+    return;
+  }
+  if (existing) existing.count += entry.count;
+  else p._inv.push({ name: entry.name, count: entry.count });
+  slots[from] = null;
+  saveChestData();
+  syncPlayerInventory(p);
+  chestBroadcast(key);
+}
+
+function handleChestMove(p, data) {
+  const key = chestCheck(p, data);
+  if (!key) return;
+  const slots = chestSlotsOf(key);
+  const from = parseInt(data.from, 10);
+  const to = parseInt(data.to, 10);
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from === to) return;
+  if (from < 0 || to < 0 || from >= slots.length || to >= slots.length || !slots[from]) {
+    chestBroadcast(key);
+    return;
+  }
+  const a = slots[from];
+  const b = slots[to];
+  const max = Number(CHEST.maxStack) || 99;
+  if (!b) {
+    slots[to] = a;
+    slots[from] = null;
+  } else if (String(a.name).toLowerCase() === String(b.name).toLowerCase()) {
+    const put = Math.min(max - b.count, a.count);
+    b.count += put;
+    a.count -= put;
+    if (a.count <= 0) slots[from] = null;
+  } else {
+    slots[to] = a;
+    slots[from] = b;
+  }
+  saveChestData();
+  chestBroadcast(key);
+}
+
+function chestTick() {
+  for (const id in worldSession.players) {
+    const q = worldSession.players[id];
+    if (!q._chestKey) continue;
+    if (!chestInReach(q, q._chestKey)) {
+      chestClosePlayer(q);
+      continue;
+    }
+    const c = chestParseKey(q._chestKey);
+    const L = layers[c.layer];
+    const obj = L ? L.objects[c.col + "," + c.row] : null;
+    if (!obj || !chestIsObject(obj.name)) chestClosePlayer(q);
+  }
 }
 
 const COIN_PILE_MIN = 40;
@@ -4869,6 +5125,14 @@ function startWorldPlayer(socket, pass, info, spawn) {
       handleFarmQuery(me, data);
     } else if (data.type === "farm_do") {
       handleFarmDo(me, data);
+    } else if (data.type === "chest_put") {
+      handleChestPut(me, data);
+    } else if (data.type === "chest_take") {
+      handleChestTake(me, data);
+    } else if (data.type === "chest_move") {
+      handleChestMove(me, data);
+    } else if (data.type === "chest_close") {
+      me._chestKey = null;
     } else if (data.type === "craft_open") {
       sendCraftMenu(me);
     } else if (data.type === "craft_make") {
@@ -4992,6 +5256,7 @@ setInterval(entityTick, ENTITY_TICK_MS);
 setInterval(idleTick, 2000);
 setInterval(fireTick, 5000);
 setInterval(farmTick, 1000);
+setInterval(chestTick, 1000);
 setInterval(lightCarryTick, 2000);
 setInterval(journalTick, 2000);
 setInterval(scheduleJournalWrite, 30000);

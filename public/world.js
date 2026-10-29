@@ -3501,6 +3501,134 @@ document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape" && CRAFT.open) craftClose();
 });
 
+const CHEST = { key: null, col: 0, row: 0, slots: [], max: 99, el: null, grid: null };
+
+function chestInject() {
+  if (CHEST.el) return;
+  const style = document.createElement("style");
+  style.textContent = "#chestPanel{position:fixed;right:16px;top:70px;width:330px;max-width:94vw;background:rgba(20,20,34,0.97);border:2px solid #c9a24a;border-radius:10px;padding:10px;color:#fff;font-size:13px;z-index:44;user-select:none;box-sizing:border-box}"
+    + "#chestPanel.hidden{display:none}"
+    + "#chestPanel .chHead{display:flex;justify-content:space-between;align-items:center;font-weight:bold;color:#ffd23f;margin-bottom:6px}"
+    + "#chestPanel .chClose{background:#2d2d44;border:1px solid #55557a;border-radius:5px;color:#fff;cursor:pointer;padding:2px 8px}"
+    + "#chestPanel .chGrid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}"
+    + "#chestPanel .chHint{font-size:11px;color:#bbb;margin-top:6px}";
+  document.head.appendChild(style);
+  const el = document.createElement("div");
+  el.id = "chestPanel";
+  el.className = "hidden";
+  const head = document.createElement("div");
+  head.className = "chHead";
+  const title = document.createElement("div");
+  title.textContent = "Chest";
+  const close = document.createElement("button");
+  close.className = "chClose";
+  close.textContent = "X";
+  close.addEventListener("click", chestCloseRequest);
+  head.appendChild(title);
+  head.appendChild(close);
+  el.appendChild(head);
+  const grid = document.createElement("div");
+  grid.className = "chGrid";
+  el.appendChild(grid);
+  const hint = document.createElement("div");
+  hint.className = "chHint";
+  hint.textContent = "Drag items between your bag and the chest. Tap a chest item to take it.";
+  el.appendChild(hint);
+  document.body.appendChild(el);
+  CHEST.el = el;
+  CHEST.grid = grid;
+}
+
+function chestRender() {
+  if (!CHEST.grid) return;
+  CHEST.grid.innerHTML = "";
+  for (let i = 0; i < CHEST.slots.length; i++) {
+    const cell = document.createElement("div");
+    cell.className = "slot";
+    cell.setAttribute("data-cslot", String(i));
+    const stack = CHEST.slots[i];
+    if (stack) {
+      const iconPath = typeof itemIndex === "object" && itemIndex ? itemIndex[stack.name] : null;
+      if (iconPath) {
+        const img = document.createElement("img");
+        img.src = encodeURI(iconPath);
+        img.alt = stack.name;
+        img.title = stack.name;
+        img.draggable = false;
+        img.style.pointerEvents = "none";
+        cell.appendChild(img);
+      } else {
+        cell.textContent = stack.name;
+      }
+      if (stack.count > 1) {
+        const badge = document.createElement("div");
+        badge.className = "badge";
+        badge.textContent = stack.count;
+        cell.appendChild(badge);
+      }
+      cell.classList.add("hasitem");
+      cell.style.cursor = "pointer";
+      const slotIndex = i;
+      cell.addEventListener("click", () => {
+        if (INVDRAG.suppressClick) {
+          INVDRAG.suppressClick = false;
+          return;
+        }
+        gmSend({ type: "chest_take", key: CHEST.key, from: slotIndex });
+      });
+      cell.addEventListener("dragstart", (ev) => ev.preventDefault());
+      cell.addEventListener("pointerdown", (ev) => invDragDown(ev, slotIndex, cell, "chest"));
+    }
+    CHEST.grid.appendChild(cell);
+  }
+}
+
+function chestShow(data) {
+  chestInject();
+  CHEST.key = data.key;
+  CHEST.col = data.col;
+  CHEST.row = data.row;
+  CHEST.slots = data.slots;
+  CHEST.max = data.max;
+  CHEST.el.classList.remove("hidden");
+  chestRender();
+  if (typeof inventoryOpen !== "undefined" && !inventoryOpen && typeof toggleInventory === "function") toggleInventory();
+}
+
+function chestHide() {
+  CHEST.key = null;
+  if (CHEST.el) CHEST.el.classList.add("hidden");
+}
+
+function chestCloseRequest() {
+  if (!CHEST.key) return;
+  gmSend({ type: "chest_close" });
+  chestHide();
+}
+
+function chestMessage(data) {
+  if (data.type === "chest_open") {
+    chestShow(data);
+    return true;
+  }
+  if (data.type === "chest_sync") {
+    if (CHEST.key === data.key) {
+      CHEST.slots = data.slots;
+      chestRender();
+    }
+    return true;
+  }
+  if (data.type === "chest_close") {
+    chestHide();
+    return true;
+  }
+  return false;
+}
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && CHEST.key) chestCloseRequest();
+});
+
 const WGD = { drag: null, ghost: null, inspect: null, inspEl: null, creativeEl: null, searchEl: null, gridEl: null };
 
 function wgIconUrl(name) {
@@ -4218,6 +4346,7 @@ window.worldHook = function (scene, data) {
     return true;
   }
   if (farmMessage(data)) return true;
+  if (chestMessage(data)) return true;
   if (data.type === "item_result") {
     itemToast(data.text);
     if (COMBAT.active) combatAddLog(data.text);

@@ -1293,11 +1293,12 @@ function slotCount() {
   return invCapacity;
 }
 
-const INVDRAG = { active: false, from: -1, startX: 0, startY: 0, ghost: null, srcEl: null, overEl: null, suppressClick: false, pointerId: null };
+const INVDRAG = { source: "inv", active: false, from: -1, startX: 0, startY: 0, ghost: null, srcEl: null, overEl: null, suppressClick: false, pointerId: null };
 
-function invDragDown(ev, index, cell) {
+function invDragDown(ev, index, cell, source) {
   if (isGM || ev.button !== 0) return;
   if (INVDRAG.pointerId !== null) return;
+  INVDRAG.source = source || "inv";
   INVDRAG.pointerId = ev.pointerId;
   INVDRAG.from = index;
   INVDRAG.startX = ev.clientX;
@@ -1322,7 +1323,7 @@ function invDragMove(ev) {
     INVDRAG.active = true;
     const ghost = document.createElement("div");
     ghost.id = "invDragGhost";
-    const stack = inventoryItems[INVDRAG.from];
+    const stack = INVDRAG.source === "chest" ? CHEST.slots[INVDRAG.from] : inventoryItems[INVDRAG.from];
     const path = stack ? itemIndex[stack.name] : null;
     if (path) {
       const img = document.createElement("img");
@@ -1371,11 +1372,36 @@ function invDragUp(ev) {
   const panel = document.getElementById("inventory");
   const rect = panel.getBoundingClientRect();
   const outside = ev.clientX < rect.left || ev.clientX > rect.right || ev.clientY < rect.top || ev.clientY > rect.bottom;
+  const source = INVDRAG.source;
+  const chestEl = document.getElementById("chestPanel");
+  let overChest = false;
+  if (chestEl && !chestEl.classList.contains("hidden")) {
+    const cr = chestEl.getBoundingClientRect();
+    overChest = ev.clientX >= cr.left && ev.clientX <= cr.right && ev.clientY >= cr.top && ev.clientY <= cr.bottom;
+  }
   invDragEnd();
   if (!wasActive) return;
   INVDRAG.suppressClick = true;
   setTimeout(() => { INVDRAG.suppressClick = false; }, 0);
+  if (source === "chest") {
+    if (!CHEST.key || !CHEST.slots[from]) return;
+    if (slotEl && slotEl.hasAttribute("data-cslot")) {
+      const cto = parseInt(slotEl.getAttribute("data-cslot"), 10);
+      if (Number.isInteger(cto) && cto !== from) gmSend({ type: "chest_move", key: CHEST.key, from: from, to: cto });
+      return;
+    }
+    if (slotEl || !outside) gmSend({ type: "chest_take", key: CHEST.key, from: from });
+    return;
+  }
   if (!inventoryItems[from]) return;
+  if (CHEST.key && slotEl && slotEl.hasAttribute("data-cslot")) {
+    gmSend({ type: "chest_put", key: CHEST.key, from: from, to: parseInt(slotEl.getAttribute("data-cslot"), 10) });
+    return;
+  }
+  if (CHEST.key && overChest) {
+    gmSend({ type: "chest_put", key: CHEST.key, from: from });
+    return;
+  }
   if (outside) {
     if (typeof gmSend === "function") gmSend({ type: "inv_drop", slot: from });
     return;
