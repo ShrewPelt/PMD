@@ -500,6 +500,7 @@ function musicInit() {
 
 function enterPlayerWorld(scene) {
   worldPlayerMode = true;
+  if (typeof chatLogShow === "function") chatLogShow();
   musicInit();
   if (mapGraphics) mapGraphics.clear();
   scene.cameras.main.removeBounds();

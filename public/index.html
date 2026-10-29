@@ -84,6 +84,36 @@ if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) documen
   .gmline { margin: 4px 0; line-height: 1.35; }
   .gmts { color: #8888aa; font-size: 11px; }
 
+  #chatlog {
+    position: fixed; top: 12px; left: 264px;
+    width: clamp(260px, calc(50vw - 592px), 420px);
+    height: min(70vh, 520px);
+    z-index: 9; display: flex; flex-direction: column;
+    background: rgba(20,20,34,0.82);
+    border: 1px solid #3a3a55; border-radius: 8px;
+    color: #ffffff; font-size: 13px;
+  }
+  #chatlog.hidden { display: none; }
+  #chatlog.collapsed { height: auto; }
+  #chatlog.collapsed #chatlogbody { display: none; }
+  #chatloghead {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 7px 10px; font-weight: bold; color: #ffd23f;
+    border-bottom: 1px solid #3a3a55; cursor: pointer; user-select: none;
+  }
+  #chatlog.collapsed #chatloghead { border-bottom: none; }
+  #chatlogtoggle { background: #2d2d44; color: #fff; border: 1px solid #55557a; border-radius: 5px; padding: 1px 8px; cursor: pointer; font-size: 12px; }
+  #chatlogbody { flex: 1; overflow-y: auto; padding: 6px 10px; }
+  .clempty { color: #8888aa; font-size: 12px; padding: 6px 0; }
+  .clrow { display: flex; gap: 8px; margin: 8px 0; align-items: flex-start; }
+  .clrow.mine { flex-direction: row-reverse; }
+  .clportrait { width: 48px; height: 48px; flex: none; background: #1a1a2a; border: 2px solid #000; border-radius: 3px; display: flex; align-items: center; justify-content: center; font-weight: bold; color: #8888aa; overflow: hidden; }
+  .clportrait img { width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; }
+  .clmsg { flex: 1; min-width: 0; line-height: 1.35; overflow-wrap: anywhere; }
+  .clname { color: #ffd23f; font-size: 11px; }
+  .clts { color: #8888aa; font-size: 10px; margin-left: 6px; }
+  html.touch #chatlog { top: calc(env(safe-area-inset-top) + 6px); left: calc(env(safe-area-inset-left) + 162px); width: min(46vw, 300px); height: 55vh; }
+
   #cbOrder {
     position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
     display: flex; gap: 6px; align-items: center; z-index: 12;
@@ -185,6 +215,12 @@ if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) documen
     gap: 8px;
     background: rgba(0,0,0,0.15);
   }
+  .slot img { -webkit-user-drag: none; user-select: none; }
+  .slot.dragsrc { opacity: 0.35; }
+  .slot.dragover { border-color: #ffd23f; background: rgba(255,210,63,0.18); }
+  .slot.hasitem { touch-action: none; user-select: none; -webkit-user-select: none; }
+  #invDragGhost { position: fixed; z-index: 120; pointer-events: none; width: 44px; height: 44px; opacity: 0.9; display: flex; align-items: center; justify-content: center; }
+  #invDragGhost img { max-width: 44px; max-height: 44px; image-rendering: pixelated; }
   .slot {
     aspect-ratio: 1 / 1;
     border: 1px solid #55557a;
@@ -228,6 +264,10 @@ if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) documen
   </div>
   <div id="cbTargets" class="hidden"></div>
   <div id="cbLog"></div>
+</div>
+<div id="chatlog" class="hidden">
+  <div id="chatloghead"><span id="chatlogtitle">Nearby chat</span><button id="chatlogtoggle" type="button">Hide</button></div>
+  <div id="chatlogbody"><div class="clempty">No messages yet.</div></div>
 </div>
 <div id="itemMenu" class="hidden"></div>
 <div id="lootPanel" class="hidden"></div>
@@ -930,7 +970,6 @@ function attemptPickup() {
 
 function attemptDrop() {
   if (selectedSlot < 0 || !inventoryItems[selectedSlot]) { updateReadout("select an item first"); return; }
-  if (hasFloorItemAt(player.col, player.row)) { updateReadout("tile already has an item"); return; }
   const name = inventoryItems[selectedSlot].name;
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: "drop", name: name }));
@@ -996,7 +1035,94 @@ function makeBubble(scene) {
   return { gfx: gfx, txt: txt, portrait: portrait, target: null, timer: null, visible: false };
 }
 
+const CHATLOG = { max: 200, unread: 0, collapsed: false, range: 10, ready: false };
+
+function chatLogCollapse(on) {
+  CHATLOG.collapsed = on;
+  const box = document.getElementById("chatlog");
+  if (!box) return;
+  box.classList.toggle("collapsed", on);
+  document.getElementById("chatlogtoggle").textContent = on ? "Show" : "Hide";
+  if (!on) CHATLOG.unread = 0;
+  chatLogTitle();
+  try { localStorage.setItem("pmdChatLogCollapsed", on ? "1" : "0"); } catch (e) {}
+  if (!on) {
+    const body = document.getElementById("chatlogbody");
+    body.scrollTop = body.scrollHeight;
+  }
+}
+
+function chatLogTitle() {
+  const t = document.getElementById("chatlogtitle");
+  if (!t) return;
+  t.textContent = "Nearby chat (" + CHATLOG.range + " tiles)" + (CHATLOG.collapsed && CHATLOG.unread > 0 ? " | " + CHATLOG.unread + " new" : "");
+}
+
+function chatLogShow() {
+  const box = document.getElementById("chatlog");
+  if (!box) return;
+  if (!CHATLOG.ready) {
+    CHATLOG.ready = true;
+    let saved = null;
+    try { saved = localStorage.getItem("pmdChatLogCollapsed"); } catch (e) {}
+    const startCollapsed = saved === null ? document.documentElement.classList.contains("touch") : saved === "1";
+    document.getElementById("chatloghead").addEventListener("click", () => chatLogCollapse(!CHATLOG.collapsed));
+    chatLogCollapse(startCollapsed);
+  }
+  box.classList.remove("hidden");
+}
+
+function chatLogAdd(name, dex, text, emotion, mine, ts) {
+  if (typeof worldPlayerMode === "undefined" || !worldPlayerMode) return;
+  if (!text) return;
+  chatLogShow();
+  const body = document.getElementById("chatlogbody");
+  const empty = body.querySelector(".clempty");
+  if (empty) empty.remove();
+  const stick = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+  const row = document.createElement("div");
+  row.className = "clrow" + (mine ? " mine" : "");
+  const portrait = document.createElement("div");
+  portrait.className = "clportrait";
+  const img = document.createElement("img");
+  img.alt = "";
+  img.src = "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/portrait/" + (dex || "0004") + "/" + (emotion || "Normal") + ".png";
+  img.addEventListener("error", () => {
+    img.remove();
+    portrait.textContent = String(name || "?").charAt(0).toUpperCase();
+  });
+  portrait.appendChild(img);
+  const msg = document.createElement("div");
+  msg.className = "clmsg";
+  const head = document.createElement("div");
+  const nameEl = document.createElement("span");
+  nameEl.className = "clname";
+  nameEl.textContent = name || "Someone";
+  const tsEl = document.createElement("span");
+  tsEl.className = "clts";
+  const d = new Date(ts || Date.now());
+  tsEl.textContent = (d.getHours() < 10 ? "0" : "") + d.getHours() + ":" + (d.getMinutes() < 10 ? "0" : "") + d.getMinutes();
+  head.appendChild(nameEl);
+  head.appendChild(tsEl);
+  const textEl = document.createElement("div");
+  textEl.textContent = text;
+  msg.appendChild(head);
+  msg.appendChild(textEl);
+  row.appendChild(portrait);
+  row.appendChild(msg);
+  body.appendChild(row);
+  while (body.children.length > CHATLOG.max) body.removeChild(body.firstChild);
+  if (CHATLOG.collapsed) {
+    if (!mine) CHATLOG.unread++;
+    chatLogTitle();
+  } else if (stick || mine) {
+    body.scrollTop = body.scrollHeight;
+  }
+}
+
 function showBubble(raw) {
+  const parsedOwn = parseMessage(raw);
+  chatLogAdd("You", DEX, parsedOwn.text, parsedOwn.emotion, true, Date.now());
   showBubbleFor(sceneRef, "me", player, DEX, raw);
   sendChat(raw);
 }
@@ -1100,6 +1226,100 @@ function slotCount() {
   return invCapacity;
 }
 
+const INVDRAG = { active: false, from: -1, startX: 0, startY: 0, ghost: null, srcEl: null, overEl: null, suppressClick: false, pointerId: null };
+
+function invDragDown(ev, index, cell) {
+  if (isGM || ev.button !== 0) return;
+  if (INVDRAG.pointerId !== null) return;
+  INVDRAG.pointerId = ev.pointerId;
+  INVDRAG.from = index;
+  INVDRAG.startX = ev.clientX;
+  INVDRAG.startY = ev.clientY;
+  INVDRAG.srcEl = cell;
+  INVDRAG.active = false;
+  window.addEventListener("pointermove", invDragMove);
+  window.addEventListener("pointerup", invDragUp);
+  window.addEventListener("pointercancel", invDragCancel);
+}
+
+function invDragSlotAt(x, y) {
+  const el = document.elementFromPoint(x, y);
+  if (!el || !el.closest) return null;
+  return el.closest(".slot");
+}
+
+function invDragMove(ev) {
+  if (ev.pointerId !== INVDRAG.pointerId) return;
+  if (!INVDRAG.active) {
+    if (Math.hypot(ev.clientX - INVDRAG.startX, ev.clientY - INVDRAG.startY) < 7) return;
+    INVDRAG.active = true;
+    const ghost = document.createElement("div");
+    ghost.id = "invDragGhost";
+    const stack = inventoryItems[INVDRAG.from];
+    const path = stack ? itemIndex[stack.name] : null;
+    if (path) {
+      const img = document.createElement("img");
+      img.src = encodeURI(path);
+      ghost.appendChild(img);
+    } else if (stack) {
+      ghost.textContent = stack.name;
+    }
+    document.body.appendChild(ghost);
+    INVDRAG.ghost = ghost;
+    if (INVDRAG.srcEl) INVDRAG.srcEl.classList.add("dragsrc");
+  }
+  INVDRAG.ghost.style.left = (ev.clientX - 22) + "px";
+  INVDRAG.ghost.style.top = (ev.clientY - 22) + "px";
+  const over = invDragSlotAt(ev.clientX, ev.clientY);
+  if (INVDRAG.overEl && INVDRAG.overEl !== over) INVDRAG.overEl.classList.remove("dragover");
+  if (over && over !== INVDRAG.srcEl) over.classList.add("dragover");
+  INVDRAG.overEl = over;
+  ev.preventDefault();
+}
+
+function invDragEnd() {
+  window.removeEventListener("pointermove", invDragMove);
+  window.removeEventListener("pointerup", invDragUp);
+  window.removeEventListener("pointercancel", invDragCancel);
+  if (INVDRAG.ghost) INVDRAG.ghost.remove();
+  if (INVDRAG.srcEl) INVDRAG.srcEl.classList.remove("dragsrc");
+  if (INVDRAG.overEl) INVDRAG.overEl.classList.remove("dragover");
+  INVDRAG.ghost = null;
+  INVDRAG.srcEl = null;
+  INVDRAG.overEl = null;
+  INVDRAG.pointerId = null;
+  INVDRAG.active = false;
+}
+
+function invDragCancel(ev) {
+  if (ev.pointerId !== INVDRAG.pointerId) return;
+  invDragEnd();
+}
+
+function invDragUp(ev) {
+  if (ev.pointerId !== INVDRAG.pointerId) return;
+  const wasActive = INVDRAG.active;
+  const from = INVDRAG.from;
+  const slotEl = wasActive ? invDragSlotAt(ev.clientX, ev.clientY) : null;
+  const panel = document.getElementById("inventory");
+  const rect = panel.getBoundingClientRect();
+  const outside = ev.clientX < rect.left || ev.clientX > rect.right || ev.clientY < rect.top || ev.clientY > rect.bottom;
+  invDragEnd();
+  if (!wasActive) return;
+  INVDRAG.suppressClick = true;
+  setTimeout(() => { INVDRAG.suppressClick = false; }, 0);
+  if (!inventoryItems[from]) return;
+  if (outside) {
+    if (typeof gmSend === "function") gmSend({ type: "inv_drop", slot: from });
+    return;
+  }
+  if (!slotEl) return;
+  const to = parseInt(slotEl.getAttribute("data-slot"), 10);
+  if (!Number.isInteger(to) || to === from) return;
+  if (inventoryItems[to]) gmSend({ type: "inv_combine", from: from, onto: to });
+  else gmSend({ type: "inv_move", from: from, to: to });
+}
+
 function buildInventoryGrid() {
   const gridEl = document.getElementById("invGrid");
   gridEl.innerHTML = "";
@@ -1115,6 +1335,8 @@ function buildInventoryGrid() {
         img.src = encodeURI(iconPath);
         img.alt = stack.name;
         img.title = stack.name;
+        img.draggable = false;
+        img.style.pointerEvents = "none";
         cell.appendChild(img);
       } else {
         cell.textContent = stack.name;
@@ -1130,8 +1352,18 @@ function buildInventoryGrid() {
         cell.classList.add("selected");
       }
       const slotIndex = i;
-      cell.addEventListener("click", () => selectSlot(slotIndex));
+      cell.classList.add("hasitem");
+      cell.addEventListener("click", () => {
+        if (INVDRAG.suppressClick) {
+          INVDRAG.suppressClick = false;
+          return;
+        }
+        selectSlot(slotIndex);
+      });
+      cell.addEventListener("dragstart", (ev) => ev.preventDefault());
+      cell.addEventListener("pointerdown", (ev) => invDragDown(ev, slotIndex, cell));
     }
+    cell.setAttribute("data-slot", String(i));
     gridEl.appendChild(cell);
   }
 }
@@ -1228,6 +1460,7 @@ function connectMultiplayer(scene) {
     }
 
     if (data.type === "init") {
+      if (data.chatRange) CHATLOG.range = data.chatRange;
       myId = data.id;
       turnCount = data.turn;
       if (Array.isArray(data.map) && data.map.length > 0) {
@@ -1298,7 +1531,7 @@ function connectMultiplayer(scene) {
       removeFromInventory(data.name);
       updateReadout("dropped " + data.name);
     } else if (data.type === "dropfail") {
-      updateReadout("tile already has an item");
+      updateReadout("no room to drop that");
     } else if (data.type === "join") {
       if (data.player.id !== myId) {
         addOtherPlayer(scene, data.player);
@@ -1320,7 +1553,7 @@ function connectMultiplayer(scene) {
           const tx = tilePixelX(data.col);
           const ty = tilePixelY(data.row);
           sprite.play(sprite.dex + "_walk_" + data.direction);
-          scene.tweens.add({ targets: sprite, x: tx, y: ty, duration: 110, onComplete: () => { sprite.play(sprite.dex + "_idle_" + sprite.direction); } });
+          scene.tweens.add({ targets: sprite, x: tx, y: ty, duration: 110, onComplete: () => { if (sprite.active && sprite.anims) sprite.play(sprite.dex + "_idle_" + sprite.direction); } });
         }
       }
     } else if (data.type === "moveblocked") {
@@ -1359,7 +1592,7 @@ function connectMultiplayer(scene) {
             const ty = tilePixelY(entry.row);
             if (sprite.x !== tx || sprite.y !== ty) {
               sprite.play(sprite.dex + "_walk_" + entry.direction);
-              scene.tweens.add({ targets: sprite, x: tx, y: ty, duration: 120, onComplete: () => { sprite.play(sprite.dex + "_idle_" + sprite.direction); } });
+              scene.tweens.add({ targets: sprite, x: tx, y: ty, duration: 120, onComplete: () => { if (sprite.active && sprite.anims) sprite.play(sprite.dex + "_idle_" + sprite.direction); } });
             } else {
               sprite.play(sprite.dex + "_idle_" + entry.direction);
             }
@@ -1369,6 +1602,10 @@ function connectMultiplayer(scene) {
       state = "input";
       updateReadout("turn " + turnCount);
     } else if (data.type === "chat") {
+      if (!isGM) {
+        const parsedIn = parseMessage(String(data.text || ""));
+        chatLogAdd(data.name, data.dex, parsedIn.text, parsedIn.emotion, false, data.ts);
+      }
       const sprite = otherPlayers[data.id];
       if (sprite && sprite !== "loading") {
         showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text);

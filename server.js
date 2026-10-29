@@ -448,6 +448,7 @@ const LAYER_W = 1024;
 const LAYER_H = 1024;
 const MAX_LAYER = 999;
 const MIN_LAYER = -999;
+const CHAT_RANGE = 10;
 const VIEW_HALF_W = 10;
 const VIEW_HALF_H = 10;
 const TILE_CHARS = " .#xP";
@@ -1131,7 +1132,7 @@ const CLOCK_FILE = path.join(WORLD_DIR, "clock.json");
 const STRUCTURES_DIR = path.join(__dirname, "assets", "structures");
 const SPECIES_TYPES_FILE = path.join(__dirname, "StorageData", "SpeciesTypes.json");
 
-const VISION_VERSION = 4;
+const VISION_VERSION = 5;
 
 const VISION_DEFAULTS = {
   version: VISION_VERSION,
@@ -1164,6 +1165,9 @@ const VISION_DEFAULTS = {
     { unlit: "Unlit_Campfire", lit: "Lit_Campfire", label: "campfire", burnMinutes: 5 }
   ],
   igniterItems: ["Lit Torch", "Flint and Steel"],
+  combineRecipes: [
+    { id: "stick_torch", a: "Flint and Steel", b: "Stick", result: "Lit Torch", resultCount: 1, consumeA: false, consumeB: true, text: "You strike the Flint and Steel and the Stick catches fire. It is now a Lit Torch." }
+  ],
   torchStick: { item: "Stick", result: "Lit Torch", range: 2, structures: ["Lit_Stone_Campfire", "Lit_Campfire", "Metal_Brazier", "Pillar_Brazier", "Hanging_Torch"] },
   sightBlockers: ["Tree", "Wall", "House", "Building", "Pillar", "Statue", "Cliff", "Boulder"],
   nightVisionTypes: ["Dark", "Ghost"],
@@ -1227,6 +1231,7 @@ function loadVisionConfig() {
     cfg.lightObjects = addMissingEntries(cfg.lightObjects, VISION_DEFAULTS.lightObjects, "match");
     cfg.lightable = addMissingEntries(cfg.lightable, VISION_DEFAULTS.lightable, "unlit");
     cfg.lightItems = addMissingEntries(cfg.lightItems, VISION_DEFAULTS.lightItems, "item");
+    cfg.combineRecipes = addMissingEntries(cfg.combineRecipes, VISION_DEFAULTS.combineRecipes, "id");
     for (const name of VISION_DEFAULTS.igniterItems) {
       if (cfg.igniterItems.map((v) => String(v).toLowerCase()).indexOf(String(name).toLowerCase()) === -1) cfg.igniterItems.push(name);
     }
@@ -1485,6 +1490,156 @@ function stickStructureMatch(name) {
     if (re.test(String(name || ""))) return part;
   }
   return null;
+}
+
+function floorItemAt(layer, col, row) {
+  for (const fi of worldSession.floorItems) {
+    if (fi.layer === layer && fi.col === col && fi.row === row) return true;
+  }
+  return false;
+}
+
+function findDropSpot(p) {
+  if (!floorItemAt(p.layer, p.col, p.row)) return { col: p.col, row: p.row };
+  const L = layers[p.layer];
+  if (!L) return null;
+  const found = [];
+  const reach = 5;
+  for (let dr = -reach; dr <= reach; dr++) {
+    for (let dc = -reach; dc <= reach; dc++) {
+      if (dc === 0 && dr === 0) continue;
+      const c = p.col + dc;
+      const r = p.row + dr;
+      if (tileAt(p.layer, c, r) !== ".") continue;
+      if (L.objects[c + "," + r]) continue;
+      if (floorItemAt(p.layer, c, r)) continue;
+      found.push({ col: c, row: r, d: Math.hypot(dc, dr) });
+    }
+  }
+  if (found.length === 0) return null;
+  found.sort((x, y) => x.d - y.d);
+  return { col: found[0].col, row: found[0].row };
+}
+
+function dropStackItem(p, stackIndex) {
+  const stack = p._inv[stackIndex];
+  if (!stack) return false;
+  const spot = findDropSpot(p);
+  if (!spot) {
+    sendPlayer(p, { type: "item_result", ok: false, text: "There is no room to drop that here." });
+    return false;
+  }
+  const name = stack.name;
+  stack.count = stack.count - 1;
+  if (stack.count <= 0) p._inv.splice(stackIndex, 1);
+  worldSession.floorItems.push({ layer: p.layer, col: spot.col, row: spot.row, name: name });
+  notifyItem(p.layer, spot.col, spot.row, { type: "itemadded", col: spot.col, row: spot.row, name: name });
+  journalPlayer(p);
+  return true;
+}
+
+function handleInvMove(p, data) {
+  const from = parseInt(data.from, 10);
+  const to = parseInt(data.to, 10);
+  if (!Number.isInteger(from) || !Number.isInteger(to)) return;
+  if (from < 0 || from >= p._inv.length || to < 0) return;
+  const target = Math.min(to, p._inv.length - 1);
+  if (target !== from) {
+    const moved = p._inv.splice(from, 1)[0];
+    p._inv.splice(target, 0, moved);
+  }
+  syncPlayerInventory(p);
+}
+
+function handleInvCombine(p, data) {
+  const from = parseInt(data.from, 10);
+  const onto = parseInt(data.onto, 10);
+  if (!Number.isInteger(from) || !Number.isInteger(onto) || from === onto) return;
+  const first = p._inv[from];
+  const second = p._inv[onto];
+  if (!first || !second) {
+    syncPlayerInventory(p);
+    return;
+  }
+  const na = String(first.name).toLowerCase();
+  const nb = String(second.name).toLowerCase();
+  let recipe = null;
+  for (const r of VISION.combineRecipes) {
+    const ra = String(r.a).toLowerCase();
+    const rb = String(r.b).toLowerCase();
+    if ((ra === na && rb === nb) || (ra === nb && rb === na)) {
+      recipe = r;
+      break;
+    }
+  }
+  if (!recipe) {
+    p._inv[from] = second;
+    p._inv[onto] = first;
+    syncPlayerInventory(p);
+    return;
+  }
+  if (worldCombat.isInFight(p)) {
+    sendPlayer(p, { type: "item_result", ok: false, text: "You can't do that during battle." });
+    syncPlayerInventory(p);
+    return;
+  }
+  const count = Math.max(1, Number(recipe.resultCount) || 1);
+  let resultStack = null;
+  for (const stack of p._inv) {
+    if (String(stack.name).toLowerCase() === String(recipe.result).toLowerCase()) resultStack = stack;
+  }
+  let freed = 0;
+  const consumeNames = [];
+  if (recipe.consumeA) consumeNames.push(String(recipe.a));
+  if (recipe.consumeB) consumeNames.push(String(recipe.b));
+  for (const cn of consumeNames) {
+    for (const stack of p._inv) {
+      if (String(stack.name).toLowerCase() === cn.toLowerCase() && stack.count <= 1) freed++;
+    }
+  }
+  if (!resultStack && p._inv.length - freed >= capacityOf(p)) {
+    sendPlayer(p, { type: "item_result", ok: false, text: "Your bag is full." });
+    syncPlayerInventory(p);
+    return;
+  }
+  let insertAt = -1;
+  for (const cn of consumeNames) {
+    for (let i = 0; i < p._inv.length; i++) {
+      const stack = p._inv[i];
+      if (String(stack.name).toLowerCase() === cn.toLowerCase()) {
+        stack.count = stack.count - 1;
+        if (stack.count <= 0) {
+          p._inv.splice(i, 1);
+          if (insertAt === -1) insertAt = i;
+        }
+        break;
+      }
+    }
+  }
+  if (resultStack && p._inv.indexOf(resultStack) !== -1) {
+    resultStack.count = resultStack.count + count;
+  } else {
+    const entry = { name: recipe.result, count: count };
+    if (insertAt === -1 || insertAt > p._inv.length) p._inv.push(entry);
+    else p._inv.splice(insertAt, 0, entry);
+  }
+  syncPlayerInventory(p);
+  sendPlayer(p, { type: "item_result", ok: true, text: recipe.text || ("You made " + recipe.result + ".") });
+}
+
+function handleInvDrop(p, data) {
+  const slot = parseInt(data.slot, 10);
+  if (!Number.isInteger(slot) || slot < 0 || slot >= p._inv.length) {
+    syncPlayerInventory(p);
+    return;
+  }
+  if (worldCombat.isInFight(p)) {
+    sendPlayer(p, { type: "c_notice", text: "You can't drop things during battle." });
+    syncPlayerInventory(p);
+    return;
+  }
+  dropStackItem(p, slot);
+  syncPlayerInventory(p);
 }
 
 function handleLightStick(p, data) {
@@ -3615,7 +3770,7 @@ function startWorldPlayer(socket, pass, info, spawn) {
     if (q) players[seenId] = publicPlayer(q);
   }
   players[id] = publicPlayer(p);
-  sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W, p.row - VIEW_HALF_H, w, h), inventory: inventory, sheet: clientSheet(p._sheet), itemFx: ITEM_FX, vision: VISION });
+  sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W, p.row - VIEW_HALF_H, w, h), inventory: inventory, sheet: clientSheet(p._sheet), itemFx: ITEM_FX, vision: VISION, chatRange: CHAT_RANGE });
   sendPlayer(p, timeMessage());
   for (const notice of joinNotices) sendPlayer(p, { type: "item_result", ok: !combatLogged, text: notice });
   if (!restored) p._kills = [];
@@ -3655,6 +3810,12 @@ function startWorldPlayer(socket, pass, info, spawn) {
       }
     } else if (data.type === "interact") {
       handleInteract(me);
+    } else if (data.type === "inv_move") {
+      handleInvMove(me, data);
+    } else if (data.type === "inv_combine") {
+      handleInvCombine(me, data);
+    } else if (data.type === "inv_drop") {
+      handleInvDrop(me, data);
     } else if (data.type === "light_stick") {
       handleLightStick(me, data);
     } else if (data.type === "light_move") {
@@ -3716,26 +3877,19 @@ function startWorldPlayer(socket, pass, info, spawn) {
         sendPlayer(me, { type: "dropfail" });
         return;
       }
-      let occupied = false;
-      for (const fi of worldSession.floorItems) {
-        if (fi.layer === me.layer && fi.col === me.col && fi.row === me.row) { occupied = true; break; }
-      }
-      if (occupied) {
+      if (!dropStackItem(me, stackIndex)) {
         sendPlayer(me, { type: "dropfail" });
         return;
       }
-      me._inv[stackIndex].count = me._inv[stackIndex].count - 1;
-      if (me._inv[stackIndex].count <= 0) me._inv.splice(stackIndex, 1);
-      worldSession.floorItems.push({ layer: me.layer, col: me.col, row: me.row, name: name });
-      notifyItem(me.layer, me.col, me.row, { type: "itemadded", col: me.col, row: me.row, name: name });
       sendPlayer(me, { type: "dropok", name: name });
-      journalPlayer(me);
     } else if (data.type === "chat") {
       const text = String(data.text || "").slice(0, 200);
-      const message = { type: "chat", id: me.id, dex: me.dex, name: me.name, text: text };
-      for (const seenId in me._seen) {
-        const q = worldSession.players[seenId];
-        if (q) sendPlayer(q, message);
+      const message = { type: "chat", id: me.id, dex: me.dex, name: me.name, text: text, ts: Date.now() };
+      for (const otherId in worldSession.players) {
+        const q = worldSession.players[otherId];
+        if (!q || q === me || q.layer !== me.layer) continue;
+        if (Math.hypot(q.col - me.col, q.row - me.row) > CHAT_RANGE) continue;
+        sendPlayer(q, message);
       }
       sendGms(me.layer, message);
     }
