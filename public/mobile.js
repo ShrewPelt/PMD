@@ -9,7 +9,7 @@
     "html.touch #chat{display:none;position:fixed;left:0;right:0;top:0;z-index:80;padding:8px;background:rgba(10,10,20,0.9)}",
     "html.touch.chatOn #chat{display:flex}",
     "html.touch #chatInput{width:100%;font-size:16px}",
-    "html.touch #hud{top:calc(env(safe-area-inset-top) + 6px);left:calc(env(safe-area-inset-left) + 6px);width:150px;gap:4px}",
+    "html.touch #hud{top:calc(env(safe-area-inset-top) + 6px);left:calc(env(safe-area-inset-left) + 212px);width:150px;gap:4px}",
     "html.touch #readout{font-size:9px;padding:4px 6px;line-height:1.25}",
     "html.touch #gmlog{max-height:22vh;font-size:11px}",
     "html.touch #gmlog #gmlogbody{overflow-y:auto}",

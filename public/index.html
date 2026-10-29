@@ -112,7 +112,15 @@ if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) documen
   .clmsg { flex: 1; min-width: 0; line-height: 1.35; overflow-wrap: anywhere; }
   .clname { color: #ffd23f; font-size: 11px; }
   .clts { color: #8888aa; font-size: 10px; margin-left: 6px; }
-  html.touch #chatlog { top: calc(env(safe-area-inset-top) + 6px); left: calc(env(safe-area-inset-left) + 162px); width: min(46vw, 300px); height: 55vh; }
+  #chatloghead { touch-action: none; }
+  html.touch #chatlog { top: calc(env(safe-area-inset-top) + 6px); left: calc(env(safe-area-inset-left) + 6px); width: 200px; height: auto; }
+  html.touch #chatloghead { padding: 3px 8px; font-size: 11px; cursor: pointer; }
+  html.touch #chatlogtoggle { padding: 0 6px; font-size: 11px; }
+  html.touch #chatlogbody { flex: none; height: 104px; padding: 2px 8px; overflow-y: auto; -webkit-overflow-scrolling: touch; touch-action: pan-y; overscroll-behavior: contain; }
+  html.touch .clrow { margin: 4px 0; gap: 6px; }
+  html.touch .clportrait { width: 34px; height: 34px; }
+  html.touch .clmsg { font-size: 11px; }
+  html.touch .clname { font-size: 10px; }
 
   #cbOrder {
     position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
@@ -1055,7 +1063,59 @@ function chatLogCollapse(on) {
 function chatLogTitle() {
   const t = document.getElementById("chatlogtitle");
   if (!t) return;
-  t.textContent = "Nearby chat (" + CHATLOG.range + " tiles)" + (CHATLOG.collapsed && CHATLOG.unread > 0 ? " | " + CHATLOG.unread + " new" : "");
+  const touch = document.documentElement.classList.contains("touch");
+  t.textContent = (touch ? "Chat" : "Nearby chat (" + CHATLOG.range + " tiles)") + (CHATLOG.collapsed && CHATLOG.unread > 0 ? " | " + CHATLOG.unread + " new" : "");
+}
+
+function chatLogClamp(box) {
+  const rect = box.getBoundingClientRect();
+  const maxLeft = Math.max(0, window.innerWidth - Math.min(rect.width, window.innerWidth));
+  const maxTop = Math.max(0, window.innerHeight - 40);
+  box.style.left = Math.min(Math.max(0, rect.left), maxLeft) + "px";
+  box.style.top = Math.min(Math.max(0, rect.top), maxTop) + "px";
+}
+
+function chatLogEnableDrag(box, head) {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem("pmdChatLogPos") || "null"); } catch (e) {}
+  if (saved && typeof saved.left === "number" && typeof saved.top === "number") {
+    box.style.left = saved.left + "px";
+    box.style.top = saved.top + "px";
+    chatLogClamp(box);
+  }
+  let drag = null;
+  head.style.cursor = "move";
+  head.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0 || (ev.target && ev.target.closest && ev.target.closest("button"))) return;
+    const rect = box.getBoundingClientRect();
+    drag = { id: ev.pointerId, dx: ev.clientX - rect.left, dy: ev.clientY - rect.top, sx: ev.clientX, sy: ev.clientY, active: false };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  });
+  const move = (ev) => {
+    if (!drag || ev.pointerId !== drag.id) return;
+    if (!drag.active && Math.hypot(ev.clientX - drag.sx, ev.clientY - drag.sy) < 5) return;
+    drag.active = true;
+    box.style.left = (ev.clientX - drag.dx) + "px";
+    box.style.top = (ev.clientY - drag.dy) + "px";
+    chatLogClamp(box);
+    ev.preventDefault();
+  };
+  const up = (ev) => {
+    if (!drag || ev.pointerId !== drag.id) return;
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    window.removeEventListener("pointercancel", up);
+    if (drag.active) {
+      CHATLOG.moved = true;
+      setTimeout(() => { CHATLOG.moved = false; }, 0);
+      const rect = box.getBoundingClientRect();
+      try { localStorage.setItem("pmdChatLogPos", JSON.stringify({ left: rect.left, top: rect.top })); } catch (e) {}
+    }
+    drag = null;
+  };
+  window.addEventListener("resize", () => chatLogClamp(box));
 }
 
 function chatLogShow() {
@@ -1065,8 +1125,16 @@ function chatLogShow() {
     CHATLOG.ready = true;
     let saved = null;
     try { saved = localStorage.getItem("pmdChatLogCollapsed"); } catch (e) {}
-    const startCollapsed = saved === null ? document.documentElement.classList.contains("touch") : saved === "1";
-    document.getElementById("chatloghead").addEventListener("click", () => chatLogCollapse(!CHATLOG.collapsed));
+    const startCollapsed = saved === "1";
+    const head = document.getElementById("chatloghead");
+    head.addEventListener("click", () => {
+      if (CHATLOG.moved) {
+        CHATLOG.moved = false;
+        return;
+      }
+      chatLogCollapse(!CHATLOG.collapsed);
+    });
+    if (!document.documentElement.classList.contains("touch")) chatLogEnableDrag(box, head);
     chatLogCollapse(startCollapsed);
   }
   box.classList.remove("hidden");
