@@ -61,13 +61,6 @@ if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) documen
     display: flex; flex-direction: column; gap: 8px;
     pointer-events: none;
   }
-  #readout {
-    background: rgba(20,20,34,0.82);
-    border: 1px solid #3a3a55; border-radius: 8px;
-    padding: 7px 10px; color: #ffffff;
-    font-family: monospace; font-size: 13px;
-    white-space: pre;
-  }
   #gmlog {
     width: 100%; max-height: 46vh;
     background: rgba(20,20,34,0.82);
@@ -256,7 +249,6 @@ if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) documen
 <button id="exitWorld" class="hidden">Exit World</button>
 <div id="leftOverlay" class="hidden"><div id="leftBox"><div id="leftTitle">You have left the world</div><div id="leftText">Your character is saved. You can close this tab.</div></div></div>
 <div id="hud">
-  <div id="readout"></div>
   <div id="gmlog">
     <div id="gmloghead">Game Master</div>
     <div id="gmlogbody"></div>
