@@ -4690,7 +4690,23 @@ function handleWorldMove(p, dir) {
   worldCombat.afterPlayerMove(p);
 }
 
+function gmFarmCell(layer, col, row) {
+  const L = layers[layer];
+  if (L && L.objects[col + "," + row]) return null;
+  const plot = farmState.plots[layer + "," + col + "," + row];
+  if (!plot) return [col, row, "", 0, 0, 0];
+  const entries = farmPlotEntries(layer, col, row, plot);
+  const top = entries[entries.length - 1];
+  return [col, row, top.name, 1, 0, 0];
+}
+
 function refreshViewsForCells(layer, cells) {
+  const gmCells = [];
+  for (const cell of cells) {
+    const farmCell = gmFarmCell(layer, cell[0], cell[1]);
+    if (farmCell) gmCells.push(farmCell);
+  }
+  if (gmCells.length > 0) sendGms(layer, { type: "gm_objs", layer: layer, cells: gmCells });
   for (const id in worldSession.players) {
     const q = worldSession.players[id];
     if (q.layer !== layer) continue;
@@ -4857,6 +4873,12 @@ function sendGmLayer(gm) {
   for (const k of Object.keys(L.objects)) {
     const parts = k.split(",");
     objList.push([parseInt(parts[0], 10), parseInt(parts[1], 10), L.objects[k].name, L.objects[k].solid ? 1 : 0, L.objects[k].rot || 0, L.objects[k].flip ? 1 : 0]);
+  }
+  for (const key of Object.keys(farmState.plots)) {
+    const parts = key.split(",");
+    if (parseInt(parts[0], 10) !== gm.layer) continue;
+    const farmCell = gmFarmCell(gm.layer, parseInt(parts[1], 10), parseInt(parts[2], 10));
+    if (farmCell && farmCell[2] !== "") objList.push(farmCell);
   }
   const passList = Object.keys(L.passable || {}).map((k) => k.split(",").map((v) => parseInt(v, 10)));
   sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, passable: passList, name: L.name, rows: L.rows.map(trimRowEnd), art: L.art.map(trimRowEnd), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer && !entities[id].down).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: null, spawns: spawnList(), floorItems: items, layers: layerSummaries(), light: L.light || "outdoor" });
