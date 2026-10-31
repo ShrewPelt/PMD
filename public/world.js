@@ -836,6 +836,224 @@ function gmUpdateGrid(scene) {
   g.strokeRect(0, 0, WORLD_COLS * TILE, WORLD_ROWS * TILE);
 }
 
+const SCHED_COLORS = [0x4fc3f7, 0xba68c8, 0xffb74d, 0x81c784, 0xf06292, 0xfff176, 0x90a4ae, 0xff8a65];
+const SCHED = { entries: [], editing: -1, prev: {}, token: 0, timer: null, dirty: false };
+
+function schedFmtTime(hours) {
+  let h = Math.floor(hours) % 24;
+  if (h < 0) h += 24;
+  let m = Math.round((hours - Math.floor(hours)) * 60);
+  if (m >= 60) { m = 0; h = (h + 1) % 24; }
+  return String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0");
+}
+
+function schedParseTime(text) {
+  const parts = String(text || "").split(":");
+  const h = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10) || 0;
+  if (!isFinite(h)) return 0;
+  return Math.max(0, Math.min(23.75, Math.round((h + m / 60) * 4) / 4));
+}
+
+function schedPicked() {
+  const picked = WG.selectedEntity ? WG.entities[WG.selectedEntity] : null;
+  return picked && picked.kind === "npc" ? picked : null;
+}
+
+function schedLoad() {
+  const picked = schedPicked();
+  SCHED.entries = picked && Array.isArray(picked.schedule) ? JSON.parse(JSON.stringify(picked.schedule)) : [];
+  SCHED.editing = -1;
+  SCHED.prev = {};
+  SCHED.dirty = false;
+  schedRender();
+  schedRequestPreviews();
+}
+
+function schedStartFor(i) {
+  const picked = schedPicked();
+  if (!picked) return [0, 0];
+  if (SCHED.entries.length === 0) return [picked.col, picked.row];
+  const before = SCHED.entries[(i - 1 + SCHED.entries.length) % SCHED.entries.length];
+  if (before && before.points.length > 0 && SCHED.entries.length > 1) return before.points[before.points.length - 1];
+  if (SCHED.entries.length === 1 && SCHED.entries[0].points.length > 0) return [picked.homeCol !== undefined ? picked.homeCol : picked.col, picked.homeRow !== undefined ? picked.homeRow : picked.row];
+  return [picked.col, picked.row];
+}
+
+function schedRequestPreviews() {
+  clearTimeout(SCHED.timer);
+  SCHED.timer = setTimeout(() => {
+    SCHED.token += 1;
+    SCHED.prev = {};
+    for (let i = 0; i < SCHED.entries.length; i++) {
+      if (SCHED.entries[i].points.length === 0) continue;
+      gmSend({ type: "gm_sched_preview", token: SCHED.token, index: i, layer: WG.layer, start: schedStartFor(i), points: SCHED.entries[i].points });
+    }
+    schedRender();
+    gmDrawMarkers();
+  }, 120);
+}
+
+function schedFmtDuration(sec) {
+  if (sec < 60) return sec.toFixed(1) + "s";
+  const m = Math.floor(sec / 60);
+  return m + "m " + Math.round(sec - m * 60) + "s";
+}
+
+function schedRender() {
+  const box = document.getElementById("wgSchedList");
+  const head = document.getElementById("wgSchedHead");
+  if (!box || !head) return;
+  const picked = schedPicked();
+  if (!picked) {
+    head.textContent = "Select an NPC with the Select tool to edit its daily schedule.";
+    box.innerHTML = "";
+    return;
+  }
+  head.textContent = picked.name + " | " + SCHED.entries.length + " stop(s)" + (SCHED.dirty ? " | unsaved changes" : "");
+  let html = "";
+  SCHED.entries.forEach((entry, i) => {
+    const prev = SCHED.prev[i];
+    const color = "#" + SCHED_COLORS[i % SCHED_COLORS.length].toString(16).padStart(6, "0");
+    html += "<div class='wgSchedEntry" + (SCHED.editing === i ? " editing" : "") + "' style='border-left:4px solid " + color + "'>";
+    html += "<div>Leave at <input type='time' step='900' value='" + schedFmtTime(entry.time) + "' data-sched-time='" + i + "' style='width:90px'></div>";
+    html += "<div><select data-sched-interact='" + i + "'><option value='talk'" + (entry.interact === "talk" ? " selected" : "") + ">Can be talked to on the way</option><option value='busy'" + (entry.interact === "busy" ? " selected" : "") + ">Busy on the way (no talk or fight)</option></select></div>";
+    html += "<div>" + entry.points.length + " target tile(s)</div>";
+    if (prev) {
+      for (let k = 0; k < prev.legs.length; k++) {
+        const leg = prev.legs[k];
+        const pt = entry.points[k];
+        html += "<div class='wgSchedLeg" + (leg.ok ? "" : " bad") + "'>To (" + pt[0] + "," + pt[1] + "): " + (leg.ok ? leg.steps + " tiles | " + schedFmtDuration(leg.sec) + " | " + leg.gameMin + " game min" : "no walkable path") + "</div>";
+      }
+      if (prev.ok) {
+        const arrive = entry.time + prev.totalGameMin / 60;
+        html += "<div class='wgSchedTotal'>Total " + prev.totalSteps + " tiles | " + schedFmtDuration(prev.totalSec) + " real | " + prev.totalGameMin + " game min | arrives about " + schedFmtTime(arrive % 24) + "</div>";
+      } else {
+        html += "<div class='wgSchedLeg bad'>Route is blocked at one of the stops.</div>";
+      }
+    } else if (entry.points.length > 0) {
+      html += "<div class='wgSchedLeg'>Calculating...</div>";
+    }
+    html += "<div><button class='wgBtn" + (SCHED.editing === i ? " on" : "") + "' data-sched-draw='" + i + "'>" + (SCHED.editing === i ? "Drawing (click tiles)" : "Draw route") + "</button><button class='wgBtn' data-sched-undo='" + i + "'>Remove last</button><button class='wgBtn' data-sched-clear='" + i + "'>Clear</button><button class='wgBtn' data-sched-del='" + i + "'>Delete stop</button></div>";
+    html += "</div>";
+  });
+  box.innerHTML = html;
+}
+
+function schedBind() {
+  const box = document.getElementById("wgSchedList");
+  box.addEventListener("change", (ev) => {
+    const t = ev.target;
+    if (t.hasAttribute("data-sched-time")) {
+      SCHED.entries[parseInt(t.getAttribute("data-sched-time"), 10)].time = schedParseTime(t.value);
+      SCHED.entries.sort((a, b) => a.time - b.time);
+      SCHED.editing = -1;
+      SCHED.dirty = true;
+      schedRequestPreviews();
+    } else if (t.hasAttribute("data-sched-interact")) {
+      SCHED.entries[parseInt(t.getAttribute("data-sched-interact"), 10)].interact = t.value === "busy" ? "busy" : "talk";
+      SCHED.dirty = true;
+      schedRender();
+    }
+  });
+  box.addEventListener("click", (ev) => {
+    const t = ev.target.closest("button");
+    if (!t) return;
+    const attr = (name) => (t.hasAttribute(name) ? parseInt(t.getAttribute(name), 10) : null);
+    const draw = attr("data-sched-draw");
+    const undo = attr("data-sched-undo");
+    const clear = attr("data-sched-clear");
+    const del = attr("data-sched-del");
+    if (draw !== null) {
+      SCHED.editing = SCHED.editing === draw ? -1 : draw;
+      if (SCHED.editing >= 0) gmSetTool("route");
+      else gmSetTool("select");
+      schedRender();
+      gmDrawMarkers();
+      return;
+    }
+    if (undo !== null) {
+      SCHED.entries[undo].points.pop();
+    } else if (clear !== null) {
+      SCHED.entries[clear].points = [];
+    } else if (del !== null) {
+      SCHED.entries.splice(del, 1);
+      SCHED.editing = -1;
+    } else {
+      return;
+    }
+    SCHED.dirty = true;
+    schedRequestPreviews();
+  });
+  document.getElementById("wgSchedAdd").addEventListener("click", () => {
+    if (!schedPicked()) {
+      gmNotice("Select an NPC first.");
+      return;
+    }
+    if (SCHED.entries.length >= 24) return;
+    const last = SCHED.entries.length > 0 ? SCHED.entries[SCHED.entries.length - 1].time : 6;
+    SCHED.entries.push({ time: Math.min(23.75, last + 2), interact: "talk", points: [] });
+    SCHED.entries.sort((a, b) => a.time - b.time);
+    SCHED.editing = SCHED.entries.findIndex((en) => en.points.length === 0);
+    SCHED.dirty = true;
+    gmSetTool("route");
+    schedRender();
+    gmDrawMarkers();
+  });
+  document.getElementById("wgSchedSave").addEventListener("click", () => {
+    const picked = schedPicked();
+    if (!picked) return;
+    const clean = SCHED.entries.filter((en) => en.points.length > 0);
+    gmSend({ type: "gm_sched_set", id: picked.id, schedule: clean });
+    SCHED.entries = clean;
+    SCHED.editing = -1;
+    SCHED.dirty = false;
+    gmSetTool("select");
+    schedRender();
+    schedRequestPreviews();
+  });
+  document.getElementById("wgSchedReload").addEventListener("click", schedLoad);
+  window.addEventListener("keydown", (ev) => {
+    if (WG.tool !== "route" || SCHED.editing < 0) return;
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "z") {
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      const entry = SCHED.entries[SCHED.editing];
+      if (entry) entry.points.pop();
+      SCHED.dirty = true;
+      schedRequestPreviews();
+    } else if (ev.key === "Escape" || ev.key === "Enter") {
+      SCHED.editing = -1;
+      gmSetTool("select");
+      schedRender();
+      gmDrawMarkers();
+    }
+  }, true);
+}
+
+function schedDraw(g) {
+  const picked = schedPicked();
+  if (!picked) return;
+  SCHED.entries.forEach((entry, i) => {
+    const color = SCHED_COLORS[i % SCHED_COLORS.length];
+    const active = SCHED.editing === i;
+    const prev = SCHED.prev[i];
+    g.lineStyle(active ? 4 : 2, color, active ? 1 : 0.7);
+    if (prev && prev.corners && prev.corners.length > 1) {
+      g.beginPath();
+      g.moveTo(prev.corners[0][0] * TILE + TILE / 2, prev.corners[0][1] * TILE + TILE / 2);
+      for (let k = 1; k < prev.corners.length; k++) g.lineTo(prev.corners[k][0] * TILE + TILE / 2, prev.corners[k][1] * TILE + TILE / 2);
+      g.strokePath();
+    }
+    entry.points.forEach((pt) => {
+      g.fillStyle(color, 0.35);
+      g.fillCircle(pt[0] * TILE + TILE / 2, pt[1] * TILE + TILE / 2, 11);
+      g.lineStyle(2, color, 1);
+      g.strokeCircle(pt[0] * TILE + TILE / 2, pt[1] * TILE + TILE / 2, 11);
+    });
+  });
+}
+
 function gmDrawMarkers() {
   if (!WG.markerGfx) return;
   const g = WG.markerGfx;
@@ -874,6 +1092,7 @@ function gmDrawMarkers() {
     g.fillRect(pc * TILE + 1, pr * TILE + 1, TILE - 2, TILE - 2);
     g.strokeRect(pc * TILE + 4, pr * TILE + 4, TILE - 8, TILE - 8);
   }
+  schedDraw(g);
   const picked = WG.selectedEntity ? WG.entities[WG.selectedEntity] : null;
   if (picked) {
     g.lineStyle(3, 0xff9f1c, 1);
@@ -1272,6 +1491,18 @@ function gmHandleClickTool(scene, c, r) {
     return;
   }
   if (WG.tool === "item") return;
+  if (WG.tool === "route") {
+    const entry = SCHED.editing >= 0 ? SCHED.entries[SCHED.editing] : null;
+    if (!entry) {
+      gmNotice("Press Draw route on a stop first.");
+      return;
+    }
+    if (entry.points.length >= 60) return;
+    entry.points.push([c, r]);
+    SCHED.dirty = true;
+    schedRequestPreviews();
+    return;
+  }
   if (WG.tool === "creature") {
     gmSend({ type: "gm_entity_set", entity: gmReadCreatureForm(null, c, r) });
     return;
@@ -1580,6 +1811,10 @@ function gmSetTool(tool) {
     WG.portalSource = null;
     gmDrawMarkers();
   }
+  if (tool !== "route" && typeof SCHED !== "undefined" && SCHED.editing >= 0) {
+    SCHED.editing = -1;
+    schedRender();
+  }
 }
 
 function gmSetShape(shape) {
@@ -1591,7 +1826,7 @@ function gmSetShape(shape) {
 function gmBuildPanel() {
   const style = document.createElement("style");
   style.textContent = "#wgPanel{position:fixed;top:8px;right:8px;width:280px;max-height:96vh;overflow-y:auto;background:rgba(20,20,34,0.94);border:1px solid #3a3a55;border-radius:8px;padding:10px;color:#fff;font-size:13px;z-index:20}"
-    + "#wgPanel h4{margin:10px 0 6px 0;color:#ffd23f;font-size:13px}"
+    + "#wgPanel .wgSchedEntry{background:#24243a;border-radius:5px;padding:5px;margin:5px 0}#wgPanel .wgSchedEntry.editing{outline:1px solid #ffd23f}#wgPanel .wgSchedLeg{color:#aab;font-size:11px}#wgPanel .wgSchedLeg.bad{color:#ff8a8a}#wgPanel .wgSchedTotal{color:#9be39b;font-size:12px;margin-top:2px}#wgPanel select{background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;padding:3px;max-width:100%}#wgPanel h4{margin:10px 0 6px 0;color:#ffd23f;font-size:13px}"
     + "#wgPanel h4:first-child{margin-top:0}"
     + ".wgBtn{background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;padding:5px 8px;margin:2px;cursor:pointer;font-size:12px}"
     + ".wgBtn.on{background:#4a6cff;border-color:#fff}"
@@ -1694,6 +1929,12 @@ function gmBuildPanel() {
     + "</div>"
     + "<div id='wgESel' style='margin-top:4px;color:#c8c8ff'>Nothing selected.</div>"
     + "</div>"
+    + "<div class='wgSecHead' data-wgsec='schedule'><span class='wgArrow'></span>NPC schedule</div><div class='wgSecBody' data-wgbody='schedule'>"
+    + "<div style='margin-bottom:4px'>Select an NPC with the Select tool. Each stop says when it leaves and where it walks. Click tiles in order while drawing; the NPC walks to each in turn. Ctrl+Z removes the last tile, Esc finishes.</div>"
+    + "<div id='wgSchedHead' style='color:#c8c8ff;margin-bottom:4px'></div>"
+    + "<div><button class='wgBtn' data-wgtool='select'>Select tool</button><button class='wgBtn' id='wgSchedAdd'>Add stop</button><button class='wgBtn' id='wgSchedSave'>Save schedule</button><button class='wgBtn' id='wgSchedReload'>Revert</button></div>"
+    + "<div id='wgSchedList'></div>"
+    + "</div>"
     + "<div class='wgSecHead' data-wgsec='items'><span class='wgArrow'></span>Items</div><div class='wgSecBody' data-wgbody='items'>"
     + "<div>Drag items from the Creative items window (bottom left) onto a tile, creature or player. Drag them back into the window to delete them.</div>"
     + "<div style='margin-top:6px'><button class='wgBtn' data-wgtool='item'>Move items</button><button class='wgBtn' id='wgToggleCreative'>Hide creative window</button></div>"
@@ -1726,7 +1967,7 @@ function gmBuildPanel() {
   document.body.appendChild(panel);
   WG.panel = panel;
 
-  const secDefaults = { layer: true, build: true, tiles: true, objects: true, spawn: false, creatures: false, items: false, moderation: false, time: false, override: false };
+  const secDefaults = { layer: true, build: true, tiles: true, objects: true, spawn: false, creatures: false, items: false, moderation: false, time: false, schedule: false, override: false };
   let secState = {};
   try {
     secState = JSON.parse(localStorage.getItem("pmdGmSections") || "{}") || {};
@@ -1751,6 +1992,8 @@ function gmBuildPanel() {
   });
   visGmBindUi();
   ovBindUi();
+  schedBind();
+  schedRender();
   document.getElementById("wgToggleCreative").addEventListener("click", () => {
     const creative = document.getElementById("wgCreative");
     const coords = document.getElementById("wgCoords");
@@ -2994,6 +3237,10 @@ function gmReadCreatureForm(existing, col, row) {
 function gmShowSelection() {
   const box = document.getElementById("wgESel");
   const picked = WG.selectedEntity ? WG.entities[WG.selectedEntity] : null;
+  if (SCHED.loadedFor !== (picked ? picked.id : null)) {
+    SCHED.loadedFor = picked ? picked.id : null;
+    schedLoad();
+  }
   if (!picked) {
     box.textContent = "Nothing selected.";
     return;
@@ -5898,6 +6145,24 @@ window.worldHook = function (scene, data) {
       if (sprite && sprite !== "loading") showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text);
       return true;
     }
+    if (data.type === "e_fade") {
+      const fsprite = otherPlayers[data.id];
+      if (fsprite && fsprite !== "loading") {
+        if (data.mode === "out") {
+          scene.tweens.add({ targets: fsprite, alpha: 0, duration: 400, ease: "Linear" });
+        } else {
+          scene.tweens.killTweensOf(fsprite);
+          fsprite.x = tilePixelX(data.col);
+          fsprite.y = tilePixelY(data.row);
+          fsprite.alpha = 0;
+          scene.tweens.add({ targets: fsprite, alpha: 1, duration: 400, ease: "Linear" });
+        }
+      }
+      return true;
+    }
+    if (data.type === "npc_hold_end") {
+      return true;
+    }
     if (data.type === "interact_none") {
       updateReadout("nobody to talk to");
       return true;
@@ -5933,6 +6198,14 @@ window.worldHook = function (scene, data) {
       }
       return true;
     }
+    if (data.type === "gm_sched_preview") {
+      if (data.token === SCHED.token) {
+        SCHED.prev[data.index] = data;
+        schedRender();
+        gmDrawMarkers();
+      }
+      return true;
+    }
     if (data.type === "gm_entity") {
       WG.entities[data.entity.id] = data.entity;
       entityUpsert(scene, data.entity);
@@ -5953,6 +6226,24 @@ window.worldHook = function (scene, data) {
     if (data.type === "npc_say") {
       const sprite = otherPlayers[data.id];
       if (sprite && sprite !== "loading") showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text);
+      return true;
+    }
+    if (data.type === "e_fade") {
+      const fsprite = otherPlayers[data.id];
+      if (fsprite && fsprite !== "loading") {
+        if (data.mode === "out") {
+          scene.tweens.add({ targets: fsprite, alpha: 0, duration: 400, ease: "Linear" });
+        } else {
+          scene.tweens.killTweensOf(fsprite);
+          fsprite.x = tilePixelX(data.col);
+          fsprite.y = tilePixelY(data.row);
+          fsprite.alpha = 0;
+          scene.tweens.add({ targets: fsprite, alpha: 1, duration: 400, ease: "Linear" });
+        }
+      }
+      return true;
+    }
+    if (data.type === "npc_hold_end") {
       return true;
     }
     if (data.type === "gm_notice") {

@@ -2230,6 +2230,7 @@ function restoreNpcEntity(p) {
     loot: tpl && Array.isArray(tpl.loot) ? tpl.loot : [],
     moves: tpl && Array.isArray(tpl.moves) ? tpl.moves : [],
     respawn: 0,
+    schedule: tpl && Array.isArray(tpl.schedule) ? tpl.schedule : [],
     _nextSpeech: Date.now() + SPEECH_MIN_MS,
     _lineIdx: 0
   };
@@ -2542,7 +2543,7 @@ function saveEntitiesNow() {
   for (const id of Object.keys(entities)) {
     const e = entities[id];
     if (e.kind === "companion") continue;
-    list.push({ id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, fainted: e.fainted || false, faintUntil: e.faintUntil || 0 });
+    list.push({ id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, schedule: Array.isArray(e.schedule) && e.schedule.length > 0 ? e.schedule : undefined, fainted: e.fainted || false, faintUntil: e.faintUntil || 0 });
   }
   writeJsonFile(ENTITIES_FILE, { nextId: entityNextId, list: list, respawns: respawnQueue });
 }
@@ -2558,7 +2559,7 @@ function publicEntity(e) {
 }
 
 function gmEntity(e) {
-  return { id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, state: e.state, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, fainted: !!e.fainted };
+  return { id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, state: e.state, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, schedule: Array.isArray(e.schedule) ? e.schedule : [], busy: !!e._busy, fainted: !!e.fainted };
 }
 
 function entityAt(layer, col, row, ignoreId) {
@@ -2686,6 +2687,417 @@ function nearestPlayerTo(e) {
   return best ? { player: best, dist: bestDist } : null;
 }
 
+const SCHED_MAX_ENTRIES = 24;
+const SCHED_MAX_POINTS = 60;
+const SCHED_NODE_LIMIT = 90000;
+const SCHED_CHAT_IDLE_MS = 4000;
+const SCHED_AFTER_CHAT_MS = 2000;
+const SCHED_HURRY_SEC = 10;
+const SCHED_RUSH_MS = 2000;
+const SCHED_RUSH_STEP_MS = 150;
+const SCHED_FADE_MS = 450;
+const SCHED_HURRY_LINE = "You're wasting my precious time!";
+const SCHED_STALE_MS = 4000;
+const SCHED_BLOCKED_REPATH = 8;
+
+function cleanSchedule(value) {
+  const out = [];
+  if (!Array.isArray(value)) return out;
+  for (const entry of value.slice(0, SCHED_MAX_ENTRIES)) {
+    if (!entry || typeof entry !== "object" || !Array.isArray(entry.points)) continue;
+    const time = Number(entry.time);
+    if (!isFinite(time)) continue;
+    const points = [];
+    for (const pt of entry.points.slice(0, SCHED_MAX_POINTS)) {
+      if (!Array.isArray(pt)) continue;
+      const col = parseInt(pt[0], 10);
+      const row = parseInt(pt[1], 10);
+      if (!Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0 || col >= LAYER_W || row >= LAYER_H) continue;
+      points.push([col, row]);
+    }
+    if (points.length === 0) continue;
+    out.push({ time: Math.max(0, Math.min(23.75, Math.round(time * 4) / 4)), interact: entry.interact === "busy" ? "busy" : "talk", points: points });
+  }
+  out.sort((a, b) => a.time - b.time);
+  return out;
+}
+
+function schedHeapPush(heap, item) {
+  heap.push(item);
+  let i = heap.length - 1;
+  while (i > 0) {
+    const parent = (i - 1) >> 1;
+    if (heap[parent][0] <= heap[i][0]) break;
+    const swap = heap[parent];
+    heap[parent] = heap[i];
+    heap[i] = swap;
+    i = parent;
+  }
+}
+
+function schedHeapPop(heap) {
+  const top = heap[0];
+  const last = heap.pop();
+  if (heap.length > 0) {
+    heap[0] = last;
+    let i = 0;
+    for (;;) {
+      const left = i * 2 + 1;
+      const right = left + 1;
+      let smallest = i;
+      if (left < heap.length && heap[left][0] < heap[smallest][0]) smallest = left;
+      if (right < heap.length && heap[right][0] < heap[smallest][0]) smallest = right;
+      if (smallest === i) break;
+      const swap = heap[smallest];
+      heap[smallest] = heap[i];
+      heap[i] = swap;
+      i = smallest;
+    }
+  }
+  return top;
+}
+
+function schedFindPath(layer, fromC, fromR, toC, toR) {
+  if (fromC === toC && fromR === toR) return [];
+  if (!isWalkable(layer, toC, toR)) return null;
+  const startKey = fromR * LAYER_W + fromC;
+  const goalKey = toR * LAYER_W + toC;
+  const cameFrom = new Map();
+  const cost = new Map();
+  cost.set(startKey, 0);
+  const heap = [];
+  schedHeapPush(heap, [Math.abs(toC - fromC) + Math.abs(toR - fromR), fromC, fromR]);
+  const deltas = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  let expanded = 0;
+  while (heap.length > 0) {
+    const current = schedHeapPop(heap);
+    const c = current[1];
+    const r = current[2];
+    const key = r * LAYER_W + c;
+    if (key === goalKey) {
+      const path = [];
+      let walk = goalKey;
+      while (walk !== startKey) {
+        path.push([walk % LAYER_W, Math.floor(walk / LAYER_W)]);
+        walk = cameFrom.get(walk);
+      }
+      path.reverse();
+      return path;
+    }
+    expanded = expanded + 1;
+    if (expanded > SCHED_NODE_LIMIT) return null;
+    const baseCost = cost.get(key);
+    for (const d of deltas) {
+      const nc = c + d[0];
+      const nr = r + d[1];
+      if (nc < 0 || nr < 0 || nc >= LAYER_W || nr >= LAYER_H) continue;
+      const nkey = nr * LAYER_W + nc;
+      if (nkey !== goalKey && !isWalkable(layer, nc, nr)) continue;
+      const next = baseCost + 1;
+      const known = cost.get(nkey);
+      if (known !== undefined && known <= next) continue;
+      cost.set(nkey, next);
+      cameFrom.set(nkey, key);
+      schedHeapPush(heap, [next + Math.abs(toC - nc) + Math.abs(toR - nr), nc, nr]);
+    }
+  }
+  return null;
+}
+
+function schedBuildRoute(layer, startC, startR, points) {
+  const path = [];
+  const legs = [];
+  let curC = startC;
+  let curR = startR;
+  let broken = false;
+  for (const pt of points) {
+    if (broken) {
+      legs.push({ steps: 0, ok: false });
+      continue;
+    }
+    const leg = schedFindPath(layer, curC, curR, pt[0], pt[1]);
+    if (leg === null) {
+      legs.push({ steps: 0, ok: false });
+      broken = true;
+      continue;
+    }
+    for (const step of leg) path.push(step);
+    legs.push({ steps: leg.length, ok: true });
+    curC = pt[0];
+    curR = pt[1];
+  }
+  return { path: path, legs: legs, ok: !broken };
+}
+
+function schedCorners(startC, startR, path) {
+  const out = [[startC, startR]];
+  let prev = [startC, startR];
+  let prevDir = "";
+  for (let i = 0; i < path.length; i++) {
+    const dir = (path[i][0] - prev[0]) + "," + (path[i][1] - prev[1]);
+    if (prevDir && dir !== prevDir) out.push([prev[0], prev[1]]);
+    prevDir = dir;
+    prev = path[i];
+  }
+  out.push([prev[0], prev[1]]);
+  return out;
+}
+
+function handleGmSchedPreview(gm, data) {
+  const layer = parseInt(data.layer, 10);
+  if (!validLayerNumber(layer) || !Array.isArray(data.start) || !Array.isArray(data.points)) return;
+  const startC = parseInt(data.start[0], 10);
+  const startR = parseInt(data.start[1], 10);
+  if (!Number.isInteger(startC) || !Number.isInteger(startR)) return;
+  const points = [];
+  for (const pt of data.points.slice(0, SCHED_MAX_POINTS)) {
+    if (!Array.isArray(pt)) continue;
+    const col = parseInt(pt[0], 10);
+    const row = parseInt(pt[1], 10);
+    if (Number.isInteger(col) && Number.isInteger(row)) points.push([col, row]);
+  }
+  const route = schedBuildRoute(layer, startC, startR, points);
+  const secPerStep = ENTITY_TICK_MS / 1000;
+  const gameMinPerSec = 24 * 60 / (worldClock.dayMinutes * 60);
+  let total = 0;
+  const legs = route.legs.map((leg) => {
+    total = total + leg.steps;
+    return { steps: leg.steps, ok: leg.ok, sec: Math.round(leg.steps * secPerStep * 10) / 10, gameMin: Math.round(leg.steps * secPerStep * gameMinPerSec) };
+  });
+  sendSocket(gm.socket, { type: "gm_sched_preview", token: data.token, index: data.index, legs: legs, totalSteps: total, totalSec: Math.round(total * secPerStep * 10) / 10, totalGameMin: Math.round(total * secPerStep * gameMinPerSec), ok: route.ok, corners: schedCorners(startC, startR, route.path) });
+}
+
+function handleGmSchedSet(gm, data) {
+  const e = typeof data.id === "string" ? entities[data.id] : null;
+  if (!e || e.kind !== "npc") return;
+  e.schedule = cleanSchedule(data.schedule);
+  e._sched = null;
+  e._busy = false;
+  e._hold = null;
+  broadcastEntity(e, e.layer, e.col, e.row);
+  scheduleEntitySave();
+  sendSocket(gm.socket, { type: "gm_notice", text: e.schedule.length > 0 ? e.name + " now follows " + e.schedule.length + " scheduled stop(s)." : e.name + " has no schedule." });
+}
+
+function schedActiveIndex(schedule, hour) {
+  let found = schedule.length - 1;
+  for (let i = 0; i < schedule.length; i++) {
+    if (schedule[i].time <= hour) found = i;
+  }
+  return found;
+}
+
+function schedStartEntry(e, index, hour, now) {
+  const entry = e.schedule[index];
+  const route = schedBuildRoute(e.layer, e.col, e.row, entry.points);
+  let hoursSince = hour - entry.time;
+  if (hoursSince < 0) hoursSince = hoursSince + 24;
+  const elapsedMs = hoursSince / 24 * worldClock.dayMinutes * 60000;
+  const stepsDone = Math.floor(elapsedMs / ENTITY_TICK_MS);
+  const state = { index: index, path: route.path, pos: 0, interact: entry.interact, done: false, lastAt: now, blocked: 0, offset: 0 };
+  if (route.path.length === 0 || stepsDone >= route.path.length) {
+    state.done = true;
+    if (route.path.length > 0) {
+      const finalStep = route.path[route.path.length - 1];
+      schedPlace(e, finalStep[0], finalStep[1]);
+    }
+    e._busy = false;
+    e.homeCol = e.col;
+    e.homeRow = e.row;
+    e._sched = state;
+    return state;
+  }
+  if (stepsDone > 2) {
+    const spot = route.path[stepsDone - 1];
+    schedPlace(e, spot[0], spot[1]);
+    state.pos = stepsDone;
+  }
+  e._busy = entry.interact === "busy";
+  e._sched = state;
+  return state;
+}
+
+function schedPlace(e, col, row) {
+  const oldCol = e.col;
+  const oldRow = e.row;
+  const spot = worldFreeSpot(e.layer, col, row, e.id);
+  e.col = spot.col;
+  e.row = spot.row;
+  broadcastEntity(e, e.layer, oldCol, oldRow);
+  scheduleEntitySave();
+}
+
+function schedElapsedSec(entry, hour) {
+  let hoursSince = hour - entry.time;
+  if (hoursSince < 0) hoursSince = hoursSince + 24;
+  return hoursSince / 24 * worldClock.dayMinutes * 60;
+}
+
+function schedSecondsLeft(e, state) {
+  const entry = e.schedule[state.index];
+  const totalSec = (state.path.length + state.offset) * ENTITY_TICK_MS / 1000;
+  return totalSec - schedElapsedSec(entry, clockHour());
+}
+
+function schedExpectedPos(e, state) {
+  const entry = e.schedule[state.index];
+  const steps = Math.floor(schedElapsedSec(entry, clockHour()) * 1000 / ENTITY_TICK_MS) - state.offset;
+  return Math.max(0, Math.min(state.path.length, steps));
+}
+
+function schedSendFade(e, mode) {
+  const message = { type: "e_fade", id: e.id, mode: mode, col: e.col, row: e.row };
+  for (const pid in worldSession.players) {
+    const q = worldSession.players[pid];
+    if (cellInView(q, e.layer, e.col, e.row)) sendPlayer(q, message);
+  }
+}
+
+function schedFadeToSchedule(e) {
+  const state = e._sched;
+  if (!state) {
+    e._hold = null;
+    return;
+  }
+  if (e._hold) e._hold.phase = "fade";
+  schedSendFade(e, "out");
+  setTimeout(() => {
+    if (entities[e.id] !== e || !e._sched) {
+      e._hold = null;
+      return;
+    }
+    const st = e._sched;
+    const target = schedExpectedPos(e, st);
+    if (target >= st.path.length) {
+      if (st.path.length > 0) {
+        const finalStep = st.path[st.path.length - 1];
+        schedPlace(e, finalStep[0], finalStep[1]);
+      }
+      st.pos = st.path.length;
+    } else if (target > 0) {
+      const spot = st.path[target - 1];
+      schedPlace(e, spot[0], spot[1]);
+      st.pos = target;
+    } else {
+      st.pos = 0;
+    }
+    schedSendFade(e, "in");
+    e._hold = null;
+    st.lastAt = Date.now();
+  }, SCHED_FADE_MS);
+}
+
+function schedRushStep(e, endAt) {
+  const st = e._sched;
+  if (entities[e.id] !== e || !st || !e._hold) return;
+  if (Date.now() >= endAt || st.pos >= st.path.length) {
+    schedFadeToSchedule(e);
+    return;
+  }
+  const next = st.path[st.pos];
+  const oldCol = e.col;
+  const oldRow = e.row;
+  const dc = next[0] - oldCol;
+  const dr = next[1] - oldRow;
+  e.col = next[0];
+  e.row = next[1];
+  if (Math.abs(dc) >= Math.abs(dr)) e.direction = dc > 0 ? "right" : "left";
+  else e.direction = dr > 0 ? "down" : "up";
+  st.pos = st.pos + 1;
+  broadcastEntity(e, e.layer, oldCol, oldRow);
+  setTimeout(() => schedRushStep(e, endAt), SCHED_RUSH_STEP_MS);
+}
+
+function schedBeginHold(e, p) {
+  const state = e._sched;
+  if (!state || state.done) return true;
+  const now = Date.now();
+  if (e._hold && (e._hold.phase === "rush" || e._hold.phase === "fade")) return false;
+  if (!e._hold) e._hold = { pid: p.id, lastAt: now, phase: "talk", until: 0 };
+  e._hold.lastAt = now;
+  e._hold.pid = p.id;
+  e._hold.phase = "talk";
+  return true;
+}
+
+function schedHoldTick(e, state, now) {
+  const hold = e._hold;
+  if (hold.phase === "rush" || hold.phase === "fade") return true;
+  if (state.done) {
+    e._hold = null;
+    return false;
+  }
+  if (schedSecondsLeft(e, state) <= SCHED_HURRY_SEC) {
+    hold.phase = "rush";
+    saySpeech(e, SCHED_HURRY_LINE);
+    const target = worldSession.players[hold.pid];
+    if (target) sendPlayer(target, { type: "npc_hold_end", id: e.id });
+    schedRushStep(e, now + SCHED_RUSH_MS);
+    return true;
+  }
+  if (hold.phase === "talk") {
+    if (now - hold.lastAt < SCHED_CHAT_IDLE_MS) return true;
+    hold.phase = "wait";
+    hold.until = now + SCHED_AFTER_CHAT_MS;
+    return true;
+  }
+  if (now < hold.until) return true;
+  schedFadeToSchedule(e);
+  return true;
+}
+
+function schedTickEntity(e, now) {
+  if (!Array.isArray(e.schedule) || e.schedule.length === 0) {
+    e._busy = false;
+    return false;
+  }
+  const hour = clockHour();
+  const index = schedActiveIndex(e.schedule, hour);
+  let state = e._sched;
+  if (!state || state.index !== index || now - state.lastAt > SCHED_STALE_MS) {
+    state = schedStartEntry(e, index, hour, now);
+  }
+  state.lastAt = now;
+  if (state.done) return false;
+  if (e._hold) return schedHoldTick(e, state, now);
+  if (state.pos >= state.path.length) {
+    state.done = true;
+    e._busy = false;
+    e.homeCol = e.col;
+    e.homeRow = e.row;
+    scheduleEntitySave();
+    return false;
+  }
+  const next = state.path[state.pos];
+  if (entityAt(e.layer, next[0], next[1], e.id) || playerAt(e.layer, next[0], next[1])) {
+    state.blocked = state.blocked + 1;
+    if (state.blocked >= SCHED_BLOCKED_REPATH) {
+      state.blocked = 0;
+      const destination = e.schedule[index].points[e.schedule[index].points.length - 1];
+      const route = schedBuildRoute(e.layer, e.col, e.row, [destination]);
+      const entryNow = e.schedule[index];
+      state.offset = Math.floor(schedElapsedSec(entryNow, clockHour()) * 1000 / ENTITY_TICK_MS);
+      state.path = route.path;
+      state.pos = 0;
+    }
+    return true;
+  }
+  state.blocked = 0;
+  const oldCol = e.col;
+  const oldRow = e.row;
+  const dc = next[0] - oldCol;
+  const dr = next[1] - oldRow;
+  e.col = next[0];
+  e.row = next[1];
+  if (Math.abs(dc) >= Math.abs(dr)) e.direction = dc > 0 ? "right" : "left";
+  else e.direction = dr > 0 ? "down" : "up";
+  state.pos = state.pos + 1;
+  e._busy = state.interact === "busy";
+  broadcastEntity(e, e.layer, oldCol, oldRow);
+  scheduleEntitySave();
+  return true;
+}
+
 function queueEnemyRespawn(e) {
   if (!e || e.kind !== "enemy") return;
   const seconds = parseInt(e.respawn, 10);
@@ -2739,6 +3151,10 @@ function entityTick() {
     if (e.kind === "companion" || e.kind === "corpse") continue;
     if (!layerHasViewers(e.layer)) continue;
     if (e._fight) continue;
+
+    if (e.kind === "npc" && Array.isArray(e.schedule) && e.schedule.length > 0) {
+      if (schedTickEntity(e, now)) continue;
+    }
 
     if (e.kind === "enemy") {
       const near = nearestPlayerTo(e);
@@ -4459,6 +4875,16 @@ function handleInteract(p) {
     sendLoot(p, best);
     return;
   }
+  if (best._busy) {
+    sendPlayer(p, { type: "item_result", ok: false, text: best.name + " is busy and can't talk right now." });
+    return;
+  }
+  if (best._sched && !best._sched.done) {
+    if (!schedBeginHold(best, p)) {
+      sendPlayer(p, { type: "item_result", ok: false, text: best.name + " is in a hurry." });
+      return;
+    }
+  }
   if (best.lines.length === 0) {
     saySpeech(best, "...");
     return;
@@ -4942,6 +5368,16 @@ function handleGmMessage(gm, data) {
     return;
   }
 
+  if (data.type === "gm_sched_preview") {
+    handleGmSchedPreview(gm, data);
+    return;
+  }
+
+  if (data.type === "gm_sched_set") {
+    handleGmSchedSet(gm, data);
+    return;
+  }
+
   if (data.type === "gm_entity_del") {
     if (typeof data.id === "string" && !(entities[data.id] && entities[data.id].kind === "companion")) {
       cancelEnemyRespawn(data.id);
@@ -5326,7 +5762,7 @@ function startWorldPlayer(socket, pass, info, spawn) {
   if (info.npcName) {
     const worldNpc = findWorldNpcEntity(info.npcName);
     if (worldNpc) {
-      takenTpl = { name: worldNpc.name, species: worldNpc.species, dex: worldNpc.dex, level: worldNpc.level, wander: worldNpc.wander, sensor: worldNpc.sensor, lines: Array.isArray(worldNpc.lines) ? worldNpc.lines.slice() : [], ivs: worldNpc.ivs || null, accessories: worldNpc.accessories || null, loot: Array.isArray(worldNpc.loot) ? worldNpc.loot : [], moves: Array.isArray(worldNpc.moves) ? worldNpc.moves : [] };
+      takenTpl = { name: worldNpc.name, species: worldNpc.species, dex: worldNpc.dex, level: worldNpc.level, wander: worldNpc.wander, sensor: worldNpc.sensor, lines: Array.isArray(worldNpc.lines) ? worldNpc.lines.slice() : [], schedule: Array.isArray(worldNpc.schedule) ? worldNpc.schedule : [], ivs: worldNpc.ivs || null, accessories: worldNpc.accessories || null, loot: Array.isArray(worldNpc.loot) ? worldNpc.loot : [], moves: Array.isArray(worldNpc.moves) ? worldNpc.moves : [] };
       takenDirection = worldNpc.direction || null;
       layer = worldNpc.layer;
       startCol = worldNpc.col;
