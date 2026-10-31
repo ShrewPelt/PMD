@@ -2316,6 +2316,7 @@ function mapInject() {
   document.body.appendChild(el);
   MAPV.el = el;
   MAPV.canvas = document.getElementById("mapCanvas");
+  mapLoadFrame();
   MAPV.ctx = MAPV.canvas.getContext("2d");
   document.getElementById("mapClose").addEventListener("click", mapClose);
   document.getElementById("mapBack").addEventListener("click", mapShowWorld);
@@ -2402,28 +2403,109 @@ function mapView() {
   return { c0: 0, r0: 0, tpp: MAPV.data ? MAPV.data.block : 100, cols: MAPV.data ? MAPV.data.perSide : 100, rows: MAPV.data ? MAPV.data.perSide : 100 };
 }
 
+const MAP_FRAME_URL = "assets/UI-Icons/Maps/World_Map.png";
+
+function mapLoadFrame() {
+  if (MAPV.frame) return;
+  MAPV.frame = { img: null, ready: false, hole: null };
+  const img = new Image();
+  img.onload = () => {
+    try {
+      const cv = document.createElement("canvas");
+      cv.width = img.naturalWidth;
+      cv.height = img.naturalHeight;
+      const cx = cv.getContext("2d");
+      cx.drawImage(img, 0, 0);
+      const data = cx.getImageData(0, 0, cv.width, cv.height).data;
+      const W = cv.width;
+      const H = cv.height;
+      const sx = Math.floor(W / 2);
+      const sy = Math.floor(H / 2);
+      const centreIdx = (sy * W + sx) * 4;
+      const transparentCentre = data[centreIdx + 3] < 40;
+      const cr = data[centreIdx];
+      const cg = data[centreIdx + 1];
+      const cb = data[centreIdx + 2];
+      const clear = transparentCentre
+        ? (x, y) => data[(y * W + x) * 4 + 3] < 40
+        : (x, y) => {
+          const i = (y * W + x) * 4;
+          return data[i + 3] >= 40 && Math.abs(data[i] - cr) + Math.abs(data[i + 1] - cg) + Math.abs(data[i + 2] - cb) < 60;
+        };
+      const seen = new Uint8Array(W * H);
+      const stack = [sx, sy];
+      let minX = sx;
+      let maxX = sx;
+      let minY = sy;
+      let maxY = sy;
+      while (stack.length > 0) {
+        const y = stack.pop();
+        const x = stack.pop();
+        if (x < 0 || y < 0 || x >= W || y >= H) continue;
+        const idx = y * W + x;
+        if (seen[idx] || !clear(x, y)) continue;
+        seen[idx] = 1;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        stack.push(x + 1, y, x - 1, y, x, y + 1, x, y - 1);
+      }
+      let hole = { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+      if (hole.w < 8 || hole.h < 8 || hole.w > W * 0.97 || hole.h > H * 0.97) {
+        hole = { x: Math.floor(W * 0.2), y: Math.floor(H * 0.2), w: Math.floor(W * 0.6), h: Math.floor(H * 0.6) };
+      }
+      MAPV.frame.img = img;
+      MAPV.frame.hole = hole;
+      MAPV.frame.transparent = transparentCentre;
+      MAPV.frame.ready = true;
+      if (MAPV.canvas) mapComputeGeo();
+    } catch (e) {
+      MAPV.frame.ready = false;
+    }
+  };
+  img.src = MAP_FRAME_URL;
+}
+
 function mapComputeGeo() {
   if (!MAPV.data) return;
   const v = mapView();
   const w = MAPV.canvas.width;
   const h = MAPV.canvas.height;
+  const fr = MAPV.frame && MAPV.frame.ready ? MAPV.frame : null;
+  if (fr) {
+    const iw = fr.img.naturalWidth;
+    const ih = fr.img.naturalHeight;
+    const fs = Math.min(w / iw, h / ih) * 0.97;
+    const fx = (w - iw * fs) / 2;
+    const fy = (h - ih * fs) / 2;
+    const hx = fx + fr.hole.x * fs;
+    const hy = fy + fr.hole.y * fs;
+    const hw = fr.hole.w * fs;
+    const hh = fr.hole.h * fs;
+    MAPV.fr = { fx: fx, fy: fy, fw: iw * fs, fh: ih * fs, hx: hx, hy: hy, hw: hw, hh: hh };
+    const side = Math.min(hw / v.cols, hh / v.rows);
+    MAPV.geo = { s: side, sx: side, sy: side, ox: hx + (hw - v.cols * side) / 2, oy: hy + (hh - v.rows * side) / 2 };
+    return;
+  }
+  MAPV.fr = null;
   const s = Math.min(w / v.cols, h / v.rows) * 0.97;
-  MAPV.geo = { s: s, ox: (w - v.cols * s) / 2, oy: (h - v.rows * s) / 2 };
+  MAPV.geo = { s: s, sx: s, sy: s, ox: (w - v.cols * s) / 2, oy: (h - v.rows * s) / 2 };
 }
 
 function mapSx(col) {
   const v = mapView();
-  return MAPV.geo.ox + ((col - v.c0) / v.tpp) * MAPV.geo.s;
+  return MAPV.geo.ox + ((col - v.c0) / v.tpp) * MAPV.geo.sx;
 }
 
 function mapSy(row) {
   const v = mapView();
-  return MAPV.geo.oy + ((row - v.r0) / v.tpp) * MAPV.geo.s;
+  return MAPV.geo.oy + ((row - v.r0) / v.tpp) * MAPV.geo.sy;
 }
 
 function mapTileAt(x, y) {
   const v = mapView();
-  return { col: v.c0 + ((x - MAPV.geo.ox) / MAPV.geo.s) * v.tpp, row: v.r0 + ((y - MAPV.geo.oy) / MAPV.geo.s) * v.tpp };
+  return { col: v.c0 + ((x - MAPV.geo.ox) / MAPV.geo.sx) * v.tpp, row: v.r0 + ((y - MAPV.geo.oy) / MAPV.geo.sy) * v.tpp };
 }
 
 function mapTileColor(ch) {
@@ -3152,13 +3234,26 @@ function mapFrame() {
   const g = MAPV.geo;
   ctx.fillStyle = "#070b14";
   ctx.fillRect(0, 0, w, h);
+  const fr = MAPV.fr;
+  if (fr) {
+    ctx.imageSmoothingEnabled = false;
+    if (MAPV.frame.transparent) {
+      ctx.fillStyle = "#cdb98c";
+      ctx.fillRect(fr.hx, fr.hy, fr.hw, fr.hh);
+    }
+    ctx.drawImage(MAPV.frame.img, fr.fx, fr.fy, fr.fw, fr.fh);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(fr.hx, fr.hy, fr.hw, fr.hh);
+    ctx.clip();
+  }
   if (MAPV.base) {
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(MAPV.base, g.ox, g.oy, v.cols * g.s, v.rows * g.s);
+    ctx.drawImage(MAPV.base, g.ox, g.oy, v.cols * g.sx, v.rows * g.sy);
   }
   ctx.strokeStyle = "#3a3a55";
   ctx.lineWidth = 2;
-  ctx.strokeRect(g.ox, g.oy, v.cols * g.s, v.rows * g.s);
+  ctx.strokeRect(g.ox, g.oy, v.cols * g.sx, v.rows * g.sy);
 
   for (const region of MAPV.data.regions) {
     const hovered = MAPV.hover.region && MAPV.hover.region.id === region.id;
@@ -3263,6 +3358,13 @@ function mapFrame() {
       ctx.arc(mapSx(MAPV.drawing[i][0]), mapSy(MAPV.drawing[i][1]), i === 0 ? 7 : 4, 0, Math.PI * 2);
       ctx.fillStyle = i === 0 ? "#4be0c8" : "#ffd23f";
       ctx.fill();
+    }
+  }
+  if (fr) {
+    ctx.restore();
+    if (MAPV.frame.transparent) {
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(MAPV.frame.img, fr.fx, fr.fy, fr.fw, fr.fh);
     }
   }
 }
