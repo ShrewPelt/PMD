@@ -2310,7 +2310,7 @@ function mapInject() {
   el.className = "hidden";
   el.innerHTML = "<div id='mapBar'><span id='mapTitle'>World Map</span><button id='mapBack' style='display:none'>Back to world map</button>"
     + "<span id='mapTools' style='display:none'>"
-    + "<button data-maptool='teleport'>Teleport</button> <button data-maptool='zoom'>Zoom into island</button> <button data-maptool='select'>Select</button> <button data-maptool='pin'>Add dot</button> <button data-maptool='region'>Draw region</button> <button data-maptool='colour'>Block colour</button> <button id='mapUndoBtn'>Undo</button> <button id='mapRedoBtn'>Redo</button>"
+    + "<button data-maptool='teleport'>Teleport</button> <button data-maptool='zoom'>Zoom into island</button> <button data-maptool='select'>Select</button> <button data-maptool='pin'>Add dot</button> <button data-maptool='region'>Draw region</button> <button data-maptool='delregion'>Delete region</button> <button data-maptool='colour'>Block colour</button> <button id='mapUndoBtn'>Undo</button> <button id='mapRedoBtn'>Redo</button>"
     + "</span><span id='mapStatus'></span><span id='mapSpacer'></span><button id='mapClose'>Close X</button></div>"
     + "<div id='mapBody'><canvas id='mapCanvas'></canvas><div id='mapTip'></div><div id='mapForm'></div></div>";
   document.body.appendChild(el);
@@ -2734,6 +2734,7 @@ function mapSetTool(tool) {
     select: "Click a dot or region to edit. Drag to move.",
     pin: "Click to place a dot.",
     region: "Click points. Click the first point to finish. Ctrl+Z removes a point.",
+    delregion: "Click a finished region to delete it. Ctrl+Z brings it back.",
     colour: "Click a block on the world map to set its colour."
   };
   status.textContent = MAPV.gm ? hints[tool] || "" : "Click an island to see the region.";
@@ -2846,6 +2847,19 @@ function mapPointerDown(ev) {
     const by = Math.floor(tile.row / MAPV.data.block);
     MAPV.pendingBlock = bx + "," + by;
     mapShowForm("block", { key: bx + "," + by, color: MAPV.data.overrides[bx + "," + by] || "#c2b280" }, false);
+    return;
+  }
+  if (MAPV.tool === "delregion") {
+    const target = mapRegionAtTile(tile.col, tile.row);
+    if (target) {
+      MAPV.selRegion = target.id;
+      MAPV.selPin = null;
+      mapShowForm("regiondel", target, false);
+    } else {
+      MAPV.selRegion = null;
+      mapHideForm();
+      document.getElementById("mapStatus").textContent = "No region there. Click inside a finished region.";
+    }
     return;
   }
   if (MAPV.tool === "region") {
@@ -2990,6 +3004,9 @@ function mapShowForm(kind, obj, isNew) {
     html += mapFormField("Name", "<input type='text' id='mfName' maxlength='40'>");
     html += mapFormField("Colour", "<br><input type='color' id='mfColor'>");
     html += "<div class='mfRow'><button id='mfSave'>Save</button>" + (isNew ? "" : "<button id='mfDelete'>Delete</button>") + "<button id='mfCancel'>Cancel</button></div>";
+  } else if (kind === "regiondel") {
+    html += "<b style='color:#ff9a8a'>Delete region?</b><div style='margin:4px 0;color:#c8c8ff'>" + String(obj.name || "Unnamed").replace(/[<>&]/g, "") + "</div>";
+    html += "<div class='mfRow'><button id='mfDelete' style='background:#7a2323;border-color:#ff6b6b'>Delete region</button><button id='mfCancel'>Keep it</button></div>";
   } else {
     html += "<b style='color:#ffd23f'>Block colour</b><div style='margin-top:4px;color:#c8c8ff'>Block " + obj.key + "</div>";
     html += mapFormField("Colour", "<br><input type='color' id='mfColor'>");
@@ -3001,7 +3018,8 @@ function mapShowForm(kind, obj, isNew) {
     field.addEventListener("keydown", (ev) => ev.stopPropagation());
     field.addEventListener("keyup", (ev) => ev.stopPropagation());
   });
-  if (kind === "pin") {
+  if (kind === "regiondel") {
+  } else if (kind === "pin") {
     document.getElementById("mfName").value = obj.name || "";
     document.getElementById("mfType").value = obj.type || "town";
     document.getElementById("mfColor").value = obj.color || "#ffd23f";
@@ -3014,7 +3032,8 @@ function mapShowForm(kind, obj, isNew) {
   } else {
     document.getElementById("mfColor").value = obj.color || "#c2b280";
   }
-  document.getElementById("mfSave").addEventListener("click", mapFormSave);
+  const saveBtn = document.getElementById("mfSave");
+  if (saveBtn) saveBtn.addEventListener("click", mapFormSave);
   document.getElementById("mfCancel").addEventListener("click", () => {
     if (MAPV.formNew && MAPV.formKind === "region") MAPV.drawing = [];
     mapHideForm();
@@ -3080,7 +3099,7 @@ function mapFormDelete() {
   if (!kind || !obj) return;
   mapPushUndo();
   if (kind === "pin") MAPV.data.pins = MAPV.data.pins.filter((p) => p.id !== obj.id);
-  else if (kind === "region") MAPV.data.regions = MAPV.data.regions.filter((r) => r.id !== obj.id);
+  else if (kind === "region" || kind === "regiondel") MAPV.data.regions = MAPV.data.regions.filter((r) => r.id !== obj.id);
   MAPV.selPin = null;
   MAPV.selRegion = null;
   mapSendEdit();
