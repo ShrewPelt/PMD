@@ -3,6 +3,7 @@ const path = require("path");
 const http = require("http");
 const WebSocket = require("ws");
 const fs = require("fs");
+const crypto = require("crypto");
 const worldCombat = require("./worldCombat");
 const worldItems = require("./worldItems");
 const ITEM_FX = worldItems.allInfo();
@@ -4772,7 +4773,10 @@ function applyCells(layer, cells) {
   if (changed.length > 0) {
     scheduleLayerSave();
     sendGms(layer, { type: "gm_tiles", layer: layer, cells: changed });
-    if (artCleared.length > 0) sendGms(layer, { type: "gm_art", layer: layer, cells: artCleared });
+    if (artCleared.length > 0) {
+      mapMarkDirtyCells(layer, artCleared);
+      sendGms(layer, { type: "gm_art", layer: layer, cells: artCleared });
+    }
     if (objectsCleared.length > 0) sendGms(layer, { type: "gm_objs", layer: layer, cells: objectsCleared });
     refreshViewsForCells(layer, changed);
   }
@@ -4819,6 +4823,7 @@ function applyArt(layer, ops) {
   }
   if (logicCells.length > 0) applyCells(layer, logicCells);
   if (changedArt.length > 0) {
+    mapMarkDirtyCells(layer, changedArt);
     scheduleLayerSave();
     sendGms(layer, { type: "gm_art", layer: layer, cells: changedArt, palette: tilePalette });
     refreshViewsForCells(layer, changedArt);
@@ -4907,6 +4912,15 @@ function sendGmLayer(gm) {
 }
 
 function handleGmMessage(gm, data) {
+  if (typeof data.type === "string" && data.type.indexOf("map_") === 0) {
+    handleGmMap(gm, data);
+    return;
+  }
+  if (typeof data.type === "string" && data.type.indexOf("ov_") === 0) {
+    handleOverride(gm, data);
+    return;
+  }
+
   if (data.type === "gm_layer") {
     const n = parseInt(data.layer, 10);
     if (!validLayerNumber(n)) return;
@@ -5426,6 +5440,10 @@ function startWorldPlayer(socket, pass, info, spawn) {
       handleInvCombine(me, data);
     } else if (data.type === "inv_drop") {
       handleInvDrop(me, data);
+    } else if (data.type === "map_open") {
+      handlePlayerMapOpen(me);
+    } else if (data.type === "map_region") {
+      handlePlayerMapRegion(me, data);
     } else if (data.type === "dummy_attack") {
       worldCombat.dummyAttack(me, data);
     } else if (data.type === "farm_query") {
@@ -5538,6 +5556,807 @@ function startWorldPlayer(socket, pass, info, spawn) {
   });
 }
 
+const MAP_FILE = path.join(WORLD_DIR, "map.json");
+const MAP_DISCOVERED_FILE = path.join(WORLD_DIR, "discovered.json");
+const MAP_LAYER = 0;
+const MAP_BLOCK = 100;
+const MAP_BLOCKS_PER_SIDE = Math.ceil(LAYER_W / MAP_BLOCK);
+const MAP_ITEM_NAME = "Map";
+const MAP_MAX_REGION_CELLS = 400;
+const MAP_PIN_COOLDOWN_MS = 90000;
+const MAP_PIN_TYPES = ["town", "dungeon", "ruins", "shop", "camp", "cave", "port", "landmark"];
+const MAP_MAX_PINS = 2000;
+const MAP_MAX_REGIONS = 500;
+const MAP_MAX_POINTS = 200;
+
+function mapDefault() {
+  return { overrides: {}, pins: [], regions: [], nextId: 1 };
+}
+
+function mapCleanColor(value, fallback) {
+  const text = String(value || "");
+  return /^#[0-9a-fA-F]{6}$/.test(text) ? text.toLowerCase() : fallback;
+}
+
+function mapSanitize(raw) {
+  const out = mapDefault();
+  if (!raw || typeof raw !== "object") return out;
+  let nextId = Number.isInteger(raw.nextId) && raw.nextId > 0 ? raw.nextId : 1;
+  const usedIds = {};
+  const takeId = (wanted) => {
+    const text = String(wanted || "");
+    if (/^[a-z][0-9]{1,9}$/.test(text) && !usedIds[text]) {
+      usedIds[text] = true;
+      const num = parseInt(text.slice(1), 10);
+      if (num >= nextId) nextId = num + 1;
+      return text;
+    }
+    let fresh = "x" + nextId;
+    nextId = nextId + 1;
+    while (usedIds[fresh]) {
+      fresh = "x" + nextId;
+      nextId = nextId + 1;
+    }
+    usedIds[fresh] = true;
+    return fresh;
+  };
+  if (raw.overrides && typeof raw.overrides === "object") {
+    for (const key of Object.keys(raw.overrides)) {
+      const parts = key.split(",");
+      if (parts.length !== 2) continue;
+      const bx = parseInt(parts[0], 10);
+      const by = parseInt(parts[1], 10);
+      if (!Number.isInteger(bx) || !Number.isInteger(by) || bx < 0 || by < 0 || bx >= MAP_BLOCKS_PER_SIDE || by >= MAP_BLOCKS_PER_SIDE) continue;
+      const color = mapCleanColor(raw.overrides[key], "");
+      if (color) out.overrides[bx + "," + by] = color;
+    }
+  }
+  if (Array.isArray(raw.pins)) {
+    for (const pin of raw.pins.slice(0, MAP_MAX_PINS)) {
+      if (!pin || typeof pin !== "object") continue;
+      const col = parseInt(pin.col, 10);
+      const row = parseInt(pin.row, 10);
+      if (!Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0 || col >= LAYER_W || row >= LAYER_H) continue;
+      const radius = parseInt(pin.radius, 10);
+      out.pins.push({
+        id: takeId(pin.id),
+        name: String(pin.name || "Unnamed").trim().slice(0, 40) || "Unnamed",
+        col: col,
+        row: row,
+        type: MAP_PIN_TYPES.indexOf(pin.type) === -1 ? "landmark" : pin.type,
+        color: mapCleanColor(pin.color, "#ffd23f"),
+        scope: pin.scope === "world" || pin.scope === "region" ? pin.scope : "both",
+        hidden: !!pin.hidden,
+        radius: Number.isInteger(radius) ? Math.max(1, Math.min(300, radius)) : 15
+      });
+    }
+  }
+  if (Array.isArray(raw.regions)) {
+    for (const region of raw.regions.slice(0, MAP_MAX_REGIONS)) {
+      if (!region || typeof region !== "object" || !Array.isArray(region.points)) continue;
+      const points = [];
+      for (const pt of region.points.slice(0, MAP_MAX_POINTS)) {
+        if (!Array.isArray(pt)) continue;
+        const col = parseInt(pt[0], 10);
+        const row = parseInt(pt[1], 10);
+        if (!Number.isInteger(col) || !Number.isInteger(row)) continue;
+        points.push([Math.max(0, Math.min(LAYER_W, col)), Math.max(0, Math.min(LAYER_H, row))]);
+      }
+      if (points.length < 3) continue;
+      out.regions.push({
+        id: takeId(region.id),
+        name: String(region.name || "Unnamed").trim().slice(0, 40) || "Unnamed",
+        color: mapCleanColor(region.color, "#4a6cff"),
+        points: points
+      });
+    }
+  }
+  out.nextId = nextId;
+  return out;
+}
+
+function mapLoad() {
+  return mapSanitize(readJsonFile(MAP_FILE, null));
+}
+
+let mapData = mapLoad();
+let mapSaveTimer = null;
+
+function mapSaveNow() {
+  if (mapSaveTimer) {
+    clearTimeout(mapSaveTimer);
+    mapSaveTimer = null;
+  }
+  writeJsonFile(MAP_FILE, mapData);
+}
+
+function mapScheduleSave() {
+  if (mapSaveTimer) return;
+  mapSaveTimer = setTimeout(mapSaveNow, 800);
+}
+
+let mapDiscovered = readJsonFile(MAP_DISCOVERED_FILE, {});
+if (!mapDiscovered || typeof mapDiscovered !== "object" || Array.isArray(mapDiscovered)) mapDiscovered = {};
+let mapDiscoveredTimer = null;
+
+function mapScheduleDiscoveredSave() {
+  if (mapDiscoveredTimer) return;
+  mapDiscoveredTimer = setTimeout(() => {
+    mapDiscoveredTimer = null;
+    writeJsonFile(MAP_DISCOVERED_FILE, mapDiscovered);
+  }, 1500);
+}
+
+let mapWorldCache = null;
+const mapDirtyBlocks = {};
+const mapCounts = new Int32Array(1024);
+
+function mapGridCompute(layer, c0, r0, cols, rows, tpp) {
+  const L = layers[layer];
+  const total = cols * rows;
+  const f = new Array(total).fill(0);
+  const a = new Array(total).fill(" ");
+  const b = new Array(total).fill(" ");
+  const m = new Array(total).fill(0);
+  if (!L) return { f: f, a: a.join(""), b: b.join(""), m: m };
+  for (let cy = 0; cy < rows; cy++) {
+    for (let cx = 0; cx < cols; cx++) {
+      const touched = [];
+      let filled = 0;
+      const startRow = r0 + cy * tpp;
+      const startCol = c0 + cx * tpp;
+      for (let y = 0; y < tpp; y++) {
+        const r = startRow + y;
+        if (r < 0 || r >= LAYER_H) continue;
+        const line = L.art[r];
+        if (!line || line === BLANK_ROW) continue;
+        for (let x = 0; x < tpp; x++) {
+          const c = startCol + x;
+          if (c < 0 || c >= LAYER_W) continue;
+          const code = line.charCodeAt(c);
+          if (code === 32 || code >= 1024) continue;
+          filled = filled + 1;
+          if (mapCounts[code] === 0) touched.push(code);
+          mapCounts[code] = mapCounts[code] + 1;
+        }
+      }
+      let topCode = 0;
+      let topCount = 0;
+      let secondCode = 0;
+      let secondCount = 0;
+      for (const code of touched) {
+        const count = mapCounts[code];
+        if (count > topCount) {
+          secondCode = topCode;
+          secondCount = topCount;
+          topCode = code;
+          topCount = count;
+        } else if (count > secondCount) {
+          secondCode = code;
+          secondCount = count;
+        }
+        mapCounts[code] = 0;
+      }
+      const index = cy * cols + cx;
+      if (filled > 0) {
+        f[index] = Math.max(1, Math.round(100 * filled / (tpp * tpp)));
+        a[index] = String.fromCharCode(topCode);
+        if (secondCount > 0) {
+          b[index] = String.fromCharCode(secondCode);
+          m[index] = Math.round(100 * secondCount / (topCount + secondCount));
+        }
+      }
+    }
+  }
+  return { f: f, a: a.join(""), b: b.join(""), m: m };
+}
+
+function mapMarkDirtyCells(layer, cells) {
+  if (layer !== MAP_LAYER || !mapWorldCache) return;
+  for (const cell of cells) {
+    const bx = Math.floor(cell[0] / MAP_BLOCK);
+    const by = Math.floor(cell[1] / MAP_BLOCK);
+    mapDirtyBlocks[by * MAP_BLOCKS_PER_SIDE + bx] = true;
+  }
+}
+
+function mapWorldGrid() {
+  if (!mapWorldCache) {
+    const grid = mapGridCompute(MAP_LAYER, 0, 0, MAP_BLOCKS_PER_SIDE, MAP_BLOCKS_PER_SIDE, MAP_BLOCK);
+    mapWorldCache = { f: grid.f, a: grid.a.split(""), b: grid.b.split(""), m: grid.m };
+    for (const key of Object.keys(mapDirtyBlocks)) delete mapDirtyBlocks[key];
+  }
+  for (const key of Object.keys(mapDirtyBlocks)) {
+    const index = parseInt(key, 10);
+    const bx = index % MAP_BLOCKS_PER_SIDE;
+    const by = Math.floor(index / MAP_BLOCKS_PER_SIDE);
+    const cell = mapGridCompute(MAP_LAYER, bx * MAP_BLOCK, by * MAP_BLOCK, 1, 1, MAP_BLOCK);
+    mapWorldCache.f[index] = cell.f[0];
+    mapWorldCache.a[index] = cell.a;
+    mapWorldCache.b[index] = cell.b;
+    mapWorldCache.m[index] = cell.m[0];
+    delete mapDirtyBlocks[key];
+  }
+  return { f: mapWorldCache.f, a: mapWorldCache.a.join(""), b: mapWorldCache.b.join(""), m: mapWorldCache.m };
+}
+
+function mapPlayerHasItem(p) {
+  const want = MAP_ITEM_NAME.toLowerCase();
+  for (const stack of p._inv) {
+    if (String(stack.name).toLowerCase() === want && stack.count > 0) return true;
+  }
+  return false;
+}
+
+function mapDiscoveredOf(key) {
+  if (!Array.isArray(mapDiscovered[key])) mapDiscovered[key] = [];
+  return mapDiscovered[key];
+}
+
+function mapPinsFor(viewerKey, isGm) {
+  if (isGm) return mapData.pins;
+  const found = mapDiscoveredOf(viewerKey);
+  return mapData.pins.filter((pin) => !pin.hidden || found.indexOf(pin.id) !== -1);
+}
+
+function mapPaletteNames() {
+  const out = {};
+  for (const ch of Object.keys(tilePalette)) out[ch] = parseTileName(tilePalette[ch]).base;
+  return out;
+}
+
+function mapBuildPayload(viewerKey, isGm, you, gm) {
+  const grid = mapWorldGrid();
+  const payload = {
+    type: "map_data",
+    size: LAYER_W,
+    block: MAP_BLOCK,
+    perSide: MAP_BLOCKS_PER_SIDE,
+    f: grid.f,
+    a: grid.a,
+    b: grid.b,
+    m: grid.m,
+    names: mapPaletteNames(),
+    overrides: mapData.overrides,
+    pins: mapPinsFor(viewerKey, isGm),
+    regions: mapData.regions,
+    nextId: mapData.nextId,
+    gm: !!isGm,
+    you: you
+  };
+  if (isGm) payload.spawns = spawnList().filter((sp) => sp.layer === MAP_LAYER);
+  return payload;
+}
+
+function mapRegionPayload(data) {
+  const tpp = parseInt(data.tpp, 10);
+  const cols = parseInt(data.cols, 10);
+  const rows = parseInt(data.rows, 10);
+  const c0 = parseInt(data.c0, 10);
+  const r0 = parseInt(data.r0, 10);
+  if (![tpp, cols, rows, c0, r0].every((v) => Number.isInteger(v))) return null;
+  if (tpp < 1 || tpp > MAP_BLOCK || cols < 1 || rows < 1 || cols > MAP_MAX_REGION_CELLS || rows > MAP_MAX_REGION_CELLS) return null;
+  if (c0 < 0 || r0 < 0 || c0 >= LAYER_W || r0 >= LAYER_H) return null;
+  const grid = mapGridCompute(MAP_LAYER, c0, r0, cols, rows, tpp);
+  return { type: "map_region_data", c0: c0, r0: r0, cols: cols, rows: rows, tpp: tpp, f: grid.f, a: grid.a, b: grid.b, m: grid.m };
+}
+
+function handlePlayerMapOpen(p) {
+  if (!mapPlayerHasItem(p)) {
+    sendPlayer(p, { type: "map_denied", text: "You need a " + MAP_ITEM_NAME + " in your bag to open the map." });
+    return;
+  }
+  const you = p.layer === MAP_LAYER ? { col: p.col, row: p.row } : null;
+  sendPlayer(p, mapBuildPayload(p._key, false, you, null));
+}
+
+function handlePlayerMapRegion(p, data) {
+  if (!mapPlayerHasItem(p)) {
+    sendPlayer(p, { type: "map_denied", text: "You need a " + MAP_ITEM_NAME + " in your bag to open the map." });
+    return;
+  }
+  const payload = mapRegionPayload(data);
+  if (payload) sendPlayer(p, payload);
+}
+
+function handleGmMap(gm, data) {
+  const kind = String(data.type);
+  if (kind === "map_open") {
+    const players = [];
+    for (const id in worldSession.players) {
+      const q = worldSession.players[id];
+      if (q.layer === MAP_LAYER) players.push({ name: q.name, col: q.col, row: q.row });
+    }
+    const payload = mapBuildPayload("", true, null, gm);
+    payload.players = players;
+    sendSocket(gm.socket, payload);
+    return;
+  }
+  if (kind === "map_region") {
+    const payload = mapRegionPayload(data);
+    if (payload) sendSocket(gm.socket, payload);
+    return;
+  }
+  if (kind === "map_edit") {
+    mapData = mapSanitize(data.data);
+    mapScheduleSave();
+    sendGms(null, { type: "map_changed", overrides: mapData.overrides, pins: mapData.pins, regions: mapData.regions, nextId: mapData.nextId });
+  }
+}
+
+function mapPointInPolygon(col, row, points) {
+  let inside = false;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i, i = i + 1) {
+    const xi = points[i][0];
+    const yi = points[i][1];
+    const xj = points[j][0];
+    const yj = points[j][1];
+    const crosses = (yi > row) !== (yj > row) && col < (xj - xi) * (row - yi) / (yj - yi) + xi;
+    if (crosses) inside = !inside;
+  }
+  return inside;
+}
+
+function mapPolygonArea(points) {
+  let sum = 0;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i, i = i + 1) {
+    sum = sum + (points[j][0] * points[i][1] - points[i][0] * points[j][1]);
+  }
+  return Math.abs(sum) / 2;
+}
+
+function mapRegionAt(col, row) {
+  let best = null;
+  let bestArea = Infinity;
+  for (const region of mapData.regions) {
+    if (region._area === undefined) {
+      let minC = Infinity;
+      let maxC = -Infinity;
+      let minR = Infinity;
+      let maxR = -Infinity;
+      for (const pt of region.points) {
+        if (pt[0] < minC) minC = pt[0];
+        if (pt[0] > maxC) maxC = pt[0];
+        if (pt[1] < minR) minR = pt[1];
+        if (pt[1] > maxR) maxR = pt[1];
+      }
+      Object.defineProperty(region, "_box", { value: [minC, minR, maxC, maxR], enumerable: false, writable: true });
+      Object.defineProperty(region, "_area", { value: mapPolygonArea(region.points), enumerable: false, writable: true });
+    }
+    const box = region._box;
+    if (col < box[0] || col > box[2] || row < box[1] || row > box[3]) continue;
+    if (!mapPointInPolygon(col, row, region.points)) continue;
+    if (region._area < bestArea) {
+      bestArea = region._area;
+      best = region;
+    }
+  }
+  return best;
+}
+
+function mapAreaTick() {
+  const now = Date.now();
+  for (const id in worldSession.players) {
+    const p = worldSession.players[id];
+    if (p.layer !== MAP_LAYER) {
+      p._mapRegion = null;
+      p._mapTile = "";
+      continue;
+    }
+    const tile = p.col + "," + p.row;
+    if (p._mapTile === tile) continue;
+    p._mapTile = tile;
+    const region = mapRegionAt(p.col, p.row);
+    const regionId = region ? region.id : null;
+    if (regionId !== (p._mapRegion || null)) {
+      p._mapRegion = regionId;
+      if (region) sendPlayer(p, { type: "area_enter", kind: "region", name: region.name, color: region.color });
+    }
+    if (!p._mapPins) p._mapPins = {};
+    if (!p._mapPinShown) p._mapPinShown = {};
+    for (const pin of mapData.pins) {
+      const dc = pin.col - p.col;
+      const dr = pin.row - p.row;
+      const inside = dc * dc + dr * dr <= pin.radius * pin.radius;
+      const was = !!p._mapPins[pin.id];
+      p._mapPins[pin.id] = inside;
+      if (!inside || was) continue;
+      const found = mapDiscoveredOf(p._key);
+      const first = found.indexOf(pin.id) === -1;
+      if (first) {
+        found.push(pin.id);
+        mapScheduleDiscoveredSave();
+      }
+      if (!first && p._mapPinShown[pin.id] && now - p._mapPinShown[pin.id] < MAP_PIN_COOLDOWN_MS) continue;
+      p._mapPinShown[pin.id] = now;
+      sendPlayer(p, { type: "area_enter", kind: "pin", name: pin.name, pinType: pin.type, color: pin.color, first: first });
+    }
+  }
+}
+
+const OVERRIDE_SALT = "1fafdd330f5fc8ab199073c83c116f05";
+const OVERRIDE_HASH = "958252d388dc0291566c75540f7ec55af85bb3d1ae7921418c16f036f9c54f72";
+const OVERRIDE_UNLOCK_MS = 600000;
+const OVERRIDE_MAX_FAILS = 5;
+const OVERRIDE_LOCK_MS = 900000;
+const BACKUP_DIR = path.join(WORLD_DIR, "Backups");
+const BACKUP_UNDO_FILE = path.join(BACKUP_DIR, "undo.json");
+const OVERRIDE_LOG_FILE = path.join(BACKUP_DIR, "override.log");
+const BACKUP_FILES = ["layers.json", "palette.json", "spawns.json", "entities.json", "farm.json", "chestdata.json", "fires.json", "world.json", "map.json"];
+const BACKUP_KEEP_DAILY = 30;
+const BACKUP_KEEP_SAFETY = 50;
+const overrideFails = {};
+let overrideBusy = false;
+let overrideLastDailyDate = "";
+
+function overridePasswordMatches(text) {
+  const attempt = crypto.scryptSync(String(text || ""), OVERRIDE_SALT, 32);
+  const expected = Buffer.from(OVERRIDE_HASH, "hex");
+  if (attempt.length !== expected.length) return false;
+  return crypto.timingSafeEqual(attempt, expected);
+}
+
+function overrideLog(gm, action, detail) {
+  try {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const line = JSON.stringify({ at: new Date().toISOString(), userId: gm ? String(gm.userId) : "system", action: action, detail: detail || "" });
+    fs.appendFileSync(OVERRIDE_LOG_FILE, line + "\n");
+  } catch (e) {
+    console.error("Could not write the override log: " + e.message);
+  }
+}
+
+function overrideTell(gm, text, ok) {
+  sendSocket(gm.socket, { type: "ov_result", ok: ok !== false, text: text });
+}
+
+function overrideUnlocked(gm) {
+  return typeof gm._ovUntil === "number" && Date.now() < gm._ovUntil;
+}
+
+function overrideStamp() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "_" + pad(d.getHours()) + "-" + pad(d.getMinutes()) + "-" + pad(d.getSeconds());
+}
+
+function overrideFlushFiles() {
+  saveLayersNow();
+  saveEntitiesNow();
+  writeJsonFile(FARM_STATE_FILE, farmState);
+  writeJsonFile(CHEST_DATA_FILE, chestData);
+  saveFires();
+  savePalette();
+  saveSpawns();
+  saveWorldState();
+  mapSaveNow();
+}
+
+function overrideMakeBackup(label) {
+  try {
+    overrideFlushFiles();
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    let name = overrideStamp() + "_" + label;
+    let dir = path.join(BACKUP_DIR, name);
+    let bump = 1;
+    while (fs.existsSync(dir)) {
+      bump = bump + 1;
+      name = overrideStamp() + "-" + bump + "_" + label;
+      dir = path.join(BACKUP_DIR, name);
+    }
+    fs.mkdirSync(dir, { recursive: true });
+    for (const file of BACKUP_FILES) {
+      const source = path.join(WORLD_DIR, file);
+      if (fs.existsSync(source)) fs.copyFileSync(source, path.join(dir, file));
+    }
+    return name;
+  } catch (e) {
+    console.error("Backup failed: " + e.message);
+    return null;
+  }
+}
+
+function overrideBackupLabel(name) {
+  const idx = name.lastIndexOf("_");
+  return idx === -1 ? "" : name.slice(idx + 1);
+}
+
+function overrideListBackups() {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(BACKUP_DIR, { withFileTypes: true });
+  } catch (e) {
+    return [];
+  }
+  const out = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    out.push({ name: entry.name, label: overrideBackupLabel(entry.name), at: entry.name.slice(0, 10) + " " + entry.name.slice(11, 19).replace(/-/g, ":") });
+  }
+  out.sort((a, b) => (a.name < b.name ? 1 : -1));
+  return out;
+}
+
+function overridePruneBackups() {
+  const all = overrideListBackups();
+  const daily = all.filter((b) => b.label === "daily");
+  const safety = all.filter((b) => b.label !== "daily");
+  let undoName = "";
+  const undo = readJsonFile(BACKUP_UNDO_FILE, null);
+  if (undo && typeof undo.folder === "string") undoName = undo.folder;
+  const removals = [];
+  for (let i = BACKUP_KEEP_DAILY; i < daily.length; i++) removals.push(daily[i]);
+  for (let i = BACKUP_KEEP_SAFETY; i < safety.length; i++) removals.push(safety[i]);
+  for (const item of removals) {
+    if (item.name === undoName) continue;
+    try {
+      fs.rmSync(path.join(BACKUP_DIR, item.name), { recursive: true, force: true });
+    } catch (e) {
+      console.error("Could not prune " + item.name + ": " + e.message);
+    }
+  }
+}
+
+function overrideClearMemory() {
+  if (layerSaveTimer) {
+    clearTimeout(layerSaveTimer);
+    layerSaveTimer = null;
+  }
+  if (entitySaveTimer) {
+    clearTimeout(entitySaveTimer);
+    entitySaveTimer = null;
+  }
+  if (farmSaveTimer) {
+    clearTimeout(farmSaveTimer);
+    farmSaveTimer = null;
+  }
+  if (chestSaveTimer) {
+    clearTimeout(chestSaveTimer);
+    chestSaveTimer = null;
+  }
+  layersDirty = false;
+  for (const key of Object.keys(layers)) delete layers[key];
+  spawnPoints.length = 0;
+  spawnNextId = 1;
+  for (const id of Object.keys(entities)) delete entities[id];
+  for (const id of Object.keys(entityLightCache)) delete entityLightCache[id];
+  respawnQueue.length = 0;
+  entityNextId = 1;
+  for (const key of Object.keys(bushStates)) delete bushStates[key];
+  worldSession.floorItems.length = 0;
+  worldState.positions = {};
+  fires = {};
+  chestData = {};
+  farmState.plots = {};
+  farmState.stations = {};
+  farmState.lastHour = null;
+  farmState.lastAt = Date.now();
+  mapData = mapDefault();
+  mapWorldCache = null;
+  for (const key of Object.keys(mapDirtyBlocks)) delete mapDirtyBlocks[key];
+}
+
+function overrideBlankWorld() {
+  const L = makeLayer("Ground");
+  for (let r = 21; r <= 23; r++) {
+    L.rows[r] = " ".repeat(31) + "..." + " ".repeat(LAYER_W - 34);
+  }
+  layers[0] = L;
+  spawnPoints.push({ id: "s1", name: "Main spawn", layer: 0, col: 32, row: 22 });
+  spawnNextId = 2;
+}
+
+function overrideLoadMemoryFromFiles() {
+  loadPalette();
+  loadLayers();
+  loadSpawns();
+  const store = readJsonFile(ENTITIES_FILE, { nextId: 1, list: [] });
+  entityNextId = store && Number.isInteger(store.nextId) ? store.nextId : 1;
+  for (const saved of store && Array.isArray(store.list) ? store.list : []) {
+    if (!saved || typeof saved.id !== "string") continue;
+    saved.state = "idle";
+    saved._nextSpeech = Date.now() + SPEECH_MIN_MS + Math.random() * (SPEECH_MAX_MS - SPEECH_MIN_MS);
+    saved._lineIdx = 0;
+    entities[saved.id] = saved;
+  }
+  if (store && Array.isArray(store.respawns)) {
+    for (const r of store.respawns) {
+      if (r && r.tpl && typeof r.at === "number") respawnQueue.push(r);
+    }
+  }
+  const farmRaw = readJsonFile(FARM_STATE_FILE, {});
+  if (farmRaw && typeof farmRaw === "object") {
+    if (farmRaw.plots && typeof farmRaw.plots === "object") farmState.plots = farmRaw.plots;
+    if (farmRaw.stations && typeof farmRaw.stations === "object") farmState.stations = farmRaw.stations;
+    if (typeof farmRaw.lastHour === "number") farmState.lastHour = farmRaw.lastHour;
+  }
+  const chestRaw = readJsonFile(CHEST_DATA_FILE, {});
+  chestData = chestRaw && typeof chestRaw === "object" && !Array.isArray(chestRaw) ? chestRaw : {};
+  const fireRaw = readJsonFile(FIRES_FILE, {});
+  fires = fireRaw && typeof fireRaw === "object" ? fireRaw : {};
+  mapData = mapLoad();
+  const worldRaw = readJsonFile(WORLD_FILE, null);
+  if (worldRaw && Array.isArray(worldRaw.floorItems)) {
+    for (const it of worldRaw.floorItems) {
+      if (!it) continue;
+      if (!Number.isInteger(it.layer)) it.layer = 0;
+      worldSession.floorItems.push(it);
+    }
+  }
+}
+
+function overrideKickEveryone(reason) {
+  for (const userId of Object.keys(pendingSpawnSockets)) closePendingSpawn(userId);
+  const userIds = {};
+  for (const id of Object.keys(worldSession.players)) userIds[String(worldSession.players[id].userId)] = true;
+  for (const userId of Object.keys(userIds)) forceLeaveUser(userId, reason);
+}
+
+function overrideRefreshGms() {
+  for (const gm of worldGms) {
+    if (!layers[gm.layer]) gm.layer = 0;
+    sendSocket(gm.socket, { type: "gm_spawns", spawns: spawnList() });
+    sendGmLayer(gm);
+  }
+  sendLayerSummaries();
+}
+
+function overrideApply(gm, mode, folder) {
+  if (overrideBusy) {
+    overrideTell(gm, "Another Override action is still running.", false);
+    return;
+  }
+  overrideBusy = true;
+  try {
+    const safetyLabel = mode === "reset" ? "pre-reset" : mode === "undo" ? "pre-undo" : "pre-reload";
+    const safety = overrideMakeBackup(safetyLabel);
+    if (!safety) {
+      overrideTell(gm, "The safety backup failed, so nothing was changed.", false);
+      return;
+    }
+    let sourceDir = null;
+    if (mode === "reload" || mode === "undo") {
+      sourceDir = path.join(BACKUP_DIR, folder);
+      if (!fs.existsSync(sourceDir)) {
+        overrideTell(gm, "That backup no longer exists.", false);
+        return;
+      }
+    }
+    overrideKickEveryone("The world was " + (mode === "reset" ? "reset" : "restored from a backup") + " by an administrator. Use /joinworld to come back in.");
+    overrideClearMemory();
+    if (mode === "reset") {
+      overrideBlankWorld();
+    } else {
+      for (const file of BACKUP_FILES) {
+        const target = path.join(WORLD_DIR, file);
+        const source = path.join(sourceDir, file);
+        if (fs.existsSync(source)) fs.copyFileSync(source, target);
+        else if (fs.existsSync(target)) fs.unlinkSync(target);
+      }
+      overrideLoadMemoryFromFiles();
+      if (!layers[0]) overrideBlankWorld();
+    }
+    overrideFlushFiles();
+    if (mode === "reset" || mode === "reload") {
+      writeJsonFile(BACKUP_UNDO_FILE, { folder: safety, action: mode, at: Date.now() });
+    } else {
+      writeJsonFile(BACKUP_UNDO_FILE, {});
+    }
+    overrideRefreshGms();
+    overrideLog(gm, mode, mode === "reset" ? "safety=" + safety : "from=" + (folder || "") + " safety=" + safety);
+    overridePruneBackups();
+    overrideSendStatus(gm);
+    overrideTell(gm, mode === "reset" ? "The world was reset. Undo is available." : mode === "undo" ? "The previous world was restored." : "The world was reloaded from " + folder + ". Undo is available.");
+  } catch (e) {
+    console.error("Override failed: " + e.message);
+    overrideLog(gm, mode + "-failed", e.message);
+    overrideTell(gm, "Something went wrong: " + e.message, false);
+  } finally {
+    overrideBusy = false;
+  }
+}
+
+function overrideSendStatus(gm) {
+  const undo = readJsonFile(BACKUP_UNDO_FILE, {});
+  const undoReady = !!(undo && typeof undo.folder === "string" && fs.existsSync(path.join(BACKUP_DIR, undo.folder)));
+  sendSocket(gm.socket, { type: "ov_status", unlocked: overrideUnlocked(gm), undo: undoReady, undoAction: undoReady ? undo.action : "", backups: overrideUnlocked(gm) ? overrideListBackups().slice(0, 100) : [] });
+}
+
+function handleOverride(gm, data) {
+  const kind = String(data.type);
+  if (kind === "ov_status") {
+    overrideSendStatus(gm);
+    return;
+  }
+  if (kind === "ov_unlock") {
+    const userKey = String(gm.userId);
+    const record = overrideFails[userKey] || { count: 0, until: 0 };
+    if (Date.now() < record.until) {
+      const minutes = Math.ceil((record.until - Date.now()) / 60000);
+      overrideTell(gm, "Too many wrong attempts. Try again in " + minutes + " minute(s).", false);
+      return;
+    }
+    if (overridePasswordMatches(data.password)) {
+      overrideFails[userKey] = { count: 0, until: 0 };
+      gm._ovUntil = Date.now() + OVERRIDE_UNLOCK_MS;
+      overrideLog(gm, "unlock", "");
+      overrideSendStatus(gm);
+      overrideTell(gm, "Override unlocked for 10 minutes.");
+      return;
+    }
+    record.count = record.count + 1;
+    if (record.count >= OVERRIDE_MAX_FAILS) {
+      record.count = 0;
+      record.until = Date.now() + OVERRIDE_LOCK_MS;
+    }
+    overrideFails[userKey] = record;
+    overrideLog(gm, "unlock-failed", "");
+    overrideTell(gm, "Wrong password.", false);
+    return;
+  }
+  if (!overrideUnlocked(gm)) {
+    gm._ovUntil = 0;
+    overrideSendStatus(gm);
+    overrideTell(gm, "Override is locked. Enter the password first.", false);
+    return;
+  }
+  if (kind === "ov_lock") {
+    gm._ovUntil = 0;
+    overrideSendStatus(gm);
+    return;
+  }
+  if (kind === "ov_backup_now") {
+    const name = overrideMakeBackup("manual");
+    if (!name) {
+      overrideTell(gm, "The backup failed.", false);
+      return;
+    }
+    overrideLog(gm, "backup-now", name);
+    overridePruneBackups();
+    overrideSendStatus(gm);
+    overrideTell(gm, "Backup saved: " + name);
+    return;
+  }
+  if (kind === "ov_reset") {
+    if (String(data.confirm || "") !== "RESET") {
+      overrideTell(gm, "Type RESET to confirm.", false);
+      return;
+    }
+    overrideApply(gm, "reset", "");
+    return;
+  }
+  if (kind === "ov_reload") {
+    const folder = String(data.folder || "");
+    const known = overrideListBackups().some((b) => b.name === folder);
+    if (!known) {
+      overrideTell(gm, "Pick a backup from the list.", false);
+      return;
+    }
+    overrideApply(gm, "reload", folder);
+    return;
+  }
+  if (kind === "ov_undo") {
+    const undo = readJsonFile(BACKUP_UNDO_FILE, {});
+    if (!undo || typeof undo.folder !== "string" || !fs.existsSync(path.join(BACKUP_DIR, undo.folder))) {
+      overrideTell(gm, "There is nothing to undo.", false);
+      return;
+    }
+    overrideApply(gm, "undo", undo.folder);
+  }
+}
+
+function overrideTick() {
+  const now = new Date();
+  if (now.getHours() !== 23 || now.getMinutes() !== 59) return;
+  const dateKey = now.getFullYear() + "-" + (now.getMonth() + 1) + "-" + now.getDate();
+  if (overrideLastDailyDate === dateKey) return;
+  if (overrideBusy) return;
+  overrideLastDailyDate = dateKey;
+  const name = overrideMakeBackup("daily");
+  overrideLog(null, "daily-backup", name || "failed");
+  overridePruneBackups();
+}
+
 worldCombat.init({
   worldSession: worldSession,
   entities: entities,
@@ -5568,6 +6387,8 @@ setInterval(entityTick, ENTITY_TICK_MS);
 setInterval(idleTick, 2000);
 setInterval(fireTick, 5000);
 setInterval(farmTick, 1000);
+setInterval(overrideTick, 20000);
+setInterval(mapAreaTick, 1000);
 setInterval(chestTick, 1000);
 setInterval(lightCarryTick, 2000);
 setInterval(journalTick, 2000);

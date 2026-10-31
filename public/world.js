@@ -1711,12 +1711,22 @@ function gmBuildPanel() {
     + "<div style='margin-top:4px'><button class='wgBtn' id='wgTimeFreeze'>Freeze time</button> Day length (min) <input type='number' id='wgDayMin' min='1' max='1440' step='1' style='width:55px'> <button class='wgBtn' id='wgDayMinSet'>Set</button></div>"
     + "<div style='margin-top:6px'>This layer's lighting:<br><select id='wgLightMode' style='background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;padding:4px;width:96%'><option value='outdoor'>Outdoor (follows world time)</option><option value='indoor'>Indoor (always bright)</option><option value='dark'>Dark (always pitch dark)</option></select></div>"
     + "</div>"
+    + "<div class='wgSecHead' data-wgsec='override'><span class='wgArrow'></span>Override</div><div class='wgSecBody' data-wgbody='override'>"
+    + "<div id='ovLocked'><div style='margin-bottom:4px;color:#ff9a8a'>Root administrators only. Enter the Override password.</div><input type='password' id='ovPass' autocomplete='off' style='width:140px'> <button class='wgBtn' id='ovUnlock'>Unlock</button></div>"
+    + "<div id='ovOpen' style='display:none'>"
+    + "<div style='margin-bottom:4px;color:#9be39b'>Override unlocked.</div>"
+    + "<div><button class='wgBtn' id='ovReset' style='background:#7a2323;border-color:#ff6b6b'>Reset whole world</button> <button class='wgBtn' id='ovUndo'>Undo</button></div>"
+    + "<div style='margin-top:6px'>Reload from backup<br><select id='ovBackups' style='background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;padding:4px;width:96%'></select></div>"
+    + "<div style='margin-top:4px'><button class='wgBtn' id='ovReload'>Reload from backup</button> <button class='wgBtn' id='ovBackupNow'>Back up now</button> <button class='wgBtn' id='ovLock'>Lock</button></div>"
+    + "</div>"
+    + "<div id='ovMsg' style='margin-top:6px;color:#c8c8ff'></div>"
+    + "</div>"
     + "<div id='wgStatus'></div>"
     + "<div id='wgHelp'>Right-drag, middle-drag or hold Space to pan. Mouse wheel zooms. Lines snap straight; hold Shift for any angle. Portal: click the start tile, switch layer if needed, then click the destination. The green ring is the layer's spawn point. Red crossed tiles are invisible barriers that players cannot see.</div>";
   document.body.appendChild(panel);
   WG.panel = panel;
 
-  const secDefaults = { layer: true, build: true, tiles: true, objects: true, spawn: false, creatures: false, items: false, moderation: false, time: false };
+  const secDefaults = { layer: true, build: true, tiles: true, objects: true, spawn: false, creatures: false, items: false, moderation: false, time: false, override: false };
   let secState = {};
   try {
     secState = JSON.parse(localStorage.getItem("pmdGmSections") || "{}") || {};
@@ -1740,6 +1750,7 @@ function gmBuildPanel() {
     });
   });
   visGmBindUi();
+  ovBindUi();
   document.getElementById("wgToggleCreative").addEventListener("click", () => {
     const creative = document.getElementById("wgCreative");
     const coords = document.getElementById("wgCoords");
@@ -1847,6 +1858,1115 @@ function gmFillItemNames() {
     opt.value = name;
     list.appendChild(opt);
   }
+}
+
+const MAPV = {
+  el: null,
+  canvas: null,
+  ctx: null,
+  open: false,
+  gm: false,
+  data: null,
+  region: null,
+  view: "world",
+  base: null,
+  baseDirty: true,
+  islandMap: null,
+  islands: [],
+  tool: "teleport",
+  hover: { pin: null, region: null, col: 0, row: 0, x: 0, y: 0, inside: false },
+  drawing: [],
+  selPin: null,
+  selRegion: null,
+  drag: null,
+  undo: [],
+  redo: [],
+  colors: {},
+  imgState: {},
+  geo: { s: 1, ox: 0, oy: 0 },
+  raf: 0,
+  prevChat: false,
+  pendingBlock: null,
+  formKind: "",
+  formObj: null,
+  formNew: false
+};
+
+const MAP_PIN_TYPE_LIST = ["town", "dungeon", "ruins", "shop", "camp", "cave", "port", "landmark"];
+const MAP_BG = [11, 18, 32];
+
+function mapInject() {
+  if (MAPV.el) return;
+  const style = document.createElement("style");
+  style.textContent = "#mapOverlay{position:fixed;left:0;top:0;right:0;bottom:0;z-index:90;background:#070b14;display:flex;flex-direction:column;color:#fff;font-family:sans-serif;user-select:none}"
+    + "#mapOverlay.hidden{display:none}"
+    + "#mapBar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#141a2c;border-bottom:2px solid #3a3a55;flex-wrap:wrap}"
+    + "#mapTitle{font-weight:bold;font-size:16px;color:#ffd23f;margin-right:8px}"
+    + "#mapBar button{background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px}"
+    + "#mapBar button.on{background:#4a6cff;border-color:#fff}"
+    + "#mapBar button:disabled{opacity:0.4;cursor:default}"
+    + "#mapSpacer{flex:1}"
+    + "#mapClose{background:#7a2323 !important;border-color:#ff6b6b !important;font-size:15px !important;padding:6px 14px !important;font-weight:bold}"
+    + "#mapStatus{font-size:12px;color:#c8c8ff;min-width:120px}"
+    + "#mapBody{position:relative;flex:1;min-height:0}"
+    + "#mapCanvas{position:absolute;left:0;top:0;width:100%;height:100%;cursor:crosshair}"
+    + "#mapTip{position:absolute;pointer-events:none;background:rgba(20,20,34,0.95);border:1px solid #ffd23f;border-radius:6px;padding:4px 8px;font-size:13px;color:#fff;display:none;z-index:2;white-space:nowrap}"
+    + "#mapForm{position:absolute;right:12px;top:12px;width:250px;background:rgba(20,20,34,0.97);border:2px solid #4a6cff;border-radius:8px;padding:10px;font-size:12px;display:none;z-index:3}"
+    + "#mapForm label{display:block;margin-top:6px;color:#c8c8ff}"
+    + "#mapForm input[type=text],#mapForm input[type=number],#mapForm select{width:100%;box-sizing:border-box;background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;padding:4px}"
+    + "#mapForm input[type=color]{width:60px;height:26px;padding:0;border:none;background:none}"
+    + "#mapForm .mfRow{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}"
+    + "#mapForm button{background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:12px}"
+    + "#areaBanner{position:fixed;left:50%;top:14%;transform:translateX(-50%);z-index:70;pointer-events:none;text-align:center;opacity:0;transition:opacity 0.5s}"
+    + "#areaBanner.show{opacity:1}"
+    + "#areaBanner .abSub{font-size:13px;letter-spacing:2px;text-transform:uppercase;color:#d8d8f0;text-shadow:0 0 6px #000}"
+    + "#areaBanner .abName{font-size:34px;font-weight:bold;color:#fff;text-shadow:0 0 10px #000,0 2px 4px #000}"
+    + "html.touch #mapBar button{padding:8px 10px}";
+  document.head.appendChild(style);
+  const el = document.createElement("div");
+  el.id = "mapOverlay";
+  el.className = "hidden";
+  el.innerHTML = "<div id='mapBar'><span id='mapTitle'>World Map</span><button id='mapBack' style='display:none'>Back to world map</button>"
+    + "<span id='mapTools' style='display:none'>"
+    + "<button data-maptool='teleport'>Teleport</button> <button data-maptool='zoom'>Zoom into island</button> <button data-maptool='select'>Select</button> <button data-maptool='pin'>Add dot</button> <button data-maptool='region'>Draw region</button> <button data-maptool='colour'>Block colour</button> <button id='mapUndoBtn'>Undo</button> <button id='mapRedoBtn'>Redo</button>"
+    + "</span><span id='mapStatus'></span><span id='mapSpacer'></span><button id='mapClose'>Close X</button></div>"
+    + "<div id='mapBody'><canvas id='mapCanvas'></canvas><div id='mapTip'></div><div id='mapForm'></div></div>";
+  document.body.appendChild(el);
+  MAPV.el = el;
+  MAPV.canvas = document.getElementById("mapCanvas");
+  MAPV.ctx = MAPV.canvas.getContext("2d");
+  document.getElementById("mapClose").addEventListener("click", mapClose);
+  document.getElementById("mapBack").addEventListener("click", mapShowWorld);
+  document.getElementById("mapUndoBtn").addEventListener("click", mapUndo);
+  document.getElementById("mapRedoBtn").addEventListener("click", mapRedo);
+  el.querySelectorAll("[data-maptool]").forEach((btn) => {
+    btn.addEventListener("click", () => mapSetTool(btn.getAttribute("data-maptool")));
+  });
+  MAPV.canvas.addEventListener("pointerdown", mapPointerDown);
+  MAPV.canvas.addEventListener("pointermove", mapPointerMove);
+  window.addEventListener("pointerup", mapPointerUp);
+  MAPV.canvas.addEventListener("pointerleave", () => {
+    MAPV.hover.inside = false;
+    document.getElementById("mapTip").style.display = "none";
+  });
+  MAPV.canvas.addEventListener("contextmenu", (ev) => ev.preventDefault());
+  window.addEventListener("resize", () => {
+    if (MAPV.open) mapResize();
+  });
+  const banner = document.createElement("div");
+  banner.id = "areaBanner";
+  document.body.appendChild(banner);
+}
+
+function mapPlayerHasItem() {
+  if (typeof inventoryItems === "undefined") return false;
+  for (const stack of inventoryItems) {
+    if (stack && String(stack.name).toLowerCase() === "map") return true;
+  }
+  return false;
+}
+
+function mapToggle() {
+  if (MAPV.open) {
+    mapClose();
+    return;
+  }
+  if (worldGmMode) {
+    mapInject();
+    gmSend({ type: "map_open" });
+    return;
+  }
+  if (!worldPlayerMode) return;
+  if (COMBAT.active) return;
+  if (!mapPlayerHasItem()) {
+    itemToast("You need a Map in your bag to open the map.");
+    return;
+  }
+  mapInject();
+  gmSend({ type: "map_open" });
+}
+
+function mapShow() {
+  mapInject();
+  MAPV.open = true;
+  MAPV.el.classList.remove("hidden");
+  MAPV.prevChat = chatActive;
+  chatActive = true;
+  document.getElementById("mapTools").style.display = MAPV.gm ? "inline" : "none";
+  mapSetTool(MAPV.gm ? MAPV.tool : "zoom");
+  mapResize();
+  if (!MAPV.raf) MAPV.raf = requestAnimationFrame(mapFrame);
+}
+
+function mapClose() {
+  if (!MAPV.open) return;
+  MAPV.open = false;
+  MAPV.el.classList.add("hidden");
+  chatActive = MAPV.prevChat;
+  MAPV.drawing = [];
+  MAPV.drag = null;
+  mapHideForm();
+}
+
+function mapResize() {
+  const body = document.getElementById("mapBody");
+  MAPV.canvas.width = body.clientWidth;
+  MAPV.canvas.height = body.clientHeight;
+  mapComputeGeo();
+}
+
+function mapView() {
+  if (MAPV.view === "region" && MAPV.region) return { c0: MAPV.region.c0, r0: MAPV.region.r0, tpp: MAPV.region.tpp, cols: MAPV.region.cols, rows: MAPV.region.rows };
+  return { c0: 0, r0: 0, tpp: MAPV.data ? MAPV.data.block : 100, cols: MAPV.data ? MAPV.data.perSide : 100, rows: MAPV.data ? MAPV.data.perSide : 100 };
+}
+
+function mapComputeGeo() {
+  if (!MAPV.data) return;
+  const v = mapView();
+  const w = MAPV.canvas.width;
+  const h = MAPV.canvas.height;
+  const s = Math.min(w / v.cols, h / v.rows) * 0.97;
+  MAPV.geo = { s: s, ox: (w - v.cols * s) / 2, oy: (h - v.rows * s) / 2 };
+}
+
+function mapSx(col) {
+  const v = mapView();
+  return MAPV.geo.ox + ((col - v.c0) / v.tpp) * MAPV.geo.s;
+}
+
+function mapSy(row) {
+  const v = mapView();
+  return MAPV.geo.oy + ((row - v.r0) / v.tpp) * MAPV.geo.s;
+}
+
+function mapTileAt(x, y) {
+  const v = mapView();
+  return { col: v.c0 + ((x - MAPV.geo.ox) / MAPV.geo.s) * v.tpp, row: v.r0 + ((y - MAPV.geo.oy) / MAPV.geo.s) * v.tpp };
+}
+
+function mapTileColor(ch) {
+  const base = MAPV.data && MAPV.data.names ? MAPV.data.names[ch] : null;
+  if (!base) return [90, 110, 90];
+  if (MAPV.colors[base]) return MAPV.colors[base];
+  if (!MAPV.imgState[base]) {
+    MAPV.imgState[base] = "loading";
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const probe = document.createElement("canvas");
+        probe.width = 8;
+        probe.height = 8;
+        const pctx = probe.getContext("2d");
+        pctx.drawImage(img, 0, 0, 8, 8);
+        const px = pctx.getImageData(0, 0, 8, 8).data;
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        let n = 0;
+        for (let i = 0; i < px.length; i += 4) {
+          if (px[i + 3] < 10) continue;
+          r += px[i];
+          g += px[i + 1];
+          b += px[i + 2];
+          n = n + 1;
+        }
+        MAPV.colors[base] = n > 0 ? [Math.round(r / n), Math.round(g / n), Math.round(b / n)] : [90, 110, 90];
+      } catch (e) {
+        MAPV.colors[base] = [90, 110, 90];
+      }
+      MAPV.baseDirty = true;
+    };
+    img.onerror = () => {
+      MAPV.colors[base] = [90, 110, 90];
+      MAPV.baseDirty = true;
+    };
+    img.src = "assets/tilemap/" + encodeURIComponent(base) + ".png";
+  }
+  return [90, 110, 90];
+}
+
+function mapHexToRgb(hex) {
+  return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
+}
+
+function mapBuildBase() {
+  const grid = MAPV.view === "region" && MAPV.region ? MAPV.region : MAPV.data;
+  if (!grid) return;
+  const v = mapView();
+  const cols = v.cols;
+  const rows = v.rows;
+  if (!MAPV.base || MAPV.base.width !== cols || MAPV.base.height !== rows) {
+    MAPV.base = document.createElement("canvas");
+    MAPV.base.width = cols;
+    MAPV.base.height = rows;
+  }
+  const bctx = MAPV.base.getContext("2d");
+  const img = bctx.createImageData(cols, rows);
+  const useOverrides = MAPV.view === "world";
+  const perSide = MAPV.data.perSide;
+  for (let i = 0; i < cols * rows; i++) {
+    const f = grid.f[i];
+    let color = MAP_BG;
+    let k = 1;
+    if (f > 0) {
+      const a = mapTileColor(grid.a[i]);
+      color = a;
+      const bch = grid.b[i];
+      const m = grid.m[i];
+      if (bch !== " " && m >= 35) {
+        const bcol = mapTileColor(bch);
+        const w = m / 100;
+        color = [a[0] * (1 - w) + bcol[0] * w, a[1] * (1 - w) + bcol[1] * w, a[2] * (1 - w) + bcol[2] * w];
+      }
+      k = 0.35 + 0.65 * (f / 100);
+    }
+    if (useOverrides) {
+      const key = (i % perSide) + "," + Math.floor(i / perSide);
+      const hex = MAPV.data.overrides[key];
+      if (hex) {
+        color = mapHexToRgb(hex);
+        k = f > 0 ? 0.35 + 0.65 * (f / 100) : 0.8;
+      }
+    }
+    const o = i * 4;
+    img.data[o] = MAP_BG[0] * (1 - k) + color[0] * k;
+    img.data[o + 1] = MAP_BG[1] * (1 - k) + color[1] * k;
+    img.data[o + 2] = MAP_BG[2] * (1 - k) + color[2] * k;
+    img.data[o + 3] = 255;
+  }
+  bctx.putImageData(img, 0, 0);
+  MAPV.baseDirty = false;
+}
+
+function mapComputeIslands() {
+  const data = MAPV.data;
+  const n = data.perSide;
+  const ids = new Int32Array(n * n).fill(0);
+  const islands = [];
+  let nextId = 1;
+  for (let start = 0; start < n * n; start++) {
+    if (data.f[start] <= 0 || ids[start] !== 0) continue;
+    const stack = [start];
+    ids[start] = nextId;
+    const island = { id: nextId, minX: n, minY: n, maxX: 0, maxY: 0, count: 0 };
+    while (stack.length > 0) {
+      const cur = stack.pop();
+      const cx = cur % n;
+      const cy = Math.floor(cur / n);
+      island.count = island.count + 1;
+      if (cx < island.minX) island.minX = cx;
+      if (cx > island.maxX) island.maxX = cx;
+      if (cy < island.minY) island.minY = cy;
+      if (cy > island.maxY) island.maxY = cy;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nx = cx + dx;
+          const ny = cy + dy;
+          if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+          const ni = ny * n + nx;
+          if (data.f[ni] <= 0 || ids[ni] !== 0) continue;
+          ids[ni] = nextId;
+          stack.push(ni);
+        }
+      }
+    }
+    islands.push(island);
+    nextId = nextId + 1;
+  }
+  MAPV.islandMap = ids;
+  MAPV.islands = islands;
+}
+
+function mapIslandAtTile(col, row) {
+  if (!MAPV.data || !MAPV.islandMap) return null;
+  const n = MAPV.data.perSide;
+  const bx = Math.floor(col / MAPV.data.block);
+  const by = Math.floor(row / MAPV.data.block);
+  if (bx < 0 || by < 0 || bx >= n || by >= n) return null;
+  const id = MAPV.islandMap[by * n + bx];
+  if (id === 0) return null;
+  return MAPV.islands[id - 1];
+}
+
+function mapOpenIsland(island) {
+  const block = MAPV.data.block;
+  const size = MAPV.data.size;
+  const c0 = Math.max(0, island.minX * block - block);
+  const r0 = Math.max(0, island.minY * block - block);
+  const c1 = Math.min(size, (island.maxX + 1) * block + block);
+  const r1 = Math.min(size, (island.maxY + 1) * block + block);
+  const w = c1 - c0;
+  const h = r1 - r0;
+  const tpp = Math.max(1, Math.min(block, Math.ceil(Math.max(w, h) / 320)));
+  gmSend({ type: "map_region", c0: c0, r0: r0, cols: Math.ceil(w / tpp), rows: Math.ceil(h / tpp), tpp: tpp });
+}
+
+function mapShowWorld() {
+  MAPV.view = "world";
+  MAPV.region = null;
+  MAPV.baseDirty = true;
+  MAPV.selPin = null;
+  MAPV.selRegion = null;
+  MAPV.drawing = [];
+  mapHideForm();
+  document.getElementById("mapTitle").textContent = "World Map";
+  document.getElementById("mapBack").style.display = "none";
+  mapComputeGeo();
+}
+
+function mapMessage(data) {
+  if (data.type === "map_data") {
+    MAPV.data = data;
+    MAPV.gm = !!data.gm;
+    MAPV.view = "world";
+    MAPV.region = null;
+    MAPV.baseDirty = true;
+    MAPV.undo = [];
+    MAPV.redo = [];
+    MAPV.selPin = null;
+    MAPV.selRegion = null;
+    MAPV.drawing = [];
+    mapComputeIslands();
+    mapShow();
+    document.getElementById("mapTitle").textContent = "World Map";
+    document.getElementById("mapBack").style.display = "none";
+    mapComputeGeo();
+    return true;
+  }
+  if (data.type === "map_region_data") {
+    MAPV.region = data;
+    MAPV.view = "region";
+    MAPV.baseDirty = true;
+    document.getElementById("mapTitle").textContent = "Region Map";
+    document.getElementById("mapBack").style.display = "inline-block";
+    mapComputeGeo();
+    return true;
+  }
+  if (data.type === "map_changed") {
+    if (!MAPV.data || !MAPV.gm) return true;
+    if (MAPV.drag) return true;
+    MAPV.data.overrides = data.overrides;
+    MAPV.data.pins = data.pins;
+    MAPV.data.regions = data.regions;
+    MAPV.data.nextId = data.nextId;
+    MAPV.baseDirty = true;
+    return true;
+  }
+  if (data.type === "map_denied") {
+    itemToast(data.text);
+    return true;
+  }
+  if (data.type === "area_enter") {
+    mapShowBanner(data);
+    return true;
+  }
+  return false;
+}
+
+let mapBannerTimer = null;
+
+function mapShowBanner(data) {
+  mapInject();
+  const el = document.getElementById("areaBanner");
+  let sub = "";
+  if (data.kind === "region") sub = "Entering";
+  else if (data.first) sub = "Discovered";
+  else sub = data.pinType ? String(data.pinType) : "";
+  el.innerHTML = "";
+  const subEl = document.createElement("div");
+  subEl.className = "abSub";
+  subEl.textContent = sub;
+  const nameEl = document.createElement("div");
+  nameEl.className = "abName";
+  nameEl.textContent = data.name;
+  if (data.kind === "pin") nameEl.style.fontSize = "40px";
+  if (data.color) nameEl.style.color = data.color === "#4a6cff" ? "#ffffff" : data.color;
+  el.appendChild(subEl);
+  el.appendChild(nameEl);
+  el.classList.add("show");
+  if (mapBannerTimer) clearTimeout(mapBannerTimer);
+  mapBannerTimer = setTimeout(() => el.classList.remove("show"), 3800);
+}
+
+function mapSnapshot() {
+  return JSON.stringify({ overrides: MAPV.data.overrides, pins: MAPV.data.pins, regions: MAPV.data.regions, nextId: MAPV.data.nextId });
+}
+
+function mapApplySnapshot(text) {
+  const snap = JSON.parse(text);
+  MAPV.data.overrides = snap.overrides;
+  MAPV.data.pins = snap.pins;
+  MAPV.data.regions = snap.regions;
+  MAPV.data.nextId = snap.nextId;
+  MAPV.baseDirty = true;
+}
+
+function mapPushUndo() {
+  MAPV.undo.push(mapSnapshot());
+  if (MAPV.undo.length > 100) MAPV.undo.shift();
+  MAPV.redo = [];
+}
+
+function mapSendEdit() {
+  gmSend({ type: "map_edit", data: { overrides: MAPV.data.overrides, pins: MAPV.data.pins, regions: MAPV.data.regions, nextId: MAPV.data.nextId } });
+}
+
+function mapUndo() {
+  if (!MAPV.gm) return;
+  if (MAPV.tool === "region" && MAPV.drawing.length > 0) {
+    MAPV.drawing.pop();
+    return;
+  }
+  if (MAPV.undo.length === 0) return;
+  MAPV.redo.push(mapSnapshot());
+  mapApplySnapshot(MAPV.undo.pop());
+  MAPV.selPin = null;
+  MAPV.selRegion = null;
+  mapHideForm();
+  mapSendEdit();
+}
+
+function mapRedo() {
+  if (!MAPV.gm || MAPV.redo.length === 0) return;
+  MAPV.undo.push(mapSnapshot());
+  mapApplySnapshot(MAPV.redo.pop());
+  MAPV.selPin = null;
+  MAPV.selRegion = null;
+  mapHideForm();
+  mapSendEdit();
+}
+
+function mapSetTool(tool) {
+  MAPV.tool = tool;
+  MAPV.drawing = [];
+  MAPV.drag = null;
+  mapHideForm();
+  MAPV.el.querySelectorAll("[data-maptool]").forEach((btn) => {
+    btn.classList.toggle("on", btn.getAttribute("data-maptool") === tool);
+  });
+  const status = document.getElementById("mapStatus");
+  const hints = {
+    teleport: "Click anywhere to teleport there.",
+    zoom: "Click an island to open its region map.",
+    select: "Click a dot or region to edit. Drag to move.",
+    pin: "Click to place a dot.",
+    region: "Click points. Click the first point to finish. Ctrl+Z removes a point.",
+    colour: "Click a block on the world map to set its colour."
+  };
+  status.textContent = MAPV.gm ? hints[tool] || "" : "Click an island to see the region.";
+}
+
+function mapPlayerList() {
+  return MAPV.data && Array.isArray(MAPV.data.players) ? MAPV.data.players : [];
+}
+
+function mapVisiblePins() {
+  if (!MAPV.data) return [];
+  const scope = MAPV.view === "region" ? "region" : "world";
+  return MAPV.data.pins.filter((pin) => pin.scope === "both" || pin.scope === scope);
+}
+
+function mapPolygonArea(points) {
+  let sum = 0;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i, i = i + 1) {
+    sum = sum + (points[j][0] * points[i][1] - points[i][0] * points[j][1]);
+  }
+  return Math.abs(sum) / 2;
+}
+
+function mapPointInPolygon(col, row, points) {
+  let inside = false;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i, i = i + 1) {
+    const xi = points[i][0];
+    const yi = points[i][1];
+    const xj = points[j][0];
+    const yj = points[j][1];
+    const crosses = (yi > row) !== (yj > row) && col < (xj - xi) * (row - yi) / (yj - yi) + xi;
+    if (crosses) inside = !inside;
+  }
+  return inside;
+}
+
+function mapRegionAtTile(col, row) {
+  let best = null;
+  let bestArea = Infinity;
+  for (const region of MAPV.data.regions) {
+    if (!mapPointInPolygon(col, row, region.points)) continue;
+    const area = mapPolygonArea(region.points);
+    if (area < bestArea) {
+      bestArea = area;
+      best = region;
+    }
+  }
+  return best;
+}
+
+function mapPinAtScreen(x, y) {
+  let best = null;
+  let bestDist = 11;
+  for (const pin of mapVisiblePins()) {
+    const dx = mapSx(pin.col) - x;
+    const dy = mapSy(pin.row) - y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = pin;
+    }
+  }
+  return best;
+}
+
+function mapCanvasPoint(ev) {
+  const rect = MAPV.canvas.getBoundingClientRect();
+  return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+}
+
+function mapGotoTile(col, row) {
+  const tc = Math.max(0, Math.min(MAPV.data.size - 1, Math.round(col)));
+  const tr = Math.max(0, Math.min(MAPV.data.size - 1, Math.round(row)));
+  if (WG.layer !== 0) {
+    WG.pendingCenter = { col: tc, row: tr };
+    gmSend({ type: "gm_layer", layer: 0 });
+  } else if (sceneRef) {
+    sceneRef.cameras.main.centerOn(tc * TILE + TILE / 2, tr * TILE + TILE / 2);
+  }
+  mapClose();
+}
+
+function mapPointerDown(ev) {
+  if (!MAPV.data || ev.button !== 0) return;
+  const pt = mapCanvasPoint(ev);
+  const tile = mapTileAt(pt.x, pt.y);
+  const v = mapView();
+  const inside = tile.col >= v.c0 && tile.row >= v.r0 && tile.col < v.c0 + v.cols * v.tpp && tile.row < v.r0 + v.rows * v.tpp;
+  if (!inside) return;
+  if (!MAPV.gm || MAPV.tool === "zoom") {
+    if (MAPV.view !== "world") return;
+    const island = mapIslandAtTile(tile.col, tile.row);
+    if (island) mapOpenIsland(island);
+    return;
+  }
+  if (MAPV.tool === "teleport") {
+    mapGotoTile(tile.col, tile.row);
+    return;
+  }
+  if (MAPV.tool === "pin") {
+    mapShowForm("pin", { id: "", name: "", col: Math.round(tile.col), row: Math.round(tile.row), type: "town", color: "#ffd23f", scope: "both", hidden: false, radius: 15 }, true);
+    return;
+  }
+  if (MAPV.tool === "colour") {
+    if (MAPV.view !== "world") {
+      document.getElementById("mapStatus").textContent = "Block colours are set on the world map.";
+      return;
+    }
+    const bx = Math.floor(tile.col / MAPV.data.block);
+    const by = Math.floor(tile.row / MAPV.data.block);
+    MAPV.pendingBlock = bx + "," + by;
+    mapShowForm("block", { key: bx + "," + by, color: MAPV.data.overrides[bx + "," + by] || "#c2b280" }, false);
+    return;
+  }
+  if (MAPV.tool === "region") {
+    const rounded = [Math.round(tile.col), Math.round(tile.row)];
+    if (MAPV.drawing.length >= 3) {
+      const first = MAPV.drawing[0];
+      const dx = mapSx(first[0]) - pt.x;
+      const dy = mapSy(first[1]) - pt.y;
+      if (Math.sqrt(dx * dx + dy * dy) < 12) {
+        mapShowForm("region", { id: "", name: "", color: "#4a6cff", points: MAPV.drawing.map((p) => [p[0], p[1]]) }, true);
+        return;
+      }
+    }
+    MAPV.drawing.push(rounded);
+    return;
+  }
+  if (MAPV.tool === "select") {
+    if (MAPV.selRegion) {
+      const region = MAPV.data.regions.find((r) => r.id === MAPV.selRegion);
+      if (region) {
+        for (let i = 0; i < region.points.length; i++) {
+          const dx = mapSx(region.points[i][0]) - pt.x;
+          const dy = mapSy(region.points[i][1]) - pt.y;
+          if (Math.sqrt(dx * dx + dy * dy) < 9) {
+            mapPushUndo();
+            MAPV.drag = { kind: "vertex", id: region.id, index: i };
+            return;
+          }
+        }
+      }
+    }
+    const pin = mapPinAtScreen(pt.x, pt.y);
+    if (pin) {
+      MAPV.selPin = pin.id;
+      MAPV.selRegion = null;
+      mapPushUndo();
+      MAPV.drag = { kind: "pin", id: pin.id, moved: false };
+      mapShowForm("pin", pin, false);
+      return;
+    }
+    const region = mapRegionAtTile(tile.col, tile.row);
+    if (region) {
+      MAPV.selRegion = region.id;
+      MAPV.selPin = null;
+      mapShowForm("region", region, false);
+      return;
+    }
+    MAPV.selPin = null;
+    MAPV.selRegion = null;
+    mapHideForm();
+  }
+}
+
+function mapPointerMove(ev) {
+  if (!MAPV.data) return;
+  const pt = mapCanvasPoint(ev);
+  const tile = mapTileAt(pt.x, pt.y);
+  MAPV.hover.x = pt.x;
+  MAPV.hover.y = pt.y;
+  MAPV.hover.col = tile.col;
+  MAPV.hover.row = tile.row;
+  const v = mapView();
+  MAPV.hover.inside = tile.col >= v.c0 && tile.row >= v.r0 && tile.col < v.c0 + v.cols * v.tpp && tile.row < v.r0 + v.rows * v.tpp;
+  if (MAPV.drag) {
+    const rc = Math.max(0, Math.min(MAPV.data.size, Math.round(tile.col)));
+    const rr = Math.max(0, Math.min(MAPV.data.size, Math.round(tile.row)));
+    if (MAPV.drag.kind === "vertex") {
+      const region = MAPV.data.regions.find((r) => r.id === MAPV.drag.id);
+      if (region) region.points[MAPV.drag.index] = [rc, rr];
+    } else if (MAPV.drag.kind === "pin") {
+      const pin = MAPV.data.pins.find((p) => p.id === MAPV.drag.id);
+      if (pin) {
+        pin.col = Math.min(MAPV.data.size - 1, rc);
+        pin.row = Math.min(MAPV.data.size - 1, rr);
+        MAPV.drag.moved = true;
+      }
+    }
+    return;
+  }
+  MAPV.hover.pin = MAPV.hover.inside ? mapPinAtScreen(pt.x, pt.y) : null;
+  MAPV.hover.region = MAPV.hover.inside && !MAPV.hover.pin ? mapRegionAtTile(tile.col, tile.row) : null;
+  const tip = document.getElementById("mapTip");
+  let text = "";
+  if (MAPV.hover.pin) text = MAPV.hover.pin.name + " (" + MAPV.hover.pin.type + ")";
+  else if (MAPV.hover.region) text = MAPV.hover.region.name;
+  if (text) {
+    tip.textContent = text;
+    tip.style.display = "block";
+    tip.style.left = Math.min(pt.x + 14, MAPV.canvas.width - 180) + "px";
+    tip.style.top = Math.max(0, pt.y - 30) + "px";
+  } else {
+    tip.style.display = "none";
+  }
+  if (MAPV.gm && MAPV.hover.inside) {
+    document.getElementById("mapStatus").textContent = "x " + Math.round(tile.col) + ", y " + Math.round(tile.row);
+  }
+}
+
+function mapPointerUp() {
+  if (!MAPV.drag) return;
+  const drag = MAPV.drag;
+  MAPV.drag = null;
+  if (drag.kind === "pin" && !drag.moved) {
+    MAPV.undo.pop();
+    return;
+  }
+  mapSendEdit();
+  if (drag.kind === "pin") {
+    const pin = MAPV.data.pins.find((p) => p.id === drag.id);
+    if (pin) mapShowForm("pin", pin, false);
+  }
+}
+
+function mapHideForm() {
+  const form = document.getElementById("mapForm");
+  if (form) form.style.display = "none";
+  MAPV.formKind = "";
+  MAPV.formObj = null;
+}
+
+function mapFormField(label, html) {
+  return "<label>" + label + html + "</label>";
+}
+
+function mapShowForm(kind, obj, isNew) {
+  const form = document.getElementById("mapForm");
+  MAPV.formKind = kind;
+  MAPV.formObj = obj;
+  MAPV.formNew = isNew;
+  let html = "";
+  if (kind === "pin") {
+    html += "<b style='color:#ffd23f'>" + (isNew ? "New dot" : "Edit dot") + "</b>";
+    html += mapFormField("Name", "<input type='text' id='mfName' maxlength='40'>");
+    html += mapFormField("Type", "<select id='mfType'>" + MAP_PIN_TYPE_LIST.map((t) => "<option value='" + t + "'>" + t + "</option>").join("") + "</select>");
+    html += mapFormField("Colour", "<br><input type='color' id='mfColor'>");
+    html += mapFormField("Shows on", "<select id='mfScope'><option value='both'>World and region map</option><option value='world'>World map only</option><option value='region'>Region map only</option></select>");
+    html += mapFormField("Banner radius (tiles)", "<input type='number' id='mfRadius' min='1' max='300'>");
+    html += "<label><input type='checkbox' id='mfHidden'> Hidden until discovered</label>";
+    html += "<div class='mfRow'><button id='mfSave'>Save</button>" + (isNew ? "" : "<button id='mfDelete'>Delete</button>") + "<button id='mfCancel'>Cancel</button></div>";
+  } else if (kind === "region") {
+    html += "<b style='color:#ffd23f'>" + (isNew ? "Name this region" : "Edit region") + "</b>";
+    html += mapFormField("Name", "<input type='text' id='mfName' maxlength='40'>");
+    html += mapFormField("Colour", "<br><input type='color' id='mfColor'>");
+    html += "<div class='mfRow'><button id='mfSave'>Save</button>" + (isNew ? "" : "<button id='mfDelete'>Delete</button>") + "<button id='mfCancel'>Cancel</button></div>";
+  } else {
+    html += "<b style='color:#ffd23f'>Block colour</b><div style='margin-top:4px;color:#c8c8ff'>Block " + obj.key + "</div>";
+    html += mapFormField("Colour", "<br><input type='color' id='mfColor'>");
+    html += "<div class='mfRow'><button id='mfSave'>Apply</button><button id='mfAuto'>Back to automatic</button><button id='mfCancel'>Cancel</button></div>";
+  }
+  form.innerHTML = html;
+  form.style.display = "block";
+  form.querySelectorAll("input,select").forEach((field) => {
+    field.addEventListener("keydown", (ev) => ev.stopPropagation());
+    field.addEventListener("keyup", (ev) => ev.stopPropagation());
+  });
+  if (kind === "pin") {
+    document.getElementById("mfName").value = obj.name || "";
+    document.getElementById("mfType").value = obj.type || "town";
+    document.getElementById("mfColor").value = obj.color || "#ffd23f";
+    document.getElementById("mfScope").value = obj.scope || "both";
+    document.getElementById("mfRadius").value = obj.radius || 15;
+    document.getElementById("mfHidden").checked = !!obj.hidden;
+  } else if (kind === "region") {
+    document.getElementById("mfName").value = obj.name || "";
+    document.getElementById("mfColor").value = obj.color || "#4a6cff";
+  } else {
+    document.getElementById("mfColor").value = obj.color || "#c2b280";
+  }
+  document.getElementById("mfSave").addEventListener("click", mapFormSave);
+  document.getElementById("mfCancel").addEventListener("click", () => {
+    if (MAPV.formNew && MAPV.formKind === "region") MAPV.drawing = [];
+    mapHideForm();
+  });
+  const delBtn = document.getElementById("mfDelete");
+  if (delBtn) delBtn.addEventListener("click", mapFormDelete);
+  const autoBtn = document.getElementById("mfAuto");
+  if (autoBtn) autoBtn.addEventListener("click", mapFormAuto);
+}
+
+function mapNewId(prefix) {
+  const id = prefix + MAPV.data.nextId;
+  MAPV.data.nextId = MAPV.data.nextId + 1;
+  return id;
+}
+
+function mapFormSave() {
+  const kind = MAPV.formKind;
+  const obj = MAPV.formObj;
+  if (!kind || !obj) return;
+  if (kind === "pin") {
+    mapPushUndo();
+    const values = {
+      name: document.getElementById("mfName").value.trim() || "Unnamed",
+      type: document.getElementById("mfType").value,
+      color: document.getElementById("mfColor").value,
+      scope: document.getElementById("mfScope").value,
+      radius: parseInt(document.getElementById("mfRadius").value, 10) || 15,
+      hidden: document.getElementById("mfHidden").checked
+    };
+    if (MAPV.formNew) {
+      MAPV.data.pins.push({ id: mapNewId("p"), name: values.name, col: obj.col, row: obj.row, type: values.type, color: values.color, scope: values.scope, hidden: values.hidden, radius: values.radius });
+    } else {
+      const pin = MAPV.data.pins.find((p) => p.id === obj.id);
+      if (pin) Object.assign(pin, values);
+    }
+  } else if (kind === "region") {
+    mapPushUndo();
+    const name = document.getElementById("mfName").value.trim() || "Unnamed";
+    const color = document.getElementById("mfColor").value;
+    if (MAPV.formNew) {
+      MAPV.data.regions.push({ id: mapNewId("r"), name: name, color: color, points: obj.points });
+      MAPV.drawing = [];
+    } else {
+      const region = MAPV.data.regions.find((r) => r.id === obj.id);
+      if (region) {
+        region.name = name;
+        region.color = color;
+      }
+    }
+  } else {
+    mapPushUndo();
+    MAPV.data.overrides[obj.key] = document.getElementById("mfColor").value;
+    MAPV.baseDirty = true;
+  }
+  mapSendEdit();
+  mapHideForm();
+}
+
+function mapFormDelete() {
+  const kind = MAPV.formKind;
+  const obj = MAPV.formObj;
+  if (!kind || !obj) return;
+  mapPushUndo();
+  if (kind === "pin") MAPV.data.pins = MAPV.data.pins.filter((p) => p.id !== obj.id);
+  else if (kind === "region") MAPV.data.regions = MAPV.data.regions.filter((r) => r.id !== obj.id);
+  MAPV.selPin = null;
+  MAPV.selRegion = null;
+  mapSendEdit();
+  mapHideForm();
+}
+
+function mapFormAuto() {
+  const obj = MAPV.formObj;
+  if (!obj) return;
+  mapPushUndo();
+  delete MAPV.data.overrides[obj.key];
+  MAPV.baseDirty = true;
+  mapSendEdit();
+  mapHideForm();
+}
+
+function mapDrawPolygon(ctx, points, fill, stroke, lineWidth) {
+  ctx.beginPath();
+  for (let i = 0; i < points.length; i++) {
+    const x = mapSx(points[i][0]);
+    const y = mapSy(points[i][1]);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  if (fill) {
+    ctx.fillStyle = fill;
+    ctx.fill();
+  }
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = lineWidth;
+  ctx.stroke();
+}
+
+function mapHexAlpha(hex, alpha) {
+  const rgb = mapHexToRgb(hex);
+  return "rgba(" + rgb[0] + "," + rgb[1] + "," + rgb[2] + "," + alpha + ")";
+}
+
+function mapFrame() {
+  MAPV.raf = 0;
+  if (!MAPV.open) return;
+  MAPV.raf = requestAnimationFrame(mapFrame);
+  if (!MAPV.data) return;
+  if (MAPV.baseDirty) mapBuildBase();
+  const ctx = MAPV.ctx;
+  const w = MAPV.canvas.width;
+  const h = MAPV.canvas.height;
+  const v = mapView();
+  const g = MAPV.geo;
+  ctx.fillStyle = "#070b14";
+  ctx.fillRect(0, 0, w, h);
+  if (MAPV.base) {
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(MAPV.base, g.ox, g.oy, v.cols * g.s, v.rows * g.s);
+  }
+  ctx.strokeStyle = "#3a3a55";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(g.ox, g.oy, v.cols * g.s, v.rows * g.s);
+
+  for (const region of MAPV.data.regions) {
+    const hovered = MAPV.hover.region && MAPV.hover.region.id === region.id;
+    const selected = MAPV.selRegion === region.id;
+    mapDrawPolygon(ctx, region.points, mapHexAlpha(region.color, hovered || selected ? 0.38 : 0.1), mapHexAlpha(region.color, hovered || selected ? 1 : 0.55), hovered || selected ? 3 : 1.5);
+  }
+  if (MAPV.selRegion) {
+    const region = MAPV.data.regions.find((r) => r.id === MAPV.selRegion);
+    if (region) {
+      for (const pt of region.points) {
+        ctx.fillStyle = "#ffffff";
+        ctx.strokeStyle = "#000000";
+        ctx.lineWidth = 1;
+        ctx.fillRect(mapSx(pt[0]) - 4, mapSy(pt[1]) - 4, 8, 8);
+        ctx.strokeRect(mapSx(pt[0]) - 4, mapSy(pt[1]) - 4, 8, 8);
+      }
+    }
+  }
+
+  if (MAPV.gm && Array.isArray(MAPV.data.spawns)) {
+    for (const sp of MAPV.data.spawns) {
+      const x = mapSx(sp.col);
+      const y = mapSy(sp.row);
+      ctx.fillStyle = "#4be0c8";
+      ctx.strokeStyle = "#000000";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, y - 7);
+      ctx.lineTo(x + 6, y);
+      ctx.lineTo(x, y + 7);
+      ctx.lineTo(x - 6, y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
+  for (const pin of mapVisiblePins()) {
+    const x = mapSx(pin.col);
+    const y = mapSy(pin.row);
+    const hovered = MAPV.hover.pin && MAPV.hover.pin.id === pin.id;
+    const selected = MAPV.selPin === pin.id;
+    ctx.beginPath();
+    ctx.arc(x, y, hovered || selected ? 8 : 6, 0, Math.PI * 2);
+    ctx.fillStyle = pin.color;
+    ctx.fill();
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = selected ? 3 : 2;
+    if (pin.hidden && MAPV.gm) ctx.setLineDash([3, 2]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  if (MAPV.gm) {
+    for (const pl of mapPlayerList()) {
+      const x = mapSx(pl.col);
+      const y = mapSy(pl.row);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(x - 2, y - 2, 4, 4);
+    }
+    if (sceneRef && WG.layer === 0) {
+      const cam = sceneRef.cameras.main;
+      const cx = (cam.scrollX + cam.width / cam.zoom / 2) / TILE;
+      const cy = (cam.scrollY + cam.height / cam.zoom / 2) / TILE;
+      ctx.strokeStyle = "#ffd23f";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(mapSx(cx), mapSy(cy), 8, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  } else if (MAPV.data.you) {
+    const x = mapSx(MAPV.data.you.col);
+    const y = mapSy(MAPV.data.you.row);
+    const pulse = 6 + Math.sin(Date.now() / 220) * 2;
+    ctx.beginPath();
+    ctx.arc(x, y, pulse + 3, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255,60,60,0.3)";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x, y, 5, 0, Math.PI * 2);
+    ctx.fillStyle = "#ff3c3c";
+    ctx.fill();
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  if (MAPV.tool === "region" && MAPV.drawing.length > 0) {
+    ctx.strokeStyle = "#ffd23f";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = 0; i < MAPV.drawing.length; i++) {
+      const x = mapSx(MAPV.drawing[i][0]);
+      const y = mapSy(MAPV.drawing[i][1]);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    if (MAPV.hover.inside) ctx.lineTo(MAPV.hover.x, MAPV.hover.y);
+    ctx.stroke();
+    for (let i = 0; i < MAPV.drawing.length; i++) {
+      ctx.beginPath();
+      ctx.arc(mapSx(MAPV.drawing[i][0]), mapSy(MAPV.drawing[i][1]), i === 0 ? 7 : 4, 0, Math.PI * 2);
+      ctx.fillStyle = i === 0 ? "#4be0c8" : "#ffd23f";
+      ctx.fill();
+    }
+  }
+}
+
+document.addEventListener("keydown", (ev) => {
+  const tag = ev.target && ev.target.tagName ? ev.target.tagName : "";
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  if (!worldPlayerMode && !worldGmMode) return;
+  if (ev.key === "m" || ev.key === "M") {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey || ev.repeat) return;
+    if (chatActive && !MAPV.open) return;
+    ev.preventDefault();
+    mapToggle();
+    return;
+  }
+  if (!MAPV.open) return;
+  if (ev.key === "Escape") {
+    if (MAPV.drawing.length > 0) {
+      MAPV.drawing = [];
+      return;
+    }
+    if (MAPV.formKind) {
+      mapHideForm();
+      return;
+    }
+    mapClose();
+    ev.stopImmediatePropagation();
+    return;
+  }
+  if (!MAPV.gm) return;
+  if ((ev.ctrlKey || ev.metaKey) && (ev.key === "z" || ev.key === "Z")) {
+    ev.preventDefault();
+    if (ev.shiftKey) mapRedo();
+    else mapUndo();
+    return;
+  }
+  if ((ev.ctrlKey || ev.metaKey) && (ev.key === "y" || ev.key === "Y")) {
+    ev.preventDefault();
+    mapRedo();
+  }
+}, true);
+
+const OVR = { undo: false, backups: [] };
+
+function ovShowMessage(text, ok) {
+  const el = document.getElementById("ovMsg");
+  if (!el) return;
+  el.style.color = ok === false ? "#ff9a8a" : "#9be39b";
+  el.textContent = text;
+}
+
+function ovApplyStatus(data) {
+  const lockedEl = document.getElementById("ovLocked");
+  const openEl = document.getElementById("ovOpen");
+  if (!lockedEl || !openEl) return;
+  lockedEl.style.display = data.unlocked ? "none" : "block";
+  openEl.style.display = data.unlocked ? "block" : "none";
+  OVR.undo = !!data.undo;
+  OVR.backups = Array.isArray(data.backups) ? data.backups : [];
+  const undoBtn = document.getElementById("ovUndo");
+  undoBtn.disabled = !data.undo;
+  undoBtn.style.opacity = data.undo ? "1" : "0.45";
+  undoBtn.textContent = data.undo ? "Undo " + data.undoAction : "Undo";
+  const select = document.getElementById("ovBackups");
+  select.innerHTML = "";
+  for (const b of OVR.backups) {
+    const opt = document.createElement("option");
+    opt.value = b.name;
+    opt.textContent = b.at + " | " + b.label;
+    select.appendChild(opt);
+  }
+  if (!data.unlocked) document.getElementById("ovPass").value = "";
+}
+
+function ovBindUi() {
+  document.getElementById("ovUnlock").addEventListener("click", () => {
+    gmSend({ type: "ov_unlock", password: document.getElementById("ovPass").value });
+    document.getElementById("ovPass").value = "";
+  });
+  document.getElementById("ovPass").addEventListener("keydown", (ev) => {
+    ev.stopPropagation();
+    if (ev.key === "Enter") document.getElementById("ovUnlock").click();
+  });
+  document.getElementById("ovPass").addEventListener("keyup", (ev) => ev.stopPropagation());
+  document.getElementById("ovReset").addEventListener("click", () => {
+    const typed = window.prompt("This wipes ALL tiles, objects, NPCs, enemies, spawns, farms and chests. Player characters are kept. Type RESET to confirm.");
+    if (typed === null) return;
+    gmSend({ type: "ov_reset", confirm: typed });
+  });
+  document.getElementById("ovUndo").addEventListener("click", () => {
+    if (!OVR.undo) return;
+    gmSend({ type: "ov_undo" });
+  });
+  document.getElementById("ovReload").addEventListener("click", () => {
+    const folder = document.getElementById("ovBackups").value;
+    if (!folder) {
+      ovShowMessage("Pick a backup first.", false);
+      return;
+    }
+    if (!window.confirm("Reload the world from " + folder + "? Everyone online will be removed. You can undo this.")) return;
+    gmSend({ type: "ov_reload", folder: folder });
+  });
+  document.getElementById("ovBackupNow").addEventListener("click", () => gmSend({ type: "ov_backup_now" }));
+  document.getElementById("ovLock").addEventListener("click", () => gmSend({ type: "ov_lock" }));
+  gmSend({ type: "ov_status" });
 }
 
 function gmReadCreatureForm(existing, col, row) {
@@ -2137,7 +3257,10 @@ function gmLoadLayer(scene, data) {
   gmRenderLayers();
   gmRenderPlayers();
   gmRenderSpawns();
-  if (firstLoad) {
+  if (WG.pendingCenter) {
+    scene.cameras.main.centerOn(WG.pendingCenter.col * TILE + TILE / 2, WG.pendingCenter.row * TILE + TILE / 2);
+    WG.pendingCenter = null;
+  } else if (firstLoad) {
     const firstSpawn = WG.spawns.find((sp) => sp.layer === WG.layer) || WG.spawns[0];
     const target = firstSpawn || { col: 32, row: 22 };
     scene.cameras.main.centerOn(target.col * TILE + TILE / 2, target.row * TILE + TILE / 2);
@@ -4733,6 +5856,7 @@ window.worldHook = function (scene, data) {
     return true;
   }
   if (dummyMessage(data)) return true;
+  if (mapMessage(data)) return true;
   if (farmMessage(data)) return true;
   if (freeMessage(data)) return true;
   if (chestMessage(data)) return true;
@@ -4875,6 +5999,15 @@ window.worldHook = function (scene, data) {
       gmRenderLayers();
       return true;
     }
+    if (data.type === "ov_status") {
+      ovApplyStatus(data);
+      return true;
+    }
+    if (data.type === "ov_result") {
+      ovShowMessage(data.text, data.ok);
+      return true;
+    }
+    if (mapMessage(data)) return true;
     if (data.type === "gm_players") {
       WG.players = {};
       for (const p of data.players) WG.players[p.id] = p;
