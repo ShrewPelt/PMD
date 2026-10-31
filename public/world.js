@@ -837,7 +837,7 @@ function gmUpdateGrid(scene) {
 }
 
 const SCHED_COLORS = [0x4fc3f7, 0xba68c8, 0xffb74d, 0x81c784, 0xf06292, 0xfff176, 0x90a4ae, 0xff8a65];
-const SCHED = { entries: [], editing: -1, prev: {}, token: 0, timer: null, dirty: false };
+const SCHED = { entries: [], editing: -1, prev: {}, token: 0, timer: null, dirty: false, patrol: [], patEditing: false, patDirty: false };
 
 function schedFmtTime(hours) {
   let h = Math.floor(hours) % 24;
@@ -860,7 +860,56 @@ function schedPicked() {
   return picked && picked.kind === "npc" ? picked : null;
 }
 
+function patPicked() {
+  const picked = WG.selectedEntity ? WG.entities[WG.selectedEntity] : null;
+  return picked && (picked.kind === "npc" || picked.kind === "enemy") ? picked : null;
+}
+
+function patLoops(points) {
+  return points.length >= 3 && points[0][0] === points[points.length - 1][0] && points[0][1] === points[points.length - 1][1];
+}
+
+function patRender() {
+  const head = document.getElementById("wgPatHead");
+  const info = document.getElementById("wgPatInfo");
+  if (!head || !info) return;
+  const picked = patPicked();
+  if (!picked) {
+    head.textContent = "Select an NPC or enemy with the Select tool to edit its patrol.";
+    info.innerHTML = "";
+    return;
+  }
+  head.textContent = picked.name + " | " + SCHED.patrol.length + " tile(s)" + (SCHED.patEditing ? " | drawing, click tiles" : "") + (SCHED.patDirty ? " | unsaved changes" : "");
+  let html = "";
+  if (SCHED.patrol.length === 0) {
+    html = "<div class='wgSchedLeg'>No patrol. The creature stays home and wanders.</div>";
+  } else {
+    const loops = patLoops(SCHED.patrol);
+    let kind = "One way route: walks to the last tile and stays there.";
+    if (loops && SCHED.patrol.length === 3) kind = "Back and forth patrol between the two tiles, forever.";
+    else if (loops) kind = "Closed loop: walks the circuit forever.";
+    html += "<div class='wgSchedTotal'>" + kind + "</div>";
+    const prev = SCHED.prev.p;
+    if (prev) {
+      if (!prev.ok) {
+        html += "<div class='wgSchedLeg bad'>One of the tiles can't be reached.</div>";
+      } else if (prev.loops) {
+        html += "<div class='wgSchedLeg'>Reaches the first tile in " + schedFmtDuration(prev.legs[0].sec) + ", then each lap is " + prev.lapSteps + " tiles | " + schedFmtDuration(prev.lapSec) + " | " + prev.lapGameMin + " game min</div>";
+      } else {
+        html += "<div class='wgSchedLeg'>Whole route " + prev.totalSteps + " tiles | " + schedFmtDuration(prev.totalSec) + " | " + prev.totalGameMin + " game min</div>";
+      }
+    }
+  }
+  info.innerHTML = html;
+  const drawBtn = document.getElementById("wgPatDraw");
+  if (drawBtn) drawBtn.classList.toggle("on", SCHED.patEditing);
+}
+
 function schedLoad() {
+  const pickedPat = patPicked();
+  SCHED.patrol = pickedPat && Array.isArray(pickedPat.patrol) ? JSON.parse(JSON.stringify(pickedPat.patrol)) : [];
+  SCHED.patEditing = false;
+  SCHED.patDirty = false;
   const picked = schedPicked();
   SCHED.entries = picked && Array.isArray(picked.schedule) ? JSON.parse(JSON.stringify(picked.schedule)) : [];
   SCHED.editing = -1;
@@ -885,11 +934,14 @@ function schedRequestPreviews() {
   SCHED.timer = setTimeout(() => {
     SCHED.token += 1;
     SCHED.prev = {};
+    const patPick = patPicked();
+    if (patPick && SCHED.patrol.length > 0) gmSend({ type: "gm_sched_preview", token: SCHED.token, index: "p", layer: WG.layer, start: [patPick.col, patPick.row], points: SCHED.patrol });
     for (let i = 0; i < SCHED.entries.length; i++) {
       if (SCHED.entries[i].points.length === 0) continue;
       gmSend({ type: "gm_sched_preview", token: SCHED.token, index: i, layer: WG.layer, start: schedStartFor(i), points: SCHED.entries[i].points });
     }
     schedRender();
+    patRender();
     gmDrawMarkers();
   }, 120);
 }
@@ -925,7 +977,9 @@ function schedRender() {
         const pt = entry.points[k];
         html += "<div class='wgSchedLeg" + (leg.ok ? "" : " bad") + "'>To (" + pt[0] + "," + pt[1] + "): " + (leg.ok ? leg.steps + " tiles | " + schedFmtDuration(leg.sec) + " | " + leg.gameMin + " game min" : "no walkable path") + "</div>";
       }
-      if (prev.ok) {
+      if (prev.ok && prev.loops) {
+        html += "<div class='wgSchedTotal'>Closed loop | reaches the first tile in " + schedFmtDuration(prev.legs[0].sec) + ", then walks laps of " + prev.lapSteps + " tiles | " + schedFmtDuration(prev.lapSec) + " | " + prev.lapGameMin + " game min until the next stop begins</div>";
+      } else if (prev.ok) {
         const arrive = entry.time + prev.totalGameMin / 60;
         html += "<div class='wgSchedTotal'>Total " + prev.totalSteps + " tiles | " + schedFmtDuration(prev.totalSec) + " real | " + prev.totalGameMin + " game min | arrives about " + schedFmtTime(arrive % 24) + "</div>";
       } else {
@@ -966,6 +1020,8 @@ function schedBind() {
     const del = attr("data-sched-del");
     if (draw !== null) {
       SCHED.editing = SCHED.editing === draw ? -1 : draw;
+      SCHED.patEditing = false;
+      patRender();
       if (SCHED.editing >= 0) gmSetTool("route");
       else gmSetTool("select");
       schedRender();
@@ -1013,17 +1069,58 @@ function schedBind() {
     schedRequestPreviews();
   });
   document.getElementById("wgSchedReload").addEventListener("click", schedLoad);
+  document.getElementById("wgPatDraw").addEventListener("click", () => {
+    if (!patPicked()) {
+      gmNotice("Select an NPC or enemy first.");
+      return;
+    }
+    SCHED.patEditing = !SCHED.patEditing;
+    SCHED.editing = -1;
+    if (SCHED.patEditing) gmSetTool("route");
+    else gmSetTool("select");
+    schedRender();
+    patRender();
+    gmDrawMarkers();
+  });
+  document.getElementById("wgPatUndo").addEventListener("click", () => {
+    SCHED.patrol.pop();
+    SCHED.patDirty = true;
+    schedRequestPreviews();
+  });
+  document.getElementById("wgPatClear").addEventListener("click", () => {
+    SCHED.patrol = [];
+    SCHED.patDirty = true;
+    schedRequestPreviews();
+  });
+  document.getElementById("wgPatSave").addEventListener("click", () => {
+    const picked = patPicked();
+    if (!picked) return;
+    gmSend({ type: "gm_patrol_set", id: picked.id, points: SCHED.patrol });
+    SCHED.patEditing = false;
+    SCHED.patDirty = false;
+    gmSetTool("select");
+    patRender();
+    schedRequestPreviews();
+  });
+  document.getElementById("wgPatRevert").addEventListener("click", schedLoad);
   window.addEventListener("keydown", (ev) => {
-    if (WG.tool !== "route" || SCHED.editing < 0) return;
+    if (WG.tool !== "route" || (SCHED.editing < 0 && !SCHED.patEditing)) return;
     if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "z") {
       ev.preventDefault();
       ev.stopImmediatePropagation();
-      const entry = SCHED.entries[SCHED.editing];
-      if (entry) entry.points.pop();
-      SCHED.dirty = true;
+      if (SCHED.patEditing) {
+        SCHED.patrol.pop();
+        SCHED.patDirty = true;
+      } else {
+        const entry = SCHED.entries[SCHED.editing];
+        if (entry) entry.points.pop();
+        SCHED.dirty = true;
+      }
       schedRequestPreviews();
     } else if (ev.key === "Escape" || ev.key === "Enter") {
       SCHED.editing = -1;
+      SCHED.patEditing = false;
+      patRender();
       gmSetTool("select");
       schedRender();
       gmDrawMarkers();
@@ -1031,7 +1128,27 @@ function schedBind() {
   }, true);
 }
 
+function schedDrawPatrol(g) {
+  if (!patPicked() || SCHED.patrol.length === 0) return;
+  const prev = SCHED.prev.p;
+  const color = 0xffffff;
+  g.lineStyle(SCHED.patEditing ? 4 : 2, color, SCHED.patEditing ? 1 : 0.75);
+  if (prev && prev.corners && prev.corners.length > 1) {
+    g.beginPath();
+    g.moveTo(prev.corners[0][0] * TILE + TILE / 2, prev.corners[0][1] * TILE + TILE / 2);
+    for (let k = 1; k < prev.corners.length; k++) g.lineTo(prev.corners[k][0] * TILE + TILE / 2, prev.corners[k][1] * TILE + TILE / 2);
+    g.strokePath();
+  }
+  SCHED.patrol.forEach((pt, i) => {
+    g.fillStyle(i === 0 ? 0x3ec13e : color, 0.35);
+    g.fillCircle(pt[0] * TILE + TILE / 2, pt[1] * TILE + TILE / 2, 11);
+    g.lineStyle(2, i === 0 ? 0x3ec13e : color, 1);
+    g.strokeCircle(pt[0] * TILE + TILE / 2, pt[1] * TILE + TILE / 2, 11);
+  });
+}
+
 function schedDraw(g) {
+  schedDrawPatrol(g);
   const picked = schedPicked();
   if (!picked) return;
   SCHED.entries.forEach((entry, i) => {
@@ -1492,6 +1609,13 @@ function gmHandleClickTool(scene, c, r) {
   }
   if (WG.tool === "item") return;
   if (WG.tool === "route") {
+    if (SCHED.patEditing) {
+      if (SCHED.patrol.length >= 60) return;
+      SCHED.patrol.push([c, r]);
+      SCHED.patDirty = true;
+      schedRequestPreviews();
+      return;
+    }
     const entry = SCHED.editing >= 0 ? SCHED.entries[SCHED.editing] : null;
     if (!entry) {
       gmNotice("Press Draw route on a stop first.");
@@ -1811,9 +1935,11 @@ function gmSetTool(tool) {
     WG.portalSource = null;
     gmDrawMarkers();
   }
-  if (tool !== "route" && typeof SCHED !== "undefined" && SCHED.editing >= 0) {
+  if (tool !== "route" && typeof SCHED !== "undefined" && (SCHED.editing >= 0 || SCHED.patEditing)) {
     SCHED.editing = -1;
+    SCHED.patEditing = false;
     schedRender();
+    patRender();
   }
 }
 
@@ -1904,6 +2030,7 @@ function gmBuildPanel() {
     + "<div style='margin-top:4px'>Name <input type='text' id='wgEName' placeholder='optional'></div>"
     + "<div style='margin-top:4px'>Level <input type='number' id='wgELevel' value='5' min='1' max='100'> Wander <input type='number' id='wgEWander' value='4' min='0' max='30'></div>"
     + "<div style='margin-top:4px'>Sensor range <input type='number' id='wgESensor' value='5' min='1' max='5'> (enemies, max 5)</div>"
+    + "<div style='margin-top:4px'>Facing <select id='wgEDir'><option value='down'>Down</option><option value='up'>Up</option><option value='left'>Left</option><option value='right'>Right</option></select> (enemies only see in front of them, like the player's cone)</div>"
     + "<div id='wgEEnemyBox' style='margin-top:6px;padding:6px;border:1px solid #55557a;border-radius:6px'>"
     + "<div><b>Enemy build</b></div>"
     + "<div style='margin-top:4px'>When it faints <select id='wgERespawnMode'><option value='once'>Fight once (gone for good)</option><option value='timed'>Comes back after a while</option></select> <input type='number' id='wgERespawnSec' value='300' min='1' max='604800' style='width:70px'> sec</div>"
@@ -1934,6 +2061,12 @@ function gmBuildPanel() {
     + "<div id='wgSchedHead' style='color:#c8c8ff;margin-bottom:4px'></div>"
     + "<div><button class='wgBtn' data-wgtool='select'>Select tool</button><button class='wgBtn' id='wgSchedAdd'>Add stop</button><button class='wgBtn' id='wgSchedSave'>Save schedule</button><button class='wgBtn' id='wgSchedReload'>Revert</button></div>"
     + "<div id='wgSchedList'></div>"
+    + "</div>"
+    + "<div class='wgSecHead' data-wgsec='patrol'><span class='wgArrow'></span>Patrol route</div><div class='wgSecBody' data-wgbody='patrol'>"
+    + "<div style='margin-bottom:4px'>For NPCs and enemies. Click tiles in order and the creature walks to each. Click back on the first tile to make it walk the circuit forever. Click a second tile and then the first again for a back and forth patrol. Ctrl+Z removes the last tile, Esc finishes. Enemies stop patrolling while they fight.</div>"
+    + "<div id='wgPatHead' style='color:#c8c8ff;margin-bottom:4px'></div>"
+    + "<div><button class='wgBtn' data-wgtool='select'>Select tool</button><button class='wgBtn' id='wgPatDraw'>Draw patrol</button><button class='wgBtn' id='wgPatUndo'>Remove last</button><button class='wgBtn' id='wgPatClear'>Clear</button><button class='wgBtn' id='wgPatSave'>Save patrol</button><button class='wgBtn' id='wgPatRevert'>Revert</button></div>"
+    + "<div id='wgPatInfo'></div>"
     + "</div>"
     + "<div class='wgSecHead' data-wgsec='items'><span class='wgArrow'></span>Items</div><div class='wgSecBody' data-wgbody='items'>"
     + "<div>Drag items from the Creative items window (bottom left) onto a tile, creature or player. Drag them back into the window to delete them.</div>"
@@ -1967,7 +2100,7 @@ function gmBuildPanel() {
   document.body.appendChild(panel);
   WG.panel = panel;
 
-  const secDefaults = { layer: true, build: true, tiles: true, objects: true, spawn: false, creatures: false, items: false, moderation: false, time: false, schedule: false, override: false };
+  const secDefaults = { layer: true, build: true, tiles: true, objects: true, spawn: false, creatures: false, items: false, moderation: false, time: false, schedule: false, patrol: false, override: false };
   let secState = {};
   try {
     secState = JSON.parse(localStorage.getItem("pmdGmSections") || "{}") || {};
@@ -1994,6 +2127,7 @@ function gmBuildPanel() {
   ovBindUi();
   schedBind();
   schedRender();
+  patRender();
   document.getElementById("wgToggleCreative").addEventListener("click", () => {
     const creative = document.getElementById("wgCreative");
     const coords = document.getElementById("wgCoords");
@@ -3221,6 +3355,7 @@ function gmReadCreatureForm(existing, col, row) {
     level: document.getElementById("wgELevel").value,
     wander: document.getElementById("wgEWander").value,
     sensor: document.getElementById("wgESensor").value,
+    direction: document.getElementById("wgEDir").value,
     lines: document.getElementById("wgELines").value.split("\n"),
     boss: document.getElementById("wgEBoss").checked,
     respawn: document.getElementById("wgERespawnMode").value === "timed" ? (parseInt(document.getElementById("wgERespawnSec").value, 10) || 300) : 0,
@@ -3252,6 +3387,7 @@ function gmShowSelection() {
   document.getElementById("wgELevel").value = picked.level;
   document.getElementById("wgEWander").value = picked.wander;
   document.getElementById("wgESensor").value = picked.sensor;
+  document.getElementById("wgEDir").value = picked.direction || "down";
   document.getElementById("wgELines").value = (picked.lines || []).join("\n");
   document.getElementById("wgEBoss").checked = !!picked.boss;
   document.getElementById("wgERespawnMode").value = picked.respawn > 0 ? "timed" : "once";
@@ -4497,7 +4633,7 @@ function atkFindTarget(c, r) {
     if (pos.col !== c || pos.row !== r) continue;
     const meta = worldEntityMeta[id];
     if (meta) {
-      if (meta.kind !== "npc" || meta.fainted) continue;
+      if ((meta.kind !== "npc" && meta.kind !== "enemy") || meta.fainted) continue;
       return { id: id, type: "entity", name: meta.name, col: c, row: r };
     }
     return { id: id, type: "player", name: worldPlayerNames[id] || "Player", col: c, row: r };
@@ -6202,6 +6338,7 @@ window.worldHook = function (scene, data) {
       if (data.token === SCHED.token) {
         SCHED.prev[data.index] = data;
         schedRender();
+        patRender();
         gmDrawMarkers();
       }
       return true;

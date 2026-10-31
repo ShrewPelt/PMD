@@ -559,12 +559,20 @@ function startDuel(p, data) {
     }
   } else {
     targetRef = ctx.entities[String(data.id)] || null;
-    if (!targetRef || targetRef.kind !== "npc" || targetRef.layer !== p.layer) {
+    if (!targetRef || (targetRef.kind !== "npc" && targetRef.kind !== "enemy") || targetRef.layer !== p.layer) {
+      notice(p, "That target isn't there.");
+      return;
+    }
+    if (targetRef.kind === "enemy" && targetRef.down) {
       notice(p, "That target isn't there.");
       return;
     }
     if (targetRef.fainted) {
       notice(p, `${targetRef.name} has already fainted.`);
+      return;
+    }
+    if (targetRef._busy) {
+      notice(p, `${targetRef.name} is busy and can't be challenged right now.`);
       return;
     }
     if (targetRef._fight && fights[targetRef._fight]) {
@@ -577,7 +585,9 @@ function startDuel(p, data) {
     notice(p, `${targetRef.name} is out of range for ${moveName} (${dist} tiles, range ${rangeOf(md)}).`);
     return;
   }
-  const f = { id: nextFightId, layer: p.layer, actors: {}, turnActor: null, timer: null, busy: false, ended: false, log: [], turnToken: 0, duel: true, forceFirst: null };
+  const ambush = !targetIsPlayer && targetRef.kind === "enemy";
+  const unaware = ambush && !ctx.enemyCanSee(targetRef, p);
+  const f = { id: nextFightId, layer: p.layer, actors: {}, turnActor: null, timer: null, busy: false, ended: false, log: [], turnToken: 0, duel: !ambush, forceFirst: null };
   nextFightId = nextFightId + 1;
   fights[f.id] = f;
   const attacker = addActor(f, "player", p, "players");
@@ -592,7 +602,9 @@ function startDuel(p, data) {
   sendStart(f, p);
   expand(f);
   f.forceFirst = attacker;
-  pushLog(f, `${attacker.c.name} challenged ${defender.c.name}! Battle start!`);
+  if (unaware) pushLog(f, `${attacker.c.name} caught ${defender.c.name} off guard! Surprise attack!`);
+  else if (ambush) pushLog(f, `${attacker.c.name} attacked ${defender.c.name}! Battle start!`);
+  else pushLog(f, `${attacker.c.name} challenged ${defender.c.name}! Battle start!`);
   emitState(f);
   schedule(f, 700, () => {
     nextTurn(f);
@@ -1870,7 +1882,7 @@ function tick() {
       if (p.layer !== e.layer || p._fight || p.hp <= 0) continue;
       if (p._noFightUntil && Date.now() < p._noFightUntil) continue;
       const dist = chebyshev(p.col, p.row, e.col, e.row);
-      if (dist <= sensorOf(e) && dist < bestDist) {
+      if (ctx.enemyCanSee(e, p) && dist < bestDist) {
         bestDist = dist;
         target = p;
       }

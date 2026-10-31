@@ -2231,6 +2231,7 @@ function restoreNpcEntity(p) {
     moves: tpl && Array.isArray(tpl.moves) ? tpl.moves : [],
     respawn: 0,
     schedule: tpl && Array.isArray(tpl.schedule) ? tpl.schedule : [],
+    patrol: tpl && Array.isArray(tpl.patrol) ? tpl.patrol : [],
     _nextSpeech: Date.now() + SPEECH_MIN_MS,
     _lineIdx: 0
   };
@@ -2543,7 +2544,7 @@ function saveEntitiesNow() {
   for (const id of Object.keys(entities)) {
     const e = entities[id];
     if (e.kind === "companion") continue;
-    list.push({ id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, schedule: Array.isArray(e.schedule) && e.schedule.length > 0 ? e.schedule : undefined, fainted: e.fainted || false, faintUntil: e.faintUntil || 0 });
+    list.push({ id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, schedule: Array.isArray(e.schedule) && e.schedule.length > 0 ? e.schedule : undefined, patrol: Array.isArray(e.patrol) && e.patrol.length > 0 ? e.patrol : undefined, fainted: e.fainted || false, faintUntil: e.faintUntil || 0 });
   }
   writeJsonFile(ENTITIES_FILE, { nextId: entityNextId, list: list, respawns: respawnQueue });
 }
@@ -2559,7 +2560,7 @@ function publicEntity(e) {
 }
 
 function gmEntity(e) {
-  return { id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, state: e.state, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, schedule: Array.isArray(e.schedule) ? e.schedule : [], busy: !!e._busy, fainted: !!e.fainted };
+  return { id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, state: e.state, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, schedule: Array.isArray(e.schedule) ? e.schedule : [], patrol: Array.isArray(e.patrol) ? e.patrol : [], busy: !!e._busy, fainted: !!e.fainted };
 }
 
 function entityAt(layer, col, row, ignoreId) {
@@ -2864,7 +2865,10 @@ function handleGmSchedPreview(gm, data) {
     total = total + leg.steps;
     return { steps: leg.steps, ok: leg.ok, sec: Math.round(leg.steps * secPerStep * 10) / 10, gameMin: Math.round(leg.steps * secPerStep * gameMinPerSec) };
   });
-  sendSocket(gm.socket, { type: "gm_sched_preview", token: data.token, index: data.index, legs: legs, totalSteps: total, totalSec: Math.round(total * secPerStep * 10) / 10, totalGameMin: Math.round(total * secPerStep * gameMinPerSec), ok: route.ok, corners: schedCorners(startC, startR, route.path) });
+  const loops = routeLoops(points);
+  let lapSteps = total;
+  if (loops && legs.length > 0) lapSteps = total - legs[0].steps;
+  sendSocket(gm.socket, { type: "gm_sched_preview", token: data.token, index: data.index, loops: loops, lapSteps: lapSteps, lapSec: Math.round(lapSteps * secPerStep * 10) / 10, lapGameMin: Math.round(lapSteps * secPerStep * gameMinPerSec), legs: legs, totalSteps: total, totalSec: Math.round(total * secPerStep * 10) / 10, totalGameMin: Math.round(total * secPerStep * gameMinPerSec), ok: route.ok, corners: schedCorners(startC, startR, route.path) });
 }
 
 function handleGmSchedSet(gm, data) {
@@ -2890,6 +2894,12 @@ function schedActiveIndex(schedule, hour) {
 function schedStartEntry(e, index, hour, now) {
   const entry = e.schedule[index];
   const route = schedBuildRoute(e.layer, e.col, e.row, entry.points);
+  if (routeLoops(entry.points)) {
+    const loopState = { index: index, path: route.path, pos: 0, interact: entry.interact, done: false, lastAt: now, blocked: 0, offset: 0, loop: true };
+    e._busy = entry.interact === "busy";
+    e._sched = loopState;
+    return loopState;
+  }
   let hoursSince = hour - entry.time;
   if (hoursSince < 0) hoursSince = hoursSince + 24;
   const elapsedMs = hoursSince / 24 * worldClock.dayMinutes * 60000;
@@ -2934,6 +2944,7 @@ function schedElapsedSec(entry, hour) {
 }
 
 function schedSecondsLeft(e, state) {
+  if (state.loop) return Infinity;
   const entry = e.schedule[state.index];
   const totalSec = (state.path.length + state.offset) * ENTITY_TICK_MS / 1000;
   return totalSec - schedElapsedSec(entry, clockHour());
@@ -3023,6 +3034,17 @@ function schedBeginHold(e, p) {
 function schedHoldTick(e, state, now) {
   const hold = e._hold;
   if (hold.phase === "rush" || hold.phase === "fade") return true;
+  if (state.loop) {
+    if (hold.phase === "talk") {
+      if (now - hold.lastAt < SCHED_CHAT_IDLE_MS) return true;
+      hold.phase = "wait";
+      hold.until = now + SCHED_AFTER_CHAT_MS;
+      return true;
+    }
+    if (now < hold.until) return true;
+    e._hold = null;
+    return true;
+  }
   if (state.done) {
     e._hold = null;
     return false;
@@ -3060,6 +3082,14 @@ function schedTickEntity(e, now) {
   state.lastAt = now;
   if (state.done) return false;
   if (e._hold) return schedHoldTick(e, state, now);
+  if (state.pos >= state.path.length && state.loop) {
+    const entryLoop = e.schedule[index];
+    const lapRoute = schedBuildRoute(e.layer, e.col, e.row, entryLoop.points.slice(1));
+    state.path = lapRoute.path;
+    state.pos = 0;
+    if (lapRoute.path.length === 0) state.done = true;
+    return true;
+  }
   if (state.pos >= state.path.length) {
     state.done = true;
     e._busy = false;
@@ -3098,11 +3128,183 @@ function schedTickEntity(e, now) {
   return true;
 }
 
+function cleanPatrol(value) {
+  const out = [];
+  if (!Array.isArray(value)) return out;
+  for (const pt of value.slice(0, SCHED_MAX_POINTS)) {
+    if (!Array.isArray(pt)) continue;
+    const col = parseInt(pt[0], 10);
+    const row = parseInt(pt[1], 10);
+    if (!Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0 || col >= LAYER_W || row >= LAYER_H) continue;
+    out.push([col, row]);
+  }
+  return out;
+}
+
+function routeLoops(points) {
+  if (!Array.isArray(points) || points.length < 3) return false;
+  const first = points[0];
+  const last = points[points.length - 1];
+  return first[0] === last[0] && first[1] === last[1];
+}
+
+function handleGmPatrolSet(gm, data) {
+  const e = typeof data.id === "string" ? entities[data.id] : null;
+  if (!e || (e.kind !== "npc" && e.kind !== "enemy")) return;
+  e.patrol = cleanPatrol(data.points);
+  e._pat = null;
+  broadcastEntity(e, e.layer, e.col, e.row);
+  scheduleEntitySave();
+  let text = e.name + " has no patrol route.";
+  if (e.patrol.length > 0) text = e.name + (routeLoops(e.patrol) ? " now patrols a loop." : " now walks a one way route.");
+  sendSocket(gm.socket, { type: "gm_notice", text: text });
+}
+
+function patrolTick(e, now) {
+  const pts = e.patrol;
+  if (!Array.isArray(pts) || pts.length === 0) return false;
+  let st = e._pat;
+  if (!st) {
+    st = { i: 0, path: [], pos: 0, blocked: 0, fails: 0, done: false, arrived: false };
+    e._pat = st;
+  }
+  if (st.done) return false;
+  if (now < (e._patPause || 0)) return true;
+  if (st.pos >= st.path.length) {
+    if (st.arrived) {
+      st.i = st.i + 1;
+      st.arrived = false;
+      if (st.i >= pts.length) {
+        if (routeLoops(pts)) {
+          st.i = 1;
+        } else {
+          st.done = true;
+          e.homeCol = e.col;
+          e.homeRow = e.row;
+          scheduleEntitySave();
+          return false;
+        }
+      }
+    }
+    const target = pts[st.i];
+    if (e.col === target[0] && e.row === target[1]) {
+      st.path = [];
+      st.pos = 0;
+      st.arrived = true;
+      return true;
+    }
+    const route = schedFindPath(e.layer, e.col, e.row, target[0], target[1]);
+    if (route === null || route.length === 0) {
+      st.fails = st.fails + 1;
+      st.i = st.i + 1;
+      if (st.i >= pts.length) st.i = 0;
+      if (st.fails > pts.length * 2) {
+        st.done = true;
+        return false;
+      }
+      return true;
+    }
+    st.fails = 0;
+    st.path = route;
+    st.pos = 0;
+    st.arrived = true;
+  }
+  const next = st.path[st.pos];
+  if (Math.abs(next[0] - e.col) + Math.abs(next[1] - e.row) !== 1) {
+    st.path = [];
+    st.pos = 0;
+    st.arrived = false;
+    return true;
+  }
+  if (entityAt(e.layer, next[0], next[1], e.id) || playerAt(e.layer, next[0], next[1])) {
+    st.blocked = st.blocked + 1;
+    if (st.blocked >= SCHED_BLOCKED_REPATH) {
+      st.blocked = 0;
+      st.path = [];
+      st.pos = 0;
+      st.arrived = false;
+    }
+    return true;
+  }
+  st.blocked = 0;
+  const oldCol = e.col;
+  const oldRow = e.row;
+  const dc = next[0] - oldCol;
+  const dr = next[1] - oldRow;
+  e.col = next[0];
+  e.row = next[1];
+  if (Math.abs(dc) >= Math.abs(dr)) e.direction = dc > 0 ? "right" : "left";
+  else e.direction = dr > 0 ? "down" : "up";
+  st.pos = st.pos + 1;
+  broadcastEntity(e, e.layer, oldCol, oldRow);
+  scheduleEntitySave();
+  return true;
+}
+
+function sightBlockedAt(layer, col, row) {
+  const L = layers[layer];
+  if (!L || VISION_BLOCK_RE === null) return false;
+  const obj = L.objects[col + "," + row];
+  if (!obj) return false;
+  const walk = !obj.solid || !!(L.passable && L.passable[col + "," + row]);
+  if (walk) return false;
+  return VISION_BLOCK_RE.test(obj.name);
+}
+
+function lineOfSightClear(layer, c0, r0, c1, r1) {
+  let x = c0;
+  let y = r0;
+  const dx = Math.abs(c1 - c0);
+  const dy = Math.abs(r1 - r0);
+  const sx = c0 < c1 ? 1 : -1;
+  const sy = r0 < r1 ? 1 : -1;
+  let err = dx - dy;
+  for (let guard = 0; guard < 64; guard++) {
+    if (x === c1 && y === r1) return true;
+    if (!(x === c0 && y === r0) && sightBlockedAt(layer, x, y)) return false;
+    const e2 = 2 * err;
+    if (e2 > -dy) {
+      err = err - dy;
+      x = x + sx;
+    }
+    if (e2 < dx) {
+      err = err + dx;
+      y = y + sy;
+    }
+  }
+  return true;
+}
+
+function enemyCanSee(e, p) {
+  if (!e || !p || e.layer !== p.layer) return false;
+  const dc = p.col - e.col;
+  const dr = p.row - e.row;
+  const dist = Math.max(Math.abs(dc), Math.abs(dr));
+  const reach = Math.min(typeof e.sensor === "number" ? e.sensor : DEFAULT_SENSOR, 5);
+  if (dist > reach) return false;
+  const facing = DELTAS[e.direction] || DELTAS.down;
+  const dot = dc * facing.dc + dr * facing.dr;
+  const len = Math.sqrt(dc * dc + dr * dr);
+  if (len === 0) return true;
+  const half = (Number(VISION.coneDegrees) || 110) * Math.PI / 360;
+  if (dot / len < Math.cos(half)) return false;
+  return lineOfSightClear(e.layer, e.col, e.row, p.col, p.row);
+}
+
+function enemySeesAnyPlayer(e) {
+  for (const pid in worldSession.players) {
+    const q = worldSession.players[pid];
+    if (q.layer !== e.layer || q.hp <= 0) continue;
+    if (enemyCanSee(e, q)) return true;
+  }
+  return false;
+}
+
 function queueEnemyRespawn(e) {
   if (!e || e.kind !== "enemy") return;
   const seconds = parseInt(e.respawn, 10);
   if (!Number.isInteger(seconds) || seconds <= 0) return;
-  const tpl = { kind: "enemy", name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, homeCol: e.homeCol, homeRow: e.homeRow, direction: "down", wander: e.wander, sensor: e.sensor, lines: [], boss: !!e.boss, ivs: e.ivs ? JSON.parse(JSON.stringify(e.ivs)) : null, accessories: e.accessories ? JSON.parse(JSON.stringify(e.accessories)) : null, loot: Array.isArray(e.loot) ? JSON.parse(JSON.stringify(e.loot)) : [], moves: Array.isArray(e.moves) ? e.moves.slice() : [], respawn: seconds };
+  const tpl = { kind: "enemy", name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, homeCol: e.homeCol, homeRow: e.homeRow, direction: "down", wander: e.wander, sensor: e.sensor, lines: [], boss: !!e.boss, ivs: e.ivs ? JSON.parse(JSON.stringify(e.ivs)) : null, accessories: e.accessories ? JSON.parse(JSON.stringify(e.accessories)) : null, loot: Array.isArray(e.loot) ? JSON.parse(JSON.stringify(e.loot)) : [], moves: Array.isArray(e.moves) ? e.moves.slice() : [], patrol: Array.isArray(e.patrol) ? JSON.parse(JSON.stringify(e.patrol)) : [], direction: e.direction, respawn: seconds };
   respawnQueue.push({ srcId: e.id, at: Date.now() + seconds * 1000, tpl: tpl });
   scheduleEntitySave();
 }
@@ -3128,7 +3330,7 @@ function respawnTick(now) {
     respawnQueue.splice(i, 1);
     const id = "e" + entityNextId;
     entityNextId = entityNextId + 1;
-    const e = { id: id, kind: "enemy", name: t.name, species: t.species, dex: t.dex, level: t.level, layer: t.layer, col: spot.col, row: spot.row, homeCol: t.homeCol, homeRow: t.homeRow, direction: "down", state: "idle", wander: t.wander, sensor: t.sensor, lines: [], boss: t.boss, ivs: t.ivs, accessories: t.accessories, loot: t.loot, moves: t.moves, respawn: t.respawn, _nextSpeech: now + SPEECH_MIN_MS, _lineIdx: 0 };
+    const e = { id: id, kind: "enemy", name: t.name, species: t.species, dex: t.dex, level: t.level, layer: t.layer, col: spot.col, row: spot.row, homeCol: t.homeCol, homeRow: t.homeRow, direction: t.direction || "down", state: "idle", patrol: Array.isArray(t.patrol) ? t.patrol : [], wander: t.wander, sensor: t.sensor, lines: [], boss: t.boss, ivs: t.ivs, accessories: t.accessories, loot: t.loot, moves: t.moves, respawn: t.respawn, _nextSpeech: now + SPEECH_MIN_MS, _lineIdx: 0 };
     entities[id] = e;
     broadcastEntity(e, null, 0, 0);
     scheduleEntitySave();
@@ -3157,12 +3359,15 @@ function entityTick() {
     }
 
     if (e.kind === "enemy") {
-      const near = nearestPlayerTo(e);
-      const nextState = near && near.dist <= e.sensor ? "alert" : "idle";
+      const nextState = enemySeesAnyPlayer(e) ? "alert" : "idle";
       if (nextState !== e.state) {
         e.state = nextState;
         broadcastEntity(e, e.layer, e.col, e.row);
       }
+    }
+
+    if (e.state !== "alert" && Array.isArray(e.patrol) && e.patrol.length > 0 && (e.kind === "npc" || e.kind === "enemy")) {
+      if (patrolTick(e, now)) continue;
     }
 
     if (e.kind === "npc" && e.lines.length > 0 && now >= e._nextSpeech) {
@@ -3320,6 +3525,7 @@ function handleGmEntitySet(gm, data) {
     e.homeCol = col;
     e.homeRow = row;
   }
+  if (src.direction === "up" || src.direction === "down" || src.direction === "left" || src.direction === "right") e.direction = src.direction;
   e.wander = Number.isNaN(wander) ? DEFAULT_WANDER : wander;
   e.sensor = Number.isNaN(sensor) ? DEFAULT_SENSOR : sensor;
   e.lines = kind === "npc" ? cleanLines(src.lines) : [];
@@ -4879,6 +5085,7 @@ function handleInteract(p) {
     sendPlayer(p, { type: "item_result", ok: false, text: best.name + " is busy and can't talk right now." });
     return;
   }
+  if (Array.isArray(best.patrol) && best.patrol.length > 0) best._patPause = Date.now() + SCHED_CHAT_IDLE_MS;
   if (best._sched && !best._sched.done) {
     if (!schedBeginHold(best, p)) {
       sendPlayer(p, { type: "item_result", ok: false, text: best.name + " is in a hurry." });
@@ -5373,6 +5580,11 @@ function handleGmMessage(gm, data) {
     return;
   }
 
+  if (data.type === "gm_patrol_set") {
+    handleGmPatrolSet(gm, data);
+    return;
+  }
+
   if (data.type === "gm_sched_set") {
     handleGmSchedSet(gm, data);
     return;
@@ -5762,7 +5974,7 @@ function startWorldPlayer(socket, pass, info, spawn) {
   if (info.npcName) {
     const worldNpc = findWorldNpcEntity(info.npcName);
     if (worldNpc) {
-      takenTpl = { name: worldNpc.name, species: worldNpc.species, dex: worldNpc.dex, level: worldNpc.level, wander: worldNpc.wander, sensor: worldNpc.sensor, lines: Array.isArray(worldNpc.lines) ? worldNpc.lines.slice() : [], schedule: Array.isArray(worldNpc.schedule) ? worldNpc.schedule : [], ivs: worldNpc.ivs || null, accessories: worldNpc.accessories || null, loot: Array.isArray(worldNpc.loot) ? worldNpc.loot : [], moves: Array.isArray(worldNpc.moves) ? worldNpc.moves : [] };
+      takenTpl = { name: worldNpc.name, species: worldNpc.species, dex: worldNpc.dex, level: worldNpc.level, wander: worldNpc.wander, sensor: worldNpc.sensor, lines: Array.isArray(worldNpc.lines) ? worldNpc.lines.slice() : [], schedule: Array.isArray(worldNpc.schedule) ? worldNpc.schedule : [], patrol: Array.isArray(worldNpc.patrol) ? worldNpc.patrol : [], ivs: worldNpc.ivs || null, accessories: worldNpc.accessories || null, loot: Array.isArray(worldNpc.loot) ? worldNpc.loot : [], moves: Array.isArray(worldNpc.moves) ? worldNpc.moves : [] };
       takenDirection = worldNpc.direction || null;
       layer = worldNpc.layer;
       startCol = worldNpc.col;
@@ -6815,7 +7027,8 @@ worldCombat.init({
   queueWorldSave: queueWorldSave,
   queueEnemyRespawn: queueEnemyRespawn,
   cellInView: cellInView,
-  isDummyAt: isDummyAt
+  isDummyAt: isDummyAt,
+  enemyCanSee: enemyCanSee
 });
 
 setInterval(saveWorldState, WORLD_SAVE_INTERVAL);
