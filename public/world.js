@@ -227,6 +227,79 @@ function worldEnsureAsset(scene, kind, name) {
   return null;
 }
 
+const TUFF = { cells: [], count: 0, active: false, slow: 2 };
+
+function isTuffName(name) {
+  return /tuff/i.test(String(name || ""));
+}
+
+function tuffDown() {
+  const target = viewStep * (Math.PI / 2) * VIEW_SIGN;
+  return { x: Math.round(Math.sin(target)), y: Math.round(Math.cos(target)) };
+}
+
+function tuffPlace(sp) {
+  sp.x = (sp.cellC + 0.5) * TILE - 1 + 0.5 * TILE * Math.sin(viewRot);
+  sp.y = (sp.cellR + 0.5) * TILE - 1 + 0.5 * TILE * Math.cos(viewRot);
+}
+
+function tuffUnderPlayer() {
+  if (TUFF.cells.length === 0 || !player) return false;
+  const d = tuffDown();
+  const px = player.x / TILE;
+  const py = player.y / TILE;
+  const pc = Math.floor(px);
+  const pr = Math.floor(py);
+  for (const cell of TUFF.cells) {
+    if (Math.abs(cell[0] - pc) > 2 || Math.abs(cell[1] - pr) > 2) continue;
+    const cx = cell[0] + 0.5 + 0.5 * d.x;
+    const cy = cell[1] + 0.5 + 0.5 * d.y;
+    const halfX = d.x !== 0 ? 1.0 : 0.5;
+    const halfY = d.y !== 0 ? 1.0 : 0.5;
+    if (Math.abs(px - cx) < halfX && Math.abs(py - cy) < halfY) return true;
+  }
+  return false;
+}
+
+function tuffFrame() {
+  let count = 0;
+  for (const key in worldObjectPool) {
+    const sp = worldObjectPool[key];
+    if (sp && sp.active && sp.tuff) count++;
+  }
+  TUFF.count = count;
+  if (count === 0) {
+    if (TUFF.active) {
+      TUFF.active = false;
+      if (player) player.setDepth(10);
+      for (const id in otherPlayers) {
+        const o = otherPlayers[id];
+        if (o && o !== "loading") o.setDepth(10);
+      }
+    }
+    return;
+  }
+  TUFF.active = true;
+  if (!player) return;
+  const sx = Math.sin(viewRot);
+  const sy = Math.cos(viewRot);
+  const feet = player.feetOff !== undefined ? player.feetOff : TILE / 2 - 2;
+  const band = (s) => 10.5 + Math.max(-1, Math.min(1, s / 4000)) * 0.45;
+  player.setDepth(10.5);
+  for (const id in otherPlayers) {
+    const o = otherPlayers[id];
+    if (!o || o === "loading") continue;
+    o.setDepth(band((o.x - player.x) * sx + (o.y - player.y) * sy));
+  }
+  for (const key in worldObjectPool) {
+    const sp = worldObjectPool[key];
+    if (!sp || !sp.active || !sp.tuff) continue;
+    tuffPlace(sp);
+    const anchor = (sp.x - player.x) * sx + (sp.y - player.y) * sy + 0.5 * TILE - feet;
+    sp.setDepth(band(anchor));
+  }
+}
+
 function worldSyncPool(scene, pool, wanted, kind) {
   for (const key in pool) {
     if (!wanted[key]) {
@@ -268,8 +341,10 @@ function worldSyncPool(scene, pool, wanted, kind) {
     } else {
       sp.cellC = w.c;
       sp.cellR = w.r;
-      sp.walkObj = !!w.walk;
-      sp.setDepth(w.over ? 4 : (w.walk ? 11 : 3));
+      sp.tuff = isTuffName(w.name);
+      sp.walkObj = sp.tuff ? false : !!w.walk;
+      if (sp.tuff) tuffPlace(sp);
+      else sp.setDepth(w.over ? 4 : (w.walk ? 11 : 3));
       sp.objDef = visDefForName(w.name);
       sp.setFlipX(!!w.flip);
       sp.objRotRad = (w.rot || 0) * Math.PI / 180;
@@ -574,6 +649,10 @@ function drawPlayerView(scene, data) {
     if (o.b) VIS.block[o.col + "," + o.row] = true;
     wantedObjs[o.col + "," + o.row + (o.k ? "|k" : "")] = { name: o.name, c: o.col, r: o.row, rot: o.rot || 0, flip: !!o.flip, walk: !!o.w, over: !!o.k };
   }
+  TUFF.cells = [];
+  for (const o of data.objects || []) {
+    if (isTuffName(o.name)) TUFF.cells.push([o.col, o.row]);
+  }
   worldSyncPool(scene, worldArtPool, wantedArt, "tile");
   worldSyncPool(scene, worldObjectPool, wantedObjs, "object");
   worldSyncItems(scene, data.items);
@@ -795,6 +874,7 @@ function worldFrame(scene) {
   worldGuard(musicFrame, scene);
   worldGuard(entityLabelsFrame, scene);
   worldGuard(visFrame, scene);
+  if (!worldGmMode) worldGuard(tuffFrame, scene);
   if (worldGmMode) {
     gmSyncArt(scene);
     gmUpdateGrid(scene);
@@ -5586,7 +5666,7 @@ function freeMoveFrame() {
   const vx = v[0] / len;
   const vy = v[1] / len;
   const dir = Math.abs(vx) >= Math.abs(vy) ? (vx > 0 ? "right" : "left") : (vy > 0 ? "down" : "up");
-  const step = FREE.speed * TILE * dt;
+  const step = (tuffUnderPlayer() ? Math.max(0.5, FREE.speed - TUFF.slow) : FREE.speed) * TILE * dt;
   let nx = player.x;
   let ny = player.y;
   if (step > 0) {

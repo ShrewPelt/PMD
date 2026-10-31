@@ -851,7 +851,7 @@ function loadLayers() {
       }
       const objList = Array.isArray(saved.objects) ? saved.objects : [];
       for (const o of objList) {
-        if (Array.isArray(o) && o.length >= 3) L.objects[o[0] + "," + o[1]] = { name: String(o[2]), solid: o[3] !== 0, rot: cleanRot(o[4]), flip: o[5] === 1 };
+        if (Array.isArray(o) && o.length >= 3) L.objects[o[0] + "," + o[1]] = { name: String(o[2]), solid: o[3] !== 0 && !/tuff/i.test(String(o[2])), rot: cleanRot(o[4]), flip: o[5] === 1 };
       }
       const passList = Array.isArray(saved.passable) ? saved.passable : [];
       for (const pc of passList) {
@@ -5473,7 +5473,7 @@ function applyObjects(layer, ops) {
     const c = op[0];
     const r = op[1];
     const name = typeof op[2] === "string" ? op[2] : "";
-    const solid = op[3] === 0 || op[3] === false ? false : true;
+    const solid = op[3] === 0 || op[3] === false || /tuff/i.test(name) ? false : true;
     const rot = cleanRot(op[4]);
     const flip = op[5] === 1 || op[5] === true;
     if (!Number.isInteger(c) || !Number.isInteger(r)) continue;
