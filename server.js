@@ -2232,6 +2232,7 @@ function restoreNpcEntity(p) {
     respawn: 0,
     schedule: tpl && Array.isArray(tpl.schedule) ? tpl.schedule : [],
     patrol: tpl && Array.isArray(tpl.patrol) ? tpl.patrol : [],
+    chatter: !!(tpl && tpl.chatter),
     _nextSpeech: Date.now() + SPEECH_MIN_MS,
     _lineIdx: 0
   };
@@ -2544,7 +2545,7 @@ function saveEntitiesNow() {
   for (const id of Object.keys(entities)) {
     const e = entities[id];
     if (e.kind === "companion") continue;
-    list.push({ id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, schedule: Array.isArray(e.schedule) && e.schedule.length > 0 ? e.schedule : undefined, patrol: Array.isArray(e.patrol) && e.patrol.length > 0 ? e.patrol : undefined, fainted: e.fainted || false, faintUntil: e.faintUntil || 0 });
+    list.push({ id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, schedule: Array.isArray(e.schedule) && e.schedule.length > 0 ? e.schedule : undefined, patrol: Array.isArray(e.patrol) && e.patrol.length > 0 ? e.patrol : undefined, chatter: e.chatter ? true : undefined, fainted: e.fainted || false, faintUntil: e.faintUntil || 0 });
   }
   writeJsonFile(ENTITIES_FILE, { nextId: entityNextId, list: list, respawns: respawnQueue });
 }
@@ -2560,7 +2561,7 @@ function publicEntity(e) {
 }
 
 function gmEntity(e) {
-  return { id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, state: e.state, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, schedule: Array.isArray(e.schedule) ? e.schedule : [], patrol: Array.isArray(e.patrol) ? e.patrol : [], busy: !!e._busy, fainted: !!e.fainted };
+  return { id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, state: e.state, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, schedule: Array.isArray(e.schedule) ? e.schedule : [], patrol: Array.isArray(e.patrol) ? e.patrol : [], chatter: !!e.chatter, busy: !!e._busy, fainted: !!e.fainted };
 }
 
 function entityAt(layer, col, row, ignoreId) {
@@ -3370,7 +3371,7 @@ function entityTick() {
       if (patrolTick(e, now)) continue;
     }
 
-    if (e.kind === "npc" && e.lines.length > 0 && now >= e._nextSpeech) {
+    if (e.kind === "npc" && e.chatter && e.lines.length > 0 && now >= e._nextSpeech) {
       e._nextSpeech = now + SPEECH_MIN_MS + Math.random() * (SPEECH_MAX_MS - SPEECH_MIN_MS);
       let seen = false;
       for (const pid in worldSession.players) {
@@ -3529,6 +3530,7 @@ function handleGmEntitySet(gm, data) {
   e.wander = Number.isNaN(wander) ? DEFAULT_WANDER : wander;
   e.sensor = Number.isNaN(sensor) ? DEFAULT_SENSOR : sensor;
   e.lines = kind === "npc" ? cleanLines(src.lines) : [];
+  e.chatter = kind === "npc" && !!src.chatter;
   {
     e.boss = kind === "enemy" ? !!src.boss : false;
     e.ivs = cleanIvs(src.ivs);
@@ -5974,7 +5976,7 @@ function startWorldPlayer(socket, pass, info, spawn) {
   if (info.npcName) {
     const worldNpc = findWorldNpcEntity(info.npcName);
     if (worldNpc) {
-      takenTpl = { name: worldNpc.name, species: worldNpc.species, dex: worldNpc.dex, level: worldNpc.level, wander: worldNpc.wander, sensor: worldNpc.sensor, lines: Array.isArray(worldNpc.lines) ? worldNpc.lines.slice() : [], schedule: Array.isArray(worldNpc.schedule) ? worldNpc.schedule : [], patrol: Array.isArray(worldNpc.patrol) ? worldNpc.patrol : [], ivs: worldNpc.ivs || null, accessories: worldNpc.accessories || null, loot: Array.isArray(worldNpc.loot) ? worldNpc.loot : [], moves: Array.isArray(worldNpc.moves) ? worldNpc.moves : [] };
+      takenTpl = { name: worldNpc.name, species: worldNpc.species, dex: worldNpc.dex, level: worldNpc.level, wander: worldNpc.wander, sensor: worldNpc.sensor, lines: Array.isArray(worldNpc.lines) ? worldNpc.lines.slice() : [], schedule: Array.isArray(worldNpc.schedule) ? worldNpc.schedule : [], patrol: Array.isArray(worldNpc.patrol) ? worldNpc.patrol : [], chatter: !!worldNpc.chatter, ivs: worldNpc.ivs || null, accessories: worldNpc.accessories || null, loot: Array.isArray(worldNpc.loot) ? worldNpc.loot : [], moves: Array.isArray(worldNpc.moves) ? worldNpc.moves : [] };
       takenDirection = worldNpc.direction || null;
       layer = worldNpc.layer;
       startCol = worldNpc.col;

@@ -82,7 +82,11 @@ function entityLabelsFrame(scene) {
       label.setDepth(200);
       worldEntityLabels[id] = label;
     }
-    if (meta.kind === "corpse") {
+    const hideName = meta.kind === "npc" && !worldGmMode && !meta.fainted;
+    if (hideName) {
+      label.setText("");
+      if ((sp.visBase !== undefined ? sp.visBase : sp.alpha) < 1 && (!COMBAT.active || !COMBAT.actors[id])) visSetBaseAlpha(sp, 1);
+    } else if (meta.kind === "corpse") {
       label.setText(meta.name + " (fainted) T: loot");
       label.setColor("#d9c27a");
       if (!COMBAT.active || !COMBAT.actors[id]) visSetBaseAlpha(sp, 0.45);
@@ -2030,6 +2034,7 @@ function gmBuildPanel() {
     + "<div style='margin-top:4px'>Name <input type='text' id='wgEName' placeholder='optional'></div>"
     + "<div style='margin-top:4px'>Level <input type='number' id='wgELevel' value='5' min='1' max='100'> Wander <input type='number' id='wgEWander' value='4' min='0' max='30'></div>"
     + "<div style='margin-top:4px'>Sensor range <input type='number' id='wgESensor' value='5' min='1' max='5'> (enemies, max 5)</div>"
+    + "<div style='margin-top:4px'><label><input type='checkbox' id='wgEChatter'> NPC also speaks on its own (random bubbles). Off = only talks when interacted with.</label></div>"
     + "<div style='margin-top:4px'>Facing <select id='wgEDir'><option value='down'>Down</option><option value='up'>Up</option><option value='left'>Left</option><option value='right'>Right</option></select> (enemies only see in front of them, like the player's cone)</div>"
     + "<div id='wgEEnemyBox' style='margin-top:6px;padding:6px;border:1px solid #55557a;border-radius:6px'>"
     + "<div><b>Enemy build</b></div>"
@@ -3356,6 +3361,7 @@ function gmReadCreatureForm(existing, col, row) {
     wander: document.getElementById("wgEWander").value,
     sensor: document.getElementById("wgESensor").value,
     direction: document.getElementById("wgEDir").value,
+    chatter: document.getElementById("wgEChatter").checked,
     lines: document.getElementById("wgELines").value.split("\n"),
     boss: document.getElementById("wgEBoss").checked,
     respawn: document.getElementById("wgERespawnMode").value === "timed" ? (parseInt(document.getElementById("wgERespawnSec").value, 10) || 300) : 0,
@@ -3388,6 +3394,7 @@ function gmShowSelection() {
   document.getElementById("wgEWander").value = picked.wander;
   document.getElementById("wgESensor").value = picked.sensor;
   document.getElementById("wgEDir").value = picked.direction || "down";
+  document.getElementById("wgEChatter").checked = !!picked.chatter;
   document.getElementById("wgELines").value = (picked.lines || []).join("\n");
   document.getElementById("wgEBoss").checked = !!picked.boss;
   document.getElementById("wgERespawnMode").value = picked.respawn > 0 ? "timed" : "once";
@@ -6278,7 +6285,7 @@ window.worldHook = function (scene, data) {
     }
     if (data.type === "npc_say") {
       const sprite = otherPlayers[data.id];
-      if (sprite && sprite !== "loading") showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text);
+      if (sprite && sprite !== "loading") showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text, data.name);
       return true;
     }
     if (data.type === "e_fade") {
@@ -6362,7 +6369,7 @@ window.worldHook = function (scene, data) {
     }
     if (data.type === "npc_say") {
       const sprite = otherPlayers[data.id];
-      if (sprite && sprite !== "loading") showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text);
+      if (sprite && sprite !== "loading") showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text, data.name);
       return true;
     }
     if (data.type === "e_fade") {
