@@ -2047,8 +2047,8 @@ function gmCellSig(c, r) {
 
 function gmBucketFill(c0, r0) {
   if (!gmInBounds(c0, r0)) return;
-  if (WG.tool === "tile" && !WG.tileName) { gmNotice("Pick a tile first."); return; }
-  if (WG.tool === "object" && !WG.objName) { gmNotice("Pick an object first."); return; }
+  if (WG.tool === "tile" && !WG.tileName) { itemToast("Bucket fill: pick a tile first."); return; }
+  if (WG.tool === "object" && !WG.objName) { itemToast("Bucket fill: pick an object first."); return; }
   const target = gmCellSig(c0, r0);
   const seen = new Set();
   const queue = [r0 * WORLD_COLS + c0];
@@ -2062,6 +2062,7 @@ function gmBucketFill(c0, r0) {
     cells.push([c, r]);
     if (cells.length > GM_FILL_LIMIT) {
       gmNotice("That area is not closed. The fill would spill past " + GM_FILL_LIMIT + " tiles, so nothing was changed.");
+      itemToast("Bucket fill: that area is not closed, so there is a gap somewhere in the outline. Zoom out to find it. Nothing was changed.");
       return;
     }
     const nbrs = [[c + 1, r], [c - 1, r], [c, r + 1], [c, r - 1]];
@@ -2081,6 +2082,7 @@ function gmBucketFill(c0, r0) {
   }
   WG.strokeUndo = null;
   gmNotice("Filled " + cells.length + " tiles.");
+  itemToast("Bucket fill: filled " + cells.length + " tiles.");
 }
 
 function gmPointerDown(scene, pointer) {
