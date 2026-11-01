@@ -2045,6 +2045,49 @@ function gmCellSig(c, r) {
   return WG.rows[r].charAt(c) + WG.art[r].charAt(c);
 }
 
+function gmShowLeak(c0, r0, target) {
+  const R = 150;
+  const parent = new Map();
+  const startIdx = r0 * WORLD_COLS + c0;
+  parent.set(startIdx, -1);
+  const queue = [startIdx];
+  let head = 0;
+  let exitIdx = -1;
+  while (head < queue.length && exitIdx < 0) {
+    const idx = queue[head++];
+    const c = idx % WORLD_COLS;
+    const r = (idx - c) / WORLD_COLS;
+    if (Math.abs(c - c0) >= R || Math.abs(r - r0) >= R) { exitIdx = idx; break; }
+    const nbrs = [[c + 1, r], [c - 1, r], [c, r + 1], [c, r - 1]];
+    for (const n of nbrs) {
+      if (!gmInBounds(n[0], n[1])) continue;
+      const ni = n[1] * WORLD_COLS + n[0];
+      if (parent.has(ni)) continue;
+      if (gmCellSig(n[0], n[1]) !== target) continue;
+      parent.set(ni, idx);
+      queue.push(ni);
+    }
+  }
+  if (exitIdx < 0) return false;
+  const scene = sceneRef;
+  if (!scene) return false;
+  if (WG.leakGfx) WG.leakGfx.destroy();
+  const g = scene.add.graphics();
+  g.setDepth(100000);
+  g.fillStyle(0xff2a2a, 0.85);
+  let cur = exitIdx;
+  while (cur !== -1) {
+    const c = cur % WORLD_COLS;
+    const r = (cur - c) / WORLD_COLS;
+    g.fillRect(c * TILE, r * TILE, TILE - 2, TILE - 2);
+    cur = parent.get(cur);
+  }
+  WG.leakGfx = g;
+  if (WG.leakTimer) clearTimeout(WG.leakTimer);
+  WG.leakTimer = setTimeout(() => { if (WG.leakGfx) { WG.leakGfx.destroy(); WG.leakGfx = null; } }, 12000);
+  return true;
+}
+
 function gmBucketFill(c0, r0) {
   if (!gmInBounds(c0, r0)) return;
   if (WG.tool === "tile" && !WG.tileName) { itemToast("Bucket fill: pick a tile first."); return; }
@@ -2062,7 +2105,7 @@ function gmBucketFill(c0, r0) {
     cells.push([c, r]);
     if (cells.length > GM_FILL_LIMIT) {
       gmNotice("That area is not closed. The fill would spill past " + GM_FILL_LIMIT + " tiles, so nothing was changed.");
-      itemToast("Bucket fill: that area is not closed, so there is a gap somewhere in the outline. Zoom out to find it. Nothing was changed.");
+      itemToast(gmShowLeak(c0, r0, target) ? "Bucket fill: that area is not closed. The red line shows where the fill escapes through a gap in the outline. Close the gap with the Pencil and try again. Nothing was changed." : "Bucket fill: that area is not closed, so there is a gap somewhere in the outline. Nothing was changed.");
       return;
     }
     const nbrs = [[c + 1, r], [c - 1, r], [c, r + 1], [c, r - 1]];
