@@ -1365,7 +1365,10 @@ function rectCells(c0, r0, c1, r1, outline) {
 }
 
 const GM_OV = { zoom: 0.22, on: false, img: null, tex: null, key: "", rowsRef: null, last: 0, colors: {}, state: {}, maxW: 1600, maxH: 1000, dirty: false };
-const GM_MIN_ZOOM = 0.03;
+function gmMinZoom(cam) {
+  const fit = Math.min(cam.width / (WORLD_COLS * TILE), cam.height / (WORLD_ROWS * TILE));
+  return fit * 0.92;
+}
 
 function gmOvColorFor(name) {
   const base = worldParseTileName(name).base;
@@ -1428,7 +1431,21 @@ function gmOvDropDetail(scene) {
   if (WG.hoverSprite) WG.hoverSprite.setVisible(false);
 }
 
-function gmOvBuild(scene, c0, r0, w, h) {
+function gmOvBorder(scene) {
+  if (!GM_OV.border) {
+    GM_OV.border = scene.add.graphics();
+    GM_OV.border.setDepth(3);
+  }
+  const z = scene.cameras.main.zoom;
+  if (GM_OV.borderZoom === z && GM_OV.border.visible) return;
+  GM_OV.borderZoom = z;
+  GM_OV.border.clear();
+  GM_OV.border.lineStyle(Math.max(2, 3 / z), 0x6666aa, 0.9);
+  GM_OV.border.strokeRect(0, 0, WORLD_COLS * TILE, WORLD_ROWS * TILE);
+  GM_OV.border.setVisible(true);
+}
+
+function gmOvBuild(scene, c0, r0, w, h, k) {
   if (!GM_OV.tex) {
     GM_OV.tex = scene.textures.createCanvas("gmOverview", GM_OV.maxW, GM_OV.maxH);
     GM_OV.tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
@@ -1441,33 +1458,38 @@ function gmOvBuild(scene, c0, r0, w, h) {
   const imgData = ctx2.createImageData(w, h);
   const out = imgData.data;
   const palCache = {};
-  for (let y = 0; y < h; y++) {
-    const rr = r0 + y;
+  const sample = (cc, rr) => {
+    if (cc < 0 || rr < 0 || cc >= WORLD_COLS || rr >= WORLD_ROWS) return null;
     const line = WG.rows[rr];
+    if (!line) return null;
+    const ch = line[cc];
+    if (ch === undefined || ch === " ") return null;
+    if (ch === "#") return [107, 79, 58];
+    if (ch === "x") return [192, 57, 43];
+    if (ch === "P") return [155, 89, 182];
     const artLine = WG.art[rr];
-    if (!line) continue;
+    const ac = artLine ? artLine[cc] : " ";
+    const pname = ac && ac !== " " ? WG.palette[ac] : null;
+    if (!pname) return [58, 58, 85];
+    let rgb = palCache[ac];
+    if (!rgb) {
+      rgb = gmOvColorFor(pname);
+      palCache[ac] = rgb;
+    }
+    return rgb;
+  };
+  const q = Math.floor(k / 3);
+  for (let y = 0; y < h; y++) {
+    const baseR = r0 + y * k + Math.floor(k / 2);
+    if (baseR >= WORLD_ROWS) break;
     for (let x = 0; x < w; x++) {
-      const cc = c0 + x;
-      const ch = line[cc];
-      const i = (y * w + x) * 4;
-      if (ch === undefined || ch === " ") continue;
-      let rgb;
-      if (ch === "#") rgb = [107, 79, 58];
-      else if (ch === "x") rgb = [192, 57, 43];
-      else if (ch === "P") rgb = [155, 89, 182];
-      else {
-        const ac = artLine ? artLine[cc] : " ";
-        const pname = ac && ac !== " " ? WG.palette[ac] : null;
-        if (pname) {
-          rgb = palCache[ac];
-          if (!rgb) {
-            rgb = gmOvColorFor(pname);
-            palCache[ac] = rgb;
-          }
-        } else {
-          rgb = [58, 58, 85];
-        }
+      const baseC = c0 + x * k + Math.floor(k / 2);
+      let rgb = sample(baseC, baseR);
+      if (!rgb && k > 1) {
+        rgb = sample(baseC - q, baseR - q) || sample(baseC + q, baseR - q) || sample(baseC - q, baseR + q) || sample(baseC + q, baseR + q);
       }
+      if (!rgb) continue;
+      const i = (y * w + x) * 4;
       out[i] = rgb[0];
       out[i + 1] = rgb[1];
       out[i + 2] = rgb[2];
@@ -1477,7 +1499,7 @@ function gmOvBuild(scene, c0, r0, w, h) {
   ctx2.putImageData(imgData, 0, 0);
   GM_OV.tex.refresh();
   GM_OV.img.setPosition(c0 * TILE, r0 * TILE);
-  GM_OV.img.setScale(TILE);
+  GM_OV.img.setScale(TILE * k);
   GM_OV.img.setCrop(0, 0, w, h);
   GM_OV.img.setVisible(true);
 }
@@ -1489,6 +1511,7 @@ function gmOverviewFrame(scene) {
     if (GM_OV.on) {
       GM_OV.on = false;
       if (GM_OV.img) GM_OV.img.setVisible(false);
+      if (GM_OV.border) GM_OV.border.setVisible(false);
       if (WG.gridGfx) WG.gridGfx.setVisible(true);
       WG.gridKey = "";
       WG.drawRange = null;
@@ -1503,13 +1526,15 @@ function gmOverviewFrame(scene) {
     gmOvDropDetail(scene);
   }
   const wv = cam.worldView;
-  let c0 = Math.max(0, Math.floor(wv.x / TILE) - 2);
-  let r0 = Math.max(0, Math.floor(wv.y / TILE) - 2);
-  let c1 = Math.min(WORLD_COLS - 1, Math.floor((wv.x + wv.width) / TILE) + 2);
-  let r1 = Math.min(WORLD_ROWS - 1, Math.floor((wv.y + wv.height) / TILE) + 2);
-  if (c1 - c0 + 1 > GM_OV.maxW) c1 = c0 + GM_OV.maxW - 1;
-  if (r1 - r0 + 1 > GM_OV.maxH) r1 = r0 + GM_OV.maxH - 1;
-  const key = c0 + "," + c1 + "," + r0 + "," + r1;
+  const viewTilesW = wv.width / TILE;
+  const viewTilesH = wv.height / TILE;
+  const k = Math.max(1, Math.ceil(Math.max(viewTilesW / (GM_OV.maxW - 6), viewTilesH / (GM_OV.maxH - 6))));
+  let c0 = Math.max(0, Math.floor(wv.x / TILE / k) * k - 2 * k);
+  let r0 = Math.max(0, Math.floor(wv.y / TILE / k) * k - 2 * k);
+  let w = Math.min(GM_OV.maxW, Math.ceil(viewTilesW / k) + 5);
+  let h = Math.min(GM_OV.maxH, Math.ceil(viewTilesH / k) + 5);
+  gmOvBorder(scene);
+  const key = c0 + "," + r0 + "," + w + "," + h + "," + k;
   const now = Date.now();
   const changedLayer = GM_OV.rowsRef !== WG.rows;
   if (key !== GM_OV.key || changedLayer || (GM_OV.dirty && now - GM_OV.last > 150) || (WG.ovDirty && now - GM_OV.last > 150)) {
@@ -1518,7 +1543,7 @@ function gmOverviewFrame(scene) {
     GM_OV.dirty = false;
     WG.ovDirty = false;
     GM_OV.last = now;
-    if (c1 >= c0 && r1 >= r0) gmOvBuild(scene, c0, r0, c1 - c0 + 1, r1 - r0 + 1);
+    gmOvBuild(scene, c0, r0, w, h, k);
   }
   return true;
 }
@@ -4067,22 +4092,27 @@ function enterGmWorld(scene) {
       gmDrawPreview(scene, null, 0);
       return;
     }
-    if (dy > 0 && cam.zoom <= GM_MIN_ZOOM * 1.001) {
-      const nowMs = Date.now();
-      if (!MAPV.open && nowMs - (GM_OV.openedAt || 0) > 1500) {
-        GM_OV.openedAt = nowMs;
-        gmNotice("Opening the world map. Its region and dot tools edit the same map players see.");
-        mapToggle();
-      }
-      return;
-    }
-    let z = cam.zoom * (dy > 0 ? 0.88 : 1.14);
-    if (z < GM_MIN_ZOOM) {
-      z = GM_MIN_ZOOM;
-      gmNotice("Scroll out once more to open the whole world map.");
-    }
+    const minZoom = gmMinZoom(cam);
+    const oldZoom = cam.zoom;
+    let z = oldZoom * (dy > 0 ? 0.85 : 1.18);
+    if (z < minZoom) z = minZoom;
     if (z > 2.5) z = 2.5;
+    if (z === oldZoom) return;
+    const w = cam.width;
+    const h = cam.height;
+    const wx = cam.scrollX + w / 2 + (pointer.x - w / 2) / oldZoom;
+    const wy = cam.scrollY + h / 2 + (pointer.y - h / 2) / oldZoom;
     cam.setZoom(z);
+    cam.scrollX = wx - w / 2 - (pointer.x - w / 2) / z;
+    cam.scrollY = wy - h / 2 - (pointer.y - h / 2) / z;
+    if (z <= minZoom * 1.001) {
+      cam.scrollX = WORLD_COLS * TILE / 2 - w / 2;
+      cam.scrollY = WORLD_ROWS * TILE / 2 - h / 2;
+    }
+    const cell = gmCellFromPointer(scene, pointer);
+    WG.hoverCol = cell.c;
+    WG.hoverRow = cell.r;
+    gmDrawPreview(scene, null, 0);
   });
   window.addEventListener("keydown", (e) => {
     if (chatActive) return;
