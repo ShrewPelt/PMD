@@ -3822,7 +3822,9 @@ function mapFrame() {
 
 document.addEventListener("keydown", (ev) => {
   const tag = ev.target && ev.target.tagName ? ev.target.tagName : "";
-  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  const inType = ev.target && ev.target.type ? ev.target.type : "";
+  const typing = tag === "TEXTAREA" || tag === "SELECT" || (tag === "INPUT" && inType !== "range" && inType !== "checkbox" && inType !== "radio" && inType !== "button");
+  if (typing) return;
   if (!worldPlayerMode && !worldGmMode) return;
   if (ev.key === "m" || ev.key === "M") {
     if (ev.ctrlKey || ev.metaKey || ev.altKey || ev.repeat) return;
