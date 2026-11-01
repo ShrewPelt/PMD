@@ -584,8 +584,89 @@ function musicInit() {
   document.addEventListener("keydown", unlock);
 }
 
+const CONTROLS_ROWS = [
+  ["Movement", [["W A S D", "Walk up, left, down and right"], ["Q / E", "Rotate the camera left or right"], ["Hold right mouse", "Turn your character and vision cone toward the mouse"]]],
+  ["Actions", [["T", "Talk to a nearby NPC, open a chest, or use the item you highlighted in your bag"], ["F", "Pick up the item on the ground"], ["G", "Drop the item you highlighted in your bag"], ["Left click", "Click an enemy, NPC, campfire, plant or dummy within reach to open its action menu"]]],
+  ["Menus", [["I", "Open or close your inventory"], ["C", "Open or close crafting"], ["M", "Open or close the world map (you need a Map in your bag)"], ["Esc", "Close the open menu or cancel what you are doing"]]],
+  ["Inventory", [["Drag", "Move items between slots, your bag and chests"], ["Right click", "Pick up 1 from the stack (keep right clicking to add more)"], ["Shift + right", "Pick up half of a stack"]]],
+  ["Chat", [["Chat box", "Start typing. Add an expression like [Happy] or [Angry]"], ["Enter", "Send your message"], ["Hide button", "Collapses the nearby chat window"]]],
+  ["Combat", [["1 2 3 4", "Pick your first to fourth move on your turn"], ["Esc", "Cancel the move you picked"], ["Rest | Wait | Flee", "Buttons in the combat menu"], ["I then T", "Highlight an item in your bag then press T to use it in combat"]]],
+  ["Other", [["Exit World", "Top right button. Saves your character and logs you out"]]]
+];
+
+function controlsInit() {
+  if (document.getElementById("ctlPanel")) return;
+  if (document.documentElement.classList.contains("touch")) return;
+  const style = document.createElement("style");
+  style.textContent = "#ctlPanel{position:fixed;left:12px;bottom:12px;width:246px;max-height:70vh;display:flex;flex-direction:column;background:rgba(20,20,34,0.94);border:1px solid #3a3a55;border-radius:8px;color:#fff;font-size:12px;z-index:14}"
+    + "#ctlPanel.hidden{display:none}"
+    + "#ctlHead{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border-bottom:1px solid #3a3a55;color:#ffd23f;font-size:13px;font-weight:bold}"
+    + "#ctlClose,#ctlBtn{background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;cursor:pointer;font-size:12px}"
+    + "#ctlClose{padding:1px 8px}"
+    + "#ctlBody{overflow-y:auto;padding:6px 10px 8px 10px}"
+    + "#ctlBody h5{margin:8px 0 3px 0;color:#9be39b;font-size:12px}"
+    + "#ctlBody h5:first-child{margin-top:0}"
+    + ".ctlRow{display:flex;gap:8px;margin:3px 0;align-items:flex-start}"
+    + ".ctlKey{flex:0 0 84px;color:#ffd23f;font-weight:bold}"
+    + ".ctlDesc{flex:1;color:#dcdcee}"
+    + "#ctlBtn{position:fixed;left:12px;bottom:12px;padding:6px 14px;z-index:14;background:rgba(20,20,34,0.94)}"
+    + "#ctlBtn.hidden{display:none}";
+  document.head.appendChild(style);
+  const panel = document.createElement("div");
+  panel.id = "ctlPanel";
+  const head = document.createElement("div");
+  head.id = "ctlHead";
+  const title = document.createElement("span");
+  title.textContent = "Controls";
+  const closeBtn = document.createElement("button");
+  closeBtn.id = "ctlClose";
+  closeBtn.type = "button";
+  closeBtn.textContent = "Close";
+  head.appendChild(title);
+  head.appendChild(closeBtn);
+  panel.appendChild(head);
+  const body = document.createElement("div");
+  body.id = "ctlBody";
+  for (const group of CONTROLS_ROWS) {
+    const h = document.createElement("h5");
+    h.textContent = group[0];
+    body.appendChild(h);
+    for (const row of group[1]) {
+      const line = document.createElement("div");
+      line.className = "ctlRow";
+      const key = document.createElement("div");
+      key.className = "ctlKey";
+      key.textContent = row[0];
+      const desc = document.createElement("div");
+      desc.className = "ctlDesc";
+      desc.textContent = row[1];
+      line.appendChild(key);
+      line.appendChild(desc);
+      body.appendChild(line);
+    }
+  }
+  panel.appendChild(body);
+  const openBtn = document.createElement("button");
+  openBtn.id = "ctlBtn";
+  openBtn.type = "button";
+  openBtn.textContent = "Controls";
+  document.body.appendChild(panel);
+  document.body.appendChild(openBtn);
+  const setOpen = (open) => {
+    panel.classList.toggle("hidden", !open);
+    openBtn.classList.toggle("hidden", open);
+    try { localStorage.setItem("pmdControlsOpen", open ? "1" : "0"); } catch (e) {}
+  };
+  let startOpen = true;
+  try { if (localStorage.getItem("pmdControlsOpen") === "0") startOpen = false; } catch (e) {}
+  setOpen(startOpen);
+  closeBtn.addEventListener("click", () => { closeBtn.blur(); setOpen(false); });
+  openBtn.addEventListener("click", () => { openBtn.blur(); setOpen(true); });
+}
+
 function enterPlayerWorld(scene) {
   worldPlayerMode = true;
+  controlsInit();
   if (typeof chatLogShow === "function") chatLogShow();
   musicInit();
   if (mapGraphics) mapGraphics.clear();

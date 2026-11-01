@@ -12,6 +12,95 @@ const { getMoveData } = require("./Utils/Combat/moveData");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const GATE_SECRET = process.env.API_SECRET || crypto.randomBytes(32).toString("hex");
+const GATE_COOKIE = "pmd_gate";
+const GATE_TTL_MS = 12 * 60 * 60 * 1000;
+const BOT_UA_RE = /bot|crawl|spider|slurp|archiver|scrap|fetch|preview|headless|phantom|puppeteer|playwright|selenium|lighthouse|facebookexternalhit|bingpreview|yandex|baidu|duckduck|sogou|petalsearch|semrush|ahrefs|mj12|dotbot|python-requests|python-urllib|curl|wget|httpclient|libwww|java\/|go-http|okhttp|axios|node-fetch|undici/i;
+
+function gateSign(exp) {
+  return crypto.createHmac("sha256", GATE_SECRET).update("pmd-gate|" + exp).digest("hex");
+}
+
+function gateMakeCookie() {
+  const exp = Date.now() + GATE_TTL_MS;
+  return exp + "." + gateSign(exp);
+}
+
+function gateCookieValid(req) {
+  const header = req.headers.cookie || "";
+  const parts = header.split(";");
+  for (const part of parts) {
+    const idx = part.indexOf("=");
+    if (idx < 0) continue;
+    if (part.slice(0, idx).trim() !== GATE_COOKIE) continue;
+    const value = part.slice(idx + 1).trim();
+    const dot = value.indexOf(".");
+    if (dot < 0) return false;
+    const exp = value.slice(0, dot);
+    const sig = value.slice(dot + 1);
+    if (!/^\d+$/.test(exp) || Number(exp) < Date.now()) return false;
+    const want = gateSign(exp);
+    if (sig.length !== want.length) return false;
+    return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(want));
+  }
+  return false;
+}
+
+function gatePassValid(pass) {
+  if (!pass || typeof pass !== "string") return false;
+  if (worldPasses[pass]) return true;
+  if (passcodes[pass]) return true;
+  return false;
+}
+
+function gateDeny(req, res) {
+  res.status(403);
+  res.set("Cache-Control", "no-store");
+  res.type("html").send("<!doctype html><html><head><meta charset='utf-8'><meta name='robots' content='noindex,nofollow'><title>Access denied</title></head><body style='background:#14141f;color:#ddd;font-family:sans-serif;text-align:center;padding-top:20vh'><h2>Access denied</h2><p>This page can only be opened through the Discord bot.</p></body></html>");
+}
+
+app.disable("x-powered-by");
+
+app.use((req, res, next) => {
+  res.set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet, noimageindex");
+  res.set("Referrer-Policy", "no-referrer");
+  next();
+});
+
+app.get("/robots.txt", (req, res) => {
+  res.type("text/plain").send("User-agent: *\nDisallow: /\n");
+});
+
+app.use((req, res, next) => {
+  const url = req.path;
+  if (url.startsWith("/api/")) {
+    const openApi = url === "/api/world/species" || url === "/api/world/music" || url === "/api/world/assets";
+    if (!openApi) return next();
+    if (gateCookieValid(req)) return next();
+    gateDeny(req, res);
+    return;
+  }
+  const ua = String(req.headers["user-agent"] || "");
+  if (!ua || BOT_UA_RE.test(ua)) {
+    gateDeny(req, res);
+    return;
+  }
+  if (url === "/" || url === "/index.html") {
+    const pass = typeof req.query.pass === "string" ? req.query.pass : "";
+    if (!gatePassValid(pass)) {
+      gateDeny(req, res);
+      return;
+    }
+    const secure = req.secure || String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https";
+    res.append("Set-Cookie", GATE_COOKIE + "=" + gateMakeCookie() + "; Path=/; Max-Age=" + Math.floor(GATE_TTL_MS / 1000) + "; HttpOnly; SameSite=Lax" + (secure ? "; Secure" : ""));
+    res.set("Cache-Control", "no-store");
+    return next();
+  }
+  if (url === "/manifest.webmanifest") return next();
+  if (gateCookieValid(req)) return next();
+  gateDeny(req, res);
+});
+
 const ITEMS_DIR = path.join(__dirname, "StorageData", "Items");
 let itemIndexCache = { at: 0, data: null };
 
@@ -7086,8 +7175,12 @@ wss.on("connection", (socket, req) => {
     return;
   }
 
-  const passInfo = pass ? passcodes[pass] : null;
-  const role = passInfo ? passInfo.role : "player";
+  if (!pass || !passcodes[pass]) {
+    socket.close(1008, "denied");
+    return;
+  }
+  const passInfo = passcodes[pass];
+  const role = passInfo.role;
 
   const session = getSession(sessionId);
   socket.sessionId = sessionId;
