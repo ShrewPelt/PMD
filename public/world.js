@@ -133,6 +133,8 @@ const WG = {
   players: {},
   tool: "floor",
   shape: "pencil",
+  brush: 1,
+  ovDirty: false,
   portalSource: null,
   tpTarget: null,
   selPlayer: null,
@@ -876,6 +878,10 @@ function worldFrame(scene) {
   worldGuard(visFrame, scene);
   if (!worldGmMode) worldGuard(tuffFrame, scene);
   if (worldGmMode) {
+    if (gmOverviewFrame(scene)) {
+      gmUpdateHoverTile(scene);
+      return;
+    }
     gmSyncArt(scene);
     gmUpdateGrid(scene);
     gmUpdateHoverTile(scene);
@@ -1358,10 +1364,240 @@ function rectCells(c0, r0, c1, r1, outline) {
   return cells;
 }
 
+const GM_OV = { zoom: 0.22, on: false, img: null, tex: null, key: "", rowsRef: null, last: 0, colors: {}, state: {}, maxW: 1600, maxH: 1000, dirty: false };
+const GM_MIN_ZOOM = 0.03;
+
+function gmOvColorFor(name) {
+  const base = worldParseTileName(name).base;
+  if (GM_OV.colors[base]) return GM_OV.colors[base];
+  if (!GM_OV.state[base]) {
+    GM_OV.state[base] = "loading";
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const probe = document.createElement("canvas");
+        probe.width = 8;
+        probe.height = 8;
+        const pctx = probe.getContext("2d");
+        pctx.drawImage(img, 0, 0, 8, 8);
+        const px = pctx.getImageData(0, 0, 8, 8).data;
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        let n = 0;
+        for (let i = 0; i < px.length; i += 4) {
+          if (px[i + 3] < 10) continue;
+          r += px[i];
+          g += px[i + 1];
+          b += px[i + 2];
+          n = n + 1;
+        }
+        if (n > 0) GM_OV.colors[base] = [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
+        else GM_OV.colors[base] = [90, 110, 90];
+      } catch (e) {
+        GM_OV.colors[base] = [90, 110, 90];
+      }
+      GM_OV.dirty = true;
+    };
+    img.onerror = () => {
+      GM_OV.colors[base] = [90, 110, 90];
+      GM_OV.dirty = true;
+    };
+    img.src = worldAssetUrl("tile", base);
+  }
+  return [90, 110, 90];
+}
+
+function gmOvDropDetail(scene) {
+  for (const key in WG.chunks) {
+    WG.chunks[key].destroy();
+    delete WG.chunks[key];
+  }
+  for (const key in WG.overlays) {
+    WG.overlays[key].destroy();
+    delete WG.overlays[key];
+  }
+  worldSyncPool(scene, worldArtPool, {}, "tile");
+  worldSyncPool(scene, worldObjectPool, {}, "object");
+  WG.drawRange = { cx0: 1, cx1: -1, cy0: 1, cy1: -1 };
+  if (WG.gridGfx) {
+    WG.gridGfx.clear();
+    WG.gridKey = "";
+    WG.gridGfx.setVisible(false);
+  }
+  if (WG.hoverSprite) WG.hoverSprite.setVisible(false);
+}
+
+function gmOvBuild(scene, c0, r0, w, h) {
+  if (!GM_OV.tex) {
+    GM_OV.tex = scene.textures.createCanvas("gmOverview", GM_OV.maxW, GM_OV.maxH);
+    GM_OV.tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
+    GM_OV.img = scene.add.image(0, 0, "gmOverview");
+    GM_OV.img.setOrigin(0, 0);
+    GM_OV.img.setDepth(1);
+  }
+  const ctx2 = GM_OV.tex.getContext();
+  ctx2.clearRect(0, 0, GM_OV.maxW, GM_OV.maxH);
+  const imgData = ctx2.createImageData(w, h);
+  const out = imgData.data;
+  const palCache = {};
+  for (let y = 0; y < h; y++) {
+    const rr = r0 + y;
+    const line = WG.rows[rr];
+    const artLine = WG.art[rr];
+    if (!line) continue;
+    for (let x = 0; x < w; x++) {
+      const cc = c0 + x;
+      const ch = line[cc];
+      const i = (y * w + x) * 4;
+      if (ch === undefined || ch === " ") continue;
+      let rgb;
+      if (ch === "#") rgb = [107, 79, 58];
+      else if (ch === "x") rgb = [192, 57, 43];
+      else if (ch === "P") rgb = [155, 89, 182];
+      else {
+        const ac = artLine ? artLine[cc] : " ";
+        const pname = ac && ac !== " " ? WG.palette[ac] : null;
+        if (pname) {
+          rgb = palCache[ac];
+          if (!rgb) {
+            rgb = gmOvColorFor(pname);
+            palCache[ac] = rgb;
+          }
+        } else {
+          rgb = [58, 58, 85];
+        }
+      }
+      out[i] = rgb[0];
+      out[i + 1] = rgb[1];
+      out[i + 2] = rgb[2];
+      out[i + 3] = 255;
+    }
+  }
+  ctx2.putImageData(imgData, 0, 0);
+  GM_OV.tex.refresh();
+  GM_OV.img.setPosition(c0 * TILE, r0 * TILE);
+  GM_OV.img.setScale(TILE);
+  GM_OV.img.setCrop(0, 0, w, h);
+  GM_OV.img.setVisible(true);
+}
+
+function gmOverviewFrame(scene) {
+  const cam = scene.cameras.main;
+  const on = cam.zoom < GM_OV.zoom;
+  if (!on) {
+    if (GM_OV.on) {
+      GM_OV.on = false;
+      if (GM_OV.img) GM_OV.img.setVisible(false);
+      if (WG.gridGfx) WG.gridGfx.setVisible(true);
+      WG.gridKey = "";
+      WG.drawRange = null;
+      WG.viewKey = "";
+      WG.artDirty = true;
+    }
+    return false;
+  }
+  if (!GM_OV.on) {
+    GM_OV.on = true;
+    GM_OV.key = "";
+    gmOvDropDetail(scene);
+  }
+  const wv = cam.worldView;
+  let c0 = Math.max(0, Math.floor(wv.x / TILE) - 2);
+  let r0 = Math.max(0, Math.floor(wv.y / TILE) - 2);
+  let c1 = Math.min(WORLD_COLS - 1, Math.floor((wv.x + wv.width) / TILE) + 2);
+  let r1 = Math.min(WORLD_ROWS - 1, Math.floor((wv.y + wv.height) / TILE) + 2);
+  if (c1 - c0 + 1 > GM_OV.maxW) c1 = c0 + GM_OV.maxW - 1;
+  if (r1 - r0 + 1 > GM_OV.maxH) r1 = r0 + GM_OV.maxH - 1;
+  const key = c0 + "," + c1 + "," + r0 + "," + r1;
+  const now = Date.now();
+  const changedLayer = GM_OV.rowsRef !== WG.rows;
+  if (key !== GM_OV.key || changedLayer || (GM_OV.dirty && now - GM_OV.last > 150) || (WG.ovDirty && now - GM_OV.last > 150)) {
+    GM_OV.key = key;
+    GM_OV.rowsRef = WG.rows;
+    GM_OV.dirty = false;
+    WG.ovDirty = false;
+    GM_OV.last = now;
+    if (c1 >= c0 && r1 >= r0) gmOvBuild(scene, c0, r0, c1 - c0 + 1, r1 - r0 + 1);
+  }
+  return true;
+}
+
+function gmBrushOffsets(d) {
+  if (!gmBrushOffsets.cache) gmBrushOffsets.cache = {};
+  if (gmBrushOffsets.cache[d]) return gmBrushOffsets.cache[d];
+  const radius = d / 2;
+  const limit = radius * radius;
+  const half = Math.ceil(radius);
+  const list = [];
+  for (let dr = -half; dr <= half; dr++) {
+    for (let dc = -half; dc <= half; dc++) {
+      if (dc * dc + dr * dr <= limit) list.push([dc, dr]);
+    }
+  }
+  gmBrushOffsets.cache[d] = list;
+  return list;
+}
+
+function gmBrushActive() {
+  return WG.brush > 1 && TOOL_PREVIEW[WG.tool] !== undefined && (WG.shape === "pencil" || WG.shape === "line");
+}
+
+function gmBrushCells(cells) {
+  if (WG.brush <= 1 || !(WG.shape === "pencil" || WG.shape === "line")) return cells;
+  const offsets = gmBrushOffsets(WG.brush);
+  const spacing = Math.max(1, Math.floor(WG.brush / 6));
+  const seen = {};
+  const out = [];
+  for (let i = 0; i < cells.length; i++) {
+    if (i % spacing !== 0 && i !== cells.length - 1) continue;
+    const c = cells[i][0];
+    const r = cells[i][1];
+    for (const off of offsets) {
+      const nc = c + off[0];
+      const nr = r + off[1];
+      if (nc < 0 || nr < 0 || nc >= WORLD_COLS || nr >= WORLD_ROWS) continue;
+      const key = nc + "," + nr;
+      if (seen[key]) continue;
+      seen[key] = true;
+      out.push([nc, nr]);
+    }
+  }
+  return out;
+}
+
+function gmBrushUnpainted(cells) {
+  if (!WG.stroke) return cells;
+  if (!WG.stroke.painted) WG.stroke.painted = {};
+  const painted = WG.stroke.painted;
+  const out = [];
+  for (const cell of cells) {
+    const key = cell[0] + "," + cell[1];
+    if (painted[key]) continue;
+    painted[key] = true;
+    out.push(cell);
+  }
+  return out;
+}
+
+function gmSetBrush(value) {
+  let v = parseInt(value, 10);
+  if (!isFinite(v)) v = 1;
+  v = Math.max(1, Math.min(100, v));
+  WG.brush = v;
+  const slider = document.getElementById("wgBrush");
+  const box = document.getElementById("wgBrushNum");
+  if (slider) slider.value = v;
+  if (box) box.value = v;
+  const label = document.getElementById("wgBrushLabel");
+  if (label) label.textContent = v === 1 ? "1 tile (single)" : v + " x " + v + " circle";
+  if (WG.previewGfx && typeof WG.hoverCol === "number") gmDrawPreview(WG.scene || null, null, 0);
+}
+
 function gmShapeCells(stroke, endC, endR, shiftKey) {
   if (WG.shape === "line") {
     const end = snapLineEnd(stroke.c0, stroke.r0, endC, endR, shiftKey);
-    return lineCells(stroke.c0, stroke.r0, end.c, end.r);
+    return gmBrushCells(lineCells(stroke.c0, stroke.r0, end.c, end.r));
   }
   if (WG.shape === "rect") return rectCells(stroke.c0, stroke.r0, endC, endR, false);
   if (WG.shape === "outline") return rectCells(stroke.c0, stroke.r0, endC, endR, true);
@@ -1419,6 +1655,7 @@ function gmSendEdit(cells) {
 }
 
 function gmApplyTiles(scene, cells) {
+  WG.ovDirty = true;
   const touched = {};
   for (const cell of cells) {
     const c = cell[0];
@@ -1440,6 +1677,7 @@ const GM_PALETTE_CHARS = (() => {
 })();
 
 function gmApplyArt(scene, cells, palette) {
+  WG.ovDirty = true;
   if (palette && typeof palette === "object") WG.palette = palette;
   for (const cell of cells) {
     const c = cell[0];
@@ -1482,6 +1720,13 @@ function gmDrawPreview(scene, cells, color) {
     }
   }
   g.lineStyle(2, 0xffffff, 0.9);
+  if (gmBrushActive()) {
+    const cx = WG.hoverCol * TILE + (TILE - 2) / 2;
+    const cy = WG.hoverRow * TILE + (TILE - 2) / 2;
+    g.fillStyle(0xffffff, 0.12);
+    g.fillCircle(cx, cy, WG.brush / 2 * TILE);
+    g.strokeCircle(cx, cy, WG.brush / 2 * TILE);
+  }
   g.strokeRect(WG.hoverCol * TILE, WG.hoverRow * TILE, TILE - 2, TILE - 2);
 }
 
@@ -1777,7 +2022,7 @@ function gmPointerDown(scene, pointer) {
   WG.strokeUndo = { layer: WG.layer, cells: {} };
   WG.stroke = { c0: cell.c, r0: cell.r, lastC: cell.c, lastR: cell.r };
   if (WG.shape === "pencil") {
-    gmSendEdit([[cell.c, cell.r]]);
+    gmSendEdit(gmBrushUnpainted(gmBrushCells([[cell.c, cell.r]])));
   } else {
     gmDrawPreview(scene, gmShapeCells(WG.stroke, cell.c, cell.r, pointer.event.shiftKey), TOOL_PREVIEW[WG.tool]);
   }
@@ -1797,7 +2042,7 @@ function gmPointerMove(scene, pointer) {
   if (WG.stroke && pointer.leftButtonDown()) {
     if (WG.shape === "pencil") {
       if (cell.c !== WG.stroke.lastC || cell.r !== WG.stroke.lastR) {
-        gmSendEdit(lineCells(WG.stroke.lastC, WG.stroke.lastR, cell.c, cell.r));
+        gmSendEdit(gmBrushUnpainted(gmBrushCells(lineCells(WG.stroke.lastC, WG.stroke.lastR, cell.c, cell.r))));
         WG.stroke.lastC = cell.c;
         WG.stroke.lastR = cell.r;
       }
@@ -2093,6 +2338,7 @@ function gmBuildPanel() {
     + "<button class='wgBtn' data-wgshape='rect'>Filled box</button>"
     + "<button class='wgBtn' data-wgshape='outline'>Box outline</button>"
     + "</div>"
+    + "<div style='margin-top:6px'><b style='color:#c8c8ff'>Brush size</b> <span id='wgBrushLabel' style='color:#9be39b'>1 tile (single)</span><br><input type='range' id='wgBrush' min='1' max='100' step='1' value='1' style='width:160px;vertical-align:middle'> <input type='number' id='wgBrushNum' min='1' max='100' value='1' style='width:55px'><div style='color:#aab;font-size:11px;margin-top:2px'>Circle, up to 100 wide. Works with Pencil and Straight line. Keys [ and ] change it by 1, Shift+[ and Shift+] by 5. Alt + mouse wheel also changes it.</div></div>"
     + "<div style='margin-top:6px'><label><input type='checkbox' id='wgTwoWay' checked> Portals work both ways</label></div>"
     + "<div style='margin-top:6px'><button class='wgBtn' id='wgUndo'>Undo (Ctrl+Z)</button></div>"
     + "</div>"
@@ -2208,6 +2454,10 @@ function gmBuildPanel() {
       try { localStorage.setItem("pmdGmSections", JSON.stringify(secState)); } catch (e) {}
     });
   });
+  document.getElementById("wgBrush").addEventListener("input", (ev) => gmSetBrush(ev.target.value));
+  const brushNum = document.getElementById("wgBrushNum");
+  brushNum.addEventListener("change", (ev) => gmSetBrush(ev.target.value));
+  brushNum.addEventListener("keydown", (ev) => ev.stopPropagation());
   visGmBindUi();
   ovBindUi();
   schedBind();
@@ -3777,14 +4027,25 @@ function enterGmWorld(scene) {
   scene.input.on("pointerdown", (pointer) => gmPointerDown(scene, pointer));
   scene.input.on("pointermove", (pointer) => gmPointerMove(scene, pointer));
   scene.input.on("pointerup", (pointer) => gmPointerUp(scene, pointer));
+  WG.scene = scene;
   scene.input.on("wheel", (pointer, over, dx, dy) => {
-    let z = cam.zoom * (dy > 0 ? 0.9 : 1.1);
-    if (z < 0.2) z = 0.2;
+    if (pointer.event && pointer.event.altKey) {
+      gmSetBrush(WG.brush + (dy > 0 ? -1 : 1) * (WG.brush >= 20 ? 3 : 1));
+      gmDrawPreview(scene, null, 0);
+      return;
+    }
+    let z = cam.zoom * (dy > 0 ? 0.88 : 1.14);
+    if (z < GM_MIN_ZOOM) z = GM_MIN_ZOOM;
     if (z > 2.5) z = 2.5;
     cam.setZoom(z);
   });
   window.addEventListener("keydown", (e) => {
     if (chatActive) return;
+    const tagName = e.target && e.target.tagName ? e.target.tagName : "";
+    if (tagName !== "INPUT" && tagName !== "TEXTAREA" && tagName !== "SELECT") {
+      if (e.key === "[" || e.key === "{") { gmSetBrush(WG.brush - (e.shiftKey ? 5 : 1)); gmDrawPreview(scene, null, 0); }
+      if (e.key === "]" || e.key === "}") { gmSetBrush(WG.brush + (e.shiftKey ? 5 : 1)); gmDrawPreview(scene, null, 0); }
+    }
     if (e.code === "Space") { gmSpaceDown = true; e.preventDefault(); }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { gmUndo(); e.preventDefault(); }
     if (e.key === "Escape") {
