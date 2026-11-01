@@ -2655,6 +2655,7 @@ function mapInject() {
   el.querySelectorAll("[data-maptool]").forEach((btn) => {
     btn.addEventListener("click", () => mapSetTool(btn.getAttribute("data-maptool")));
   });
+  MAPV.canvas.addEventListener("wheel", mapWheel, { passive: false });
   MAPV.canvas.addEventListener("pointerdown", mapPointerDown);
   MAPV.canvas.addEventListener("pointermove", mapPointerMove);
   window.addEventListener("pointerup", mapPointerUp);
@@ -2677,6 +2678,38 @@ function mapPlayerHasItem() {
     if (stack && String(stack.name).toLowerCase() === "map") return true;
   }
   return false;
+}
+
+function mapWheel(ev) {
+  if (!MAPV.gm || !MAPV.data) return;
+  ev.preventDefault();
+  const nowMs = Date.now();
+  if (nowMs - (MAPV.zoomAt || 0) < 350) return;
+  const pt = mapCanvasPoint(ev);
+  const tile = mapTileAt(pt.x, pt.y);
+  const v = mapView();
+  const size = MAPV.data.size;
+  const curW = Math.max(v.cols, v.rows) * v.tpp;
+  const fx = Math.max(0, Math.min(1, (tile.col - v.c0) / (v.cols * v.tpp)));
+  const fy = Math.max(0, Math.min(1, (tile.row - v.r0) / (v.rows * v.tpp)));
+  const zoomIn = ev.deltaY < 0;
+  let newW = zoomIn ? Math.max(320, Math.round(curW / 2)) : curW * 2;
+  if (zoomIn && newW >= curW) return;
+  if (!zoomIn && newW >= size) {
+    if (MAPV.view !== "world") {
+      MAPV.zoomAt = nowMs;
+      mapShowWorld();
+    }
+    return;
+  }
+  const tpp = Math.max(1, Math.ceil(newW / 320));
+  const cols = Math.ceil(newW / tpp);
+  let c0 = Math.round(tile.col - fx * newW);
+  let r0 = Math.round(tile.row - fy * newW);
+  c0 = Math.max(0, Math.min(size - cols * tpp, c0));
+  r0 = Math.max(0, Math.min(size - cols * tpp, r0));
+  MAPV.zoomAt = nowMs;
+  gmSend({ type: "map_region", c0: c0, r0: r0, cols: cols, rows: cols, tpp: tpp });
 }
 
 function mapToggle() {
@@ -3149,7 +3182,7 @@ function mapSetTool(tool) {
     delregion: "Click a finished region to delete it. Ctrl+Z brings it back.",
     colour: "Click a block on the world map to set its colour."
   };
-  status.textContent = MAPV.gm ? hints[tool] || "" : "Click an island to see the region.";
+  status.textContent = MAPV.gm ? (hints[tool] || "") + " Mouse wheel zooms for exact borders." : "Click an island to see the region.";
 }
 
 function mapPlayerList() {
@@ -4034,8 +4067,20 @@ function enterGmWorld(scene) {
       gmDrawPreview(scene, null, 0);
       return;
     }
+    if (dy > 0 && cam.zoom <= GM_MIN_ZOOM * 1.001) {
+      const nowMs = Date.now();
+      if (!MAPV.open && nowMs - (GM_OV.openedAt || 0) > 1500) {
+        GM_OV.openedAt = nowMs;
+        gmNotice("Opening the world map. Its region and dot tools edit the same map players see.");
+        mapToggle();
+      }
+      return;
+    }
     let z = cam.zoom * (dy > 0 ? 0.88 : 1.14);
-    if (z < GM_MIN_ZOOM) z = GM_MIN_ZOOM;
+    if (z < GM_MIN_ZOOM) {
+      z = GM_MIN_ZOOM;
+      gmNotice("Scroll out once more to open the whole world map.");
+    }
     if (z > 2.5) z = 2.5;
     cam.setZoom(z);
   });
