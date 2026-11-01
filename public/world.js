@@ -1654,6 +1654,10 @@ function gmSnapshotCell(c, r) {
 }
 
 function gmSendEdit(cells) {
+  if (cells.length > 4000) {
+    for (let i = 0; i < cells.length; i += 4000) gmSendEdit(cells.slice(i, i + 4000));
+    return;
+  }
   const tool = WG.tool;
   const logicOps = [];
   const artOps = [];
@@ -2027,6 +2031,58 @@ function gmHandleClickTool(scene, c, r) {
   }
 }
 
+const GM_FILL_LIMIT = 60000;
+
+function gmCellSig(c, r) {
+  const tool = WG.tool;
+  const key = c + "," + r;
+  if (tool === "object" || tool === "objerase") {
+    const o = WG.objects[key];
+    return o ? o.name + "|" + (o.rot || 0) + "|" + (o.flip ? 1 : 0) : "";
+  }
+  if (tool === "passable" || tool === "passableclear") return WG.passable[key] ? "1" : "0";
+  if (tool === "tile" || tool === "tileclear") return WG.art[r].charAt(c) + WG.rows[r].charAt(c);
+  return WG.rows[r].charAt(c) + WG.art[r].charAt(c);
+}
+
+function gmBucketFill(c0, r0) {
+  if (!gmInBounds(c0, r0)) return;
+  if (WG.tool === "tile" && !WG.tileName) { gmNotice("Pick a tile first."); return; }
+  if (WG.tool === "object" && !WG.objName) { gmNotice("Pick an object first."); return; }
+  const target = gmCellSig(c0, r0);
+  const seen = new Set();
+  const queue = [r0 * WORLD_COLS + c0];
+  seen.add(queue[0]);
+  const cells = [];
+  let head = 0;
+  while (head < queue.length) {
+    const idx = queue[head++];
+    const c = idx % WORLD_COLS;
+    const r = (idx - c) / WORLD_COLS;
+    cells.push([c, r]);
+    if (cells.length > GM_FILL_LIMIT) {
+      gmNotice("That area is not closed. The fill would spill past " + GM_FILL_LIMIT + " tiles, so nothing was changed.");
+      return;
+    }
+    const nbrs = [[c + 1, r], [c - 1, r], [c, r + 1], [c, r - 1]];
+    for (const n of nbrs) {
+      if (!gmInBounds(n[0], n[1])) continue;
+      const ni = n[1] * WORLD_COLS + n[0];
+      if (seen.has(ni)) continue;
+      seen.add(ni);
+      if (gmCellSig(n[0], n[1]) === target) queue.push(ni);
+    }
+  }
+  WG.strokeUndo = { layer: WG.layer, cells: {} };
+  for (let i = 0; i < cells.length; i += 4000) gmSendEdit(cells.slice(i, i + 4000));
+  if (Object.keys(WG.strokeUndo.cells).length > 0) {
+    WG.undo.push(WG.strokeUndo);
+    if (WG.undo.length > 60) WG.undo.shift();
+  }
+  WG.strokeUndo = null;
+  gmNotice("Filled " + cells.length + " tiles.");
+}
+
 function gmPointerDown(scene, pointer) {
   const cell = gmCellFromPointer(scene, pointer);
   WG.hoverCol = cell.c;
@@ -2042,6 +2098,10 @@ function gmPointerDown(scene, pointer) {
   const paintTool = TOOL_PREVIEW[WG.tool] !== undefined;
   if (!paintTool) {
     gmHandleClickTool(scene, cell.c, cell.r);
+    return;
+  }
+  if (WG.shape === "bucket") {
+    gmBucketFill(cell.c, cell.r);
     return;
   }
   WG.strokeUndo = { layer: WG.layer, cells: {} };
@@ -2114,10 +2174,12 @@ function gmUndo() {
     artOps.push([cell.c, cell.r, cell.art]);
     objOps.push([cell.c, cell.r, cell.obj, cell.solid ? 1 : 0, cell.rot || 0, cell.flip ? 1 : 0]);
   }
-  gmSend({ type: "gm_edit", layer: entry.layer, ops: logicOps });
-  gmSend({ type: "gm_art", layer: entry.layer, ops: artOps });
-  gmSend({ type: "gm_obj", layer: entry.layer, ops: objOps });
-  gmSend({ type: "gm_pass", layer: entry.layer, ops: passOps });
+  for (let i = 0; i < logicOps.length; i += 4000) {
+    gmSend({ type: "gm_edit", layer: entry.layer, ops: logicOps.slice(i, i + 4000) });
+    gmSend({ type: "gm_art", layer: entry.layer, ops: artOps.slice(i, i + 4000) });
+    gmSend({ type: "gm_obj", layer: entry.layer, ops: objOps.slice(i, i + 4000) });
+    gmSend({ type: "gm_pass", layer: entry.layer, ops: passOps.slice(i, i + 4000) });
+  }
 }
 
 function gmGoLayer(n) {
@@ -2362,6 +2424,7 @@ function gmBuildPanel() {
     + "<button class='wgBtn' data-wgshape='line'>Straight line</button>"
     + "<button class='wgBtn' data-wgshape='rect'>Filled box</button>"
     + "<button class='wgBtn' data-wgshape='outline'>Box outline</button>"
+    + "<button class='wgBtn' data-wgshape='bucket'>Bucket fill</button>"
     + "</div>"
     + "<div style='margin-top:6px'><b style='color:#c8c8ff'>Brush size</b> <span id='wgBrushLabel' style='color:#9be39b'>1 tile (single)</span><br><input type='range' id='wgBrush' min='1' max='100' step='1' value='1' style='width:160px;vertical-align:middle'> <input type='number' id='wgBrushNum' min='1' max='100' value='1' style='width:55px'><div style='color:#aab;font-size:11px;margin-top:2px'>Circle, up to 100 wide. Works with Pencil and Straight line. Keys [ and ] change it by 1, Shift+[ and Shift+] by 5. Alt + mouse wheel also changes it.</div></div>"
     + "<div style='margin-top:6px'><label><input type='checkbox' id='wgTwoWay' checked> Portals work both ways</label></div>"
@@ -4085,6 +4148,10 @@ function enterGmWorld(scene) {
   scene.input.on("pointerdown", (pointer) => gmPointerDown(scene, pointer));
   scene.input.on("pointermove", (pointer) => gmPointerMove(scene, pointer));
   scene.input.on("pointerup", (pointer) => gmPointerUp(scene, pointer));
+  scene.input.on("pointerupoutside", (pointer) => gmPointerUp(scene, pointer));
+  window.addEventListener("mouseup", () => {
+    if (WG.stroke || WG.pan) gmPointerUp(scene, scene.input.activePointer);
+  });
   WG.scene = scene;
   scene.input.on("wheel", (pointer, over, dx, dy) => {
     if (pointer.event && pointer.event.altKey) {
