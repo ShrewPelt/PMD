@@ -600,7 +600,7 @@ function controlsInit() {
   const style = document.createElement("style");
   style.textContent = "#ctlPanel{position:fixed;left:12px;bottom:12px;width:246px;max-height:70vh;display:flex;flex-direction:column;background:rgba(20,20,34,0.94);border:1px solid #3a3a55;border-radius:8px;color:#fff;font-size:12px;z-index:14}"
     + "#ctlPanel.hidden{display:none}"
-    + "#ctlHead{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border-bottom:1px solid #3a3a55;color:#ffd23f;font-size:13px;font-weight:bold}"
+    + "#ctlHead{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border-bottom:1px solid #3a3a55;color:#ffd23f;font-size:13px;font-weight:bold;cursor:move;user-select:none;touch-action:none}"
     + "#ctlClose,#ctlBtn{background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;cursor:pointer;font-size:12px}"
     + "#ctlClose{padding:1px 8px}"
     + "#ctlBody{overflow-y:auto;padding:6px 10px 8px 10px}"
@@ -617,7 +617,7 @@ function controlsInit() {
   const head = document.createElement("div");
   head.id = "ctlHead";
   const title = document.createElement("span");
-  title.textContent = "Controls";
+  title.textContent = "Controls (drag to move)";
   const closeBtn = document.createElement("button");
   closeBtn.id = "ctlClose";
   closeBtn.type = "button";
@@ -660,6 +660,47 @@ function controlsInit() {
   let startOpen = true;
   try { if (localStorage.getItem("pmdControlsOpen") === "0") startOpen = false; } catch (e) {}
   setOpen(startOpen);
+  const placePanel = (left, top) => {
+    const maxLeft = Math.max(0, window.innerWidth - 60);
+    const maxTop = Math.max(0, window.innerHeight - 40);
+    const l = Math.min(Math.max(0, left), maxLeft);
+    const t = Math.min(Math.max(0, top), maxTop);
+    panel.style.left = l + "px";
+    panel.style.top = t + "px";
+    panel.style.bottom = "auto";
+    panel.style.maxHeight = Math.max(120, window.innerHeight - t - 8) + "px";
+    return [l, t];
+  };
+  try {
+    const saved = JSON.parse(localStorage.getItem("pmdControlsPos") || "null");
+    if (saved && typeof saved.left === "number" && typeof saved.top === "number") placePanel(saved.left, saved.top);
+  } catch (e) {}
+  let dragState = null;
+  head.addEventListener("pointerdown", (ev) => {
+    if (ev.target === closeBtn || ev.button !== 0) return;
+    const rect = panel.getBoundingClientRect();
+    dragState = { dx: ev.clientX - rect.left, dy: ev.clientY - rect.top, id: ev.pointerId };
+    try { head.setPointerCapture(ev.pointerId); } catch (e) {}
+    ev.preventDefault();
+  });
+  head.addEventListener("pointermove", (ev) => {
+    if (!dragState || ev.pointerId !== dragState.id) return;
+    placePanel(ev.clientX - dragState.dx, ev.clientY - dragState.dy);
+  });
+  const endDrag = (ev) => {
+    if (!dragState || ev.pointerId !== dragState.id) return;
+    dragState = null;
+    const rect = panel.getBoundingClientRect();
+    try { localStorage.setItem("pmdControlsPos", JSON.stringify({ left: rect.left, top: rect.top })); } catch (e) {}
+  };
+  head.addEventListener("pointerup", endDrag);
+  head.addEventListener("pointercancel", endDrag);
+  window.addEventListener("resize", () => {
+    if (panel.style.top) {
+      const rect = panel.getBoundingClientRect();
+      placePanel(rect.left, rect.top);
+    }
+  });
   closeBtn.addEventListener("click", () => { closeBtn.blur(); setOpen(false); });
   openBtn.addEventListener("click", () => { openBtn.blur(); setOpen(true); });
 }
