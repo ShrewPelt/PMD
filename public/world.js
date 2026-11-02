@@ -7700,6 +7700,18 @@ function visEnsureOverlays(scene) {
   VIS.lightImg.setVisible(false);
   VIS.polyGfx = scene.add.graphics();
   VIS.polyGfx.setVisible(false);
+  VIS.occGfx = scene.add.graphics();
+  VIS.occGfx.setVisible(false);
+  VIS.occGfx.setScale(0.25);
+  VIS.occRT = scene.add.renderTexture(0, 0, Math.ceil(px / 4), Math.ceil(px / 4));
+  VIS.occRT.setOrigin(0, 0);
+  VIS.occRT.setScale(4);
+  VIS.occRT.setVisible(false);
+  VIS.occRT.texture.setFilter(Phaser.Textures.FilterMode.LINEAR);
+
+  VIS.lightRT = scene.add.renderTexture(0, 0, px, px);
+  VIS.lightRT.setOrigin(0, 0);
+  VIS.lightRT.setVisible(false);
   VIS.tint = scene.add.rectangle(0, 0, VIS_RT_TILES * TILE, VIS_RT_TILES * TILE, 0xff8a3a);
   VIS.tint.setDepth(19);
   VIS.tint.setVisible(false);
@@ -8212,10 +8224,29 @@ function visFrame(scene) {
     const dusk = 0x4a1c10;
     const night = 0x000000;
     VIS.darkRT.fill(visLerpColor(dusk, night, Math.pow(D, 1.4)), D * visCfg("darknessMax"));
+    let maxLight = 0;
+    for (const light of lights) {
+      if (light.r > maxLight) maxLight = light.r;
+    }
+    VIS.lightRT.clear();
     for (const light of lights) {
       VIS.lightImg.setScale(light.r * TILE * 2 * VIS_RES / 256);
-      VIS.darkRT.erase(VIS.lightImg, (light.x - rx) * VIS_RES, (light.y - ry) * VIS_RES);
+      VIS.lightRT.draw(VIS.lightImg, (light.x - rx) * VIS_RES, (light.y - ry) * VIS_RES);
     }
+    const occ = VIS.occGfx;
+    occ.clear();
+    const occRange = Math.min(VIS_RT_TILES / 2, maxLight + 1.5) * TILE;
+    const jitter = 11;
+    const offsets = [[0, 0], [jitter, 0], [-jitter, 0], [0, jitter], [0, -jitter], [jitter, jitter], [-jitter, jitter], [jitter, -jitter], [-jitter, -jitter]];
+    occ.fillStyle(0xffffff, 0.4);
+    for (const off of offsets) {
+      visFan(occ, ox + off[0], oy + off[1], rx, ry, 0, Math.PI * 2, 1.5 * Math.PI / 180, occRange);
+    }
+    VIS.occRT.clear();
+    VIS.occRT.fill(0xffffff, 1);
+    VIS.occRT.erase(occ, 0, 0);
+    VIS.lightRT.erase(VIS.occRT, 0, 0);
+    VIS.darkRT.erase(VIS.lightRT, 0, 0);
   } else {
     VIS.darkRT.setVisible(false);
   }

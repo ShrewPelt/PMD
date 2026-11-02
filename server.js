@@ -977,14 +977,14 @@ function cleanRot(value) {
   return n === 90 || n === 180 || n === 270 ? n : 0;
 }
 
-function makeLayer(name) {
+function makeLayer(name, layerNumber) {
   const rows = [];
   for (let r = 0; r < LAYER_H; r++) rows.push(BLANK_ROW);
-  return { name: name || "", rows: rows, art: rows.slice(), objects: {}, passable: {}, portals: {}, links: {}, spawn: null, light: "outdoor" };
+  return { name: name || "", rows: rows, art: rows.slice(), objects: {}, passable: {}, portals: {}, links: {}, spawn: null, light: layerNumber < 0 ? "dark" : "outdoor", lightSet: false };
 }
 
 function layerHasContent(L) {
-  if (L.name || L.spawn || (L.light && L.light !== "outdoor") || Object.keys(L.portals).length > 0 || Object.keys(L.objects).length > 0 || Object.keys(L.passable).length > 0 || (L.links && Object.keys(L.links).length > 0)) return true;
+  if (L.name || L.spawn || (L.lightSet && L.light !== "outdoor") || Object.keys(L.portals).length > 0 || Object.keys(L.objects).length > 0 || Object.keys(L.passable).length > 0 || (L.links && Object.keys(L.links).length > 0)) return true;
   for (const row of L.rows) {
     if (row !== BLANK_ROW && row.trim().length > 0) return true;
   }
@@ -1000,7 +1000,7 @@ function loadLayers() {
       const n = parseInt(key, 10);
       if (isNaN(n) || n < MIN_LAYER || n > MAX_LAYER) continue;
       const saved = data[key];
-      const L = makeLayer(saved.name || "");
+      const L = makeLayer(saved.name || "", n);
       const rows = Array.isArray(saved.rows) ? saved.rows : [];
       for (let r = 0; r < LAYER_H && r < rows.length; r++) {
         if (String(rows[r]).trim().length > 0) L.rows[r] = String(rows[r]).padEnd(LAYER_W, " ").slice(0, LAYER_W);
@@ -1026,7 +1026,9 @@ function loadLayers() {
         }
       }
       L.spawn = saved.spawn || null;
-      L.light = saved.light === "indoor" || saved.light === "dark" ? saved.light : "outdoor";
+      const savedLight = saved.light === "indoor" || saved.light === "dark" ? saved.light : "outdoor";
+      L.lightSet = saved.lightSet === true || savedLight !== "outdoor";
+      L.light = !L.lightSet && n < 0 ? "dark" : savedLight;
       layers[n] = L;
     }
     return;
@@ -1123,7 +1125,7 @@ function saveLayersNow() {
       const parts = k.split(",");
       passOut.push([parseInt(parts[0], 10), parseInt(parts[1], 10)]);
     }
-    out[key] = { name: L.name, passable: passOut, rows: L.rows.map(trimRowEnd), art: L.art.map(trimRowEnd), objects: objList, portals: L.portals, links: L.links || {}, spawn: L.spawn, light: L.light || "outdoor" };
+    out[key] = { name: L.name, passable: passOut, rows: L.rows.map(trimRowEnd), art: L.art.map(trimRowEnd), objects: objList, portals: L.portals, links: L.links || {}, spawn: L.spawn, light: L.light || "outdoor", lightSet: L.lightSet === true };
   }
   writeJsonFile(LAYERS_FILE, out);
   layersDirty = false;
@@ -1136,7 +1138,7 @@ function scheduleLayerSave() {
 }
 
 function ensureLayer(n) {
-  if (!layers[n]) layers[n] = makeLayer("");
+  if (!layers[n]) layers[n] = makeLayer("", n);
   return layers[n];
 }
 
@@ -1723,6 +1725,7 @@ function handleGmLightMode(gm, data) {
   if (mode !== "outdoor" && mode !== "indoor" && mode !== "dark") return;
   const L = ensureLayer(gm.layer);
   L.light = mode;
+  L.lightSet = true;
   scheduleLayerSave();
   for (const id in worldSession.players) {
     const q = worldSession.players[id];
@@ -6486,7 +6489,7 @@ function sendLayerSummaries() {
 }
 
 function sendGmLayer(gm) {
-  const L = layers[gm.layer] || makeLayer("");
+  const L = layers[gm.layer] || makeLayer("", gm.layer);
   const items = [];
   for (const it of worldSession.floorItems) {
     if (it.layer === gm.layer) items.push({ col: it.col, row: it.row, name: it.name });
