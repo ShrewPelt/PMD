@@ -620,7 +620,7 @@ const MIN_LAYER = -999;
 const CHAT_RANGE = 10;
 const VIEW_HALF_W = 10;
 const VIEW_HALF_H = 10;
-const TILE_CHARS = " .#xP";
+const TILE_CHARS = " .#xPolw";
 const MAX_EDIT_OPS = 6000;
 const TILE_ASSET_DIR = path.join(__dirname, "assets", "tilemap");
 const OBJECT_ASSET_DIR = path.join(__dirname, "assets", "objects");
@@ -1258,11 +1258,43 @@ function objAt(layer, col, row) {
 function isWalkable(layer, col, row) {
   let ch = tileAt(layer, col, row);
   if (ch === "x" && dynState[layer] && dynState[layer].open[col + "," + row]) ch = ".";
-  if (ch !== "." && ch !== "P") return false;
+  if (!isFloorChar(ch)) return false;
   const L = layers[layer];
   const obj = L ? objAt(layer, col, row) : null;
   if (obj && obj.solid && !(L.passable && L.passable[col + "," + row])) return false;
   return true;
+}
+
+function isFloorChar(ch) {
+  return ch === "." || ch === "P" || ch === "o" || ch === "l" || ch === "w";
+}
+
+function isLavaCell(layer, col, row) {
+  if (tileAt(layer, col, row) === "l") return true;
+  const obj = objAt(layer, col, row);
+  return !!obj && hazardKind(obj.name) === "lava";
+}
+
+function tilePitActive(layer, col, row) {
+  if (tileAt(layer, col, row) !== "o") return false;
+  const d = dynState[layer];
+  if (d && d.hidden[col + "," + row] !== undefined) return false;
+  return true;
+}
+
+function isPitCell(layer, col, row) {
+  if (tilePitActive(layer, col, row)) return true;
+  const obj = objAt(layer, col, row);
+  return !!obj && hazardKind(obj.name) === "pit";
+}
+
+function playerHovers(p) {
+  const types = typesOfPlayer(p);
+  for (const t of types) {
+    const name = String(t).toLowerCase();
+    if (name === "flying" || name === "psychic") return true;
+  }
+  return false;
 }
 
 function layerSpawn(layer) {
@@ -2171,7 +2203,7 @@ function sendView(p) {
     let solLine = "";
     for (let c = c0; c < c0 + w; c++) {
       const ch = tileAt(p.layer, c, r);
-      line += ch === "x" ? "." : ch;
+      line += ch === "x" ? "." : (ch === "o" && !tilePitActive(p.layer, c, r) ? "." : ch);
       artLine += ch === " " ? " " : artAt(p.layer, c, r);
       solLine += isWalkable(p.layer, c, r) ? "0" : "1";
     }
@@ -2182,7 +2214,7 @@ function sendView(p) {
   const selfLight = playerLightInfo(p);
   p._lightSig = selfLight.r + "|" + selfLight.c;
   const layerObj = layers[p.layer];
-  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, art: artRows, sol: solRows, palette: tilePalette, objects: objectsInWindow(p.layer, c0, r0, w, h), entities: entitiesInWindow(p.layer, c0, r0, w, h), items: itemsInWindow(p.layer, c0, r0, w, h), lm: layerObj && layerObj.light ? layerObj.light : "outdoor", nv: playerNightVision(p) ? 1 : 0, sl: selfLight.r, slc: selfLight.c });
+  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, art: artRows, sol: solRows, palette: tilePalette, objects: objectsInWindow(p.layer, c0, r0, w, h), entities: entitiesInWindow(p.layer, c0, r0, w, h), items: itemsInWindow(p.layer, c0, r0, w, h), lm: layerObj && layerObj.light ? layerObj.light : "outdoor", nv: playerNightVision(p) ? 1 : 0, sl: selfLight.r, slc: selfLight.c, hv: playerHovers(p) ? 1 : 0 });
 }
 
 function notifyItem(layer, col, row, data) {
@@ -3772,6 +3804,7 @@ function entityTick() {
     const nr = e.row + d.dr;
     if (Math.max(Math.abs(nc - e.homeCol), Math.abs(nr - e.homeRow)) > e.wander) continue;
     if (!isWalkable(e.layer, nc, nr)) continue;
+    if ((isPitCell(e.layer, nc, nr) || isLavaCell(e.layer, nc, nr)) && !entityHovers(e)) continue;
     if (entityAt(e.layer, nc, nr, e.id)) continue;
     if (playerAt(e.layer, nc, nr)) continue;
     const oldCol = e.col;
@@ -5624,10 +5657,8 @@ function envDamage(p, amount, text) {
 
 function hazardOnEnter(p, prevCol, prevRow) {
   if (worldCombat.isInFight(p)) return false;
-  const obj = objAt(p.layer, p.col, p.row);
-  if (!obj) return false;
-  const kind = hazardKind(obj.name);
-  if (kind !== "pit") return false;
+  if (!isPitCell(p.layer, p.col, p.row)) return false;
+  if (playerHovers(p)) return false;
   const lower = p.layer - 1;
   const pitDamage = p.maxHp * HAZARD_PIT_DAMAGE_PCT;
   if (layers[lower] && validLayerNumber(lower)) {
@@ -5652,8 +5683,8 @@ function hazardTick() {
   for (const id in worldSession.players) {
     const p = worldSession.players[id];
     if (!p || worldCombat.isInFight(p)) continue;
-    const obj = objAt(p.layer, p.col, p.row);
-    if (!obj || hazardKind(obj.name) !== "lava") continue;
+    if (!isLavaCell(p.layer, p.col, p.row)) continue;
+    if (playerHovers(p)) continue;
     if (p._lavaAt && now - p._lavaAt < HAZARD_LAVA_TICK_MS - 50) continue;
     p._lavaAt = now;
     envDamage(p, p.maxHp * HAZARD_LAVA_DAMAGE_PCT, "The lava burns you!");
@@ -5686,12 +5717,12 @@ function handleBoulderPush(p, data) {
   const destC = col + d.dc;
   const destR = row + d.dr;
   const tile = tileAt(p.layer, destC, destR);
-  if (tile !== "." && tile !== "P") {
+  if (!isFloorChar(tile)) {
     envNotice(p, "The boulder won't budge.");
     return;
   }
   const destObj = objAt(p.layer, destC, destR);
-  const destIsPit = !!destObj && hazardKind(destObj.name) === "pit";
+  const destIsPit = isPitCell(p.layer, destC, destR);
   const destIsPad = !!destObj && switchKind(destObj.name) === "pad";
   if (destObj && !destIsPit && !destIsPad) {
     envNotice(p, "Something is blocking the boulder.");
@@ -5747,7 +5778,7 @@ function entityHovers(e) {
 
 function rollFloor(layer, col, row) {
   const ch = tileAt(layer, col, row);
-  return ch === "." || ch === "P";
+  return isFloorChar(ch);
 }
 
 function rollPushable(layer, col, row) {
@@ -5788,7 +5819,7 @@ function rollBoulder(p, col, row) {
     }
     if (!rollFloor(layer, nc, nr)) break;
     const destObj = objAt(layer, nc, nr);
-    const destIsPit = !!destObj && hazardKind(destObj.name) === "pit";
+    const destIsPit = isPitCell(layer, nc, nr);
     const destIsPad = !!destObj && switchKind(destObj.name) === "pad";
     if (destObj && !destIsPit && !destIsPad) break;
     if (playerAt(layer, nc, nr)) break;
@@ -5884,8 +5915,7 @@ function rollBoulder(p, col, row) {
     const pc = oldC + sx;
     const pr = oldR + sy;
     const label = shove.name || shove.species || "The enemy";
-    const pushedObj = objAt(layer, pc, pr);
-    const intoPit = !!pushedObj && hazardKind(pushedObj.name) === "pit";
+    const intoPit = isPitCell(layer, pc, pr);
     if (intoPit && !entityHovers(shove)) {
       cancelEnemyRespawn(shove.id);
       removeEntity(shove.id);

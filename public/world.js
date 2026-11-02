@@ -1,8 +1,8 @@
 const WORLD_COLS = 10000;
 const WORLD_ROWS = 10000;
 const CHUNK = 32;
-const TOOL_CHARS = { floor: ".", wall: "#", barrier: "x", void: " " };
-const TOOL_PREVIEW = { floor: 0x5a5a88, wall: 0x8a6a4a, barrier: 0xc0392b, void: 0x000000, tile: 0x4a9a4a, tileclear: 0x888888, object: 0xd8a840, objerase: 0xc0392b, passable: 0x3ec13e, passableclear: 0x999999 };
+const TOOL_CHARS = { floor: ".", wall: "#", barrier: "x", pit: "o", lava: "l", web: "w", void: " " };
+const TOOL_PREVIEW = { floor: 0x5a5a88, wall: 0x8a6a4a, barrier: 0xc0392b, pit: 0x14141c, lava: 0xe8651a, web: 0xd8d8e8, void: 0x000000, tile: 0x4a9a4a, tileclear: 0x888888, object: 0xd8a840, objerase: 0xc0392b, passable: 0x3ec13e, passableclear: 0x999999 };
 const worldArtPool = {};
 const worldObjectPool = {};
 const worldAssetState = {};
@@ -181,8 +181,36 @@ function blankRows() {
 
 function worldDrawBase(g, c, r, ch) {
   if (ch === " " || ch === "#") return;
+  if (ch === "o") {
+    g.fillStyle(0x0b0b12, 1);
+    g.fillRect(c * TILE, r * TILE, TILE - 2, TILE - 2);
+    g.fillStyle(0x000000, 1);
+    g.fillRect(c * TILE + 4, r * TILE + 4, TILE - 10, TILE - 10);
+    return;
+  }
+  if (ch === "l") {
+    g.fillStyle(0xb8340c, 1);
+    g.fillRect(c * TILE, r * TILE, TILE - 2, TILE - 2);
+    g.fillStyle(0xf08a1c, 1);
+    g.fillRect(c * TILE + 4, r * TILE + 4, TILE - 10, TILE - 10);
+    return;
+  }
   g.fillStyle(0x3a3a55, 1);
   g.fillRect(c * TILE, r * TILE, TILE - 2, TILE - 2);
+  if (ch === "w") {
+    g.lineStyle(1, 0xe8e8f4, 0.9);
+    const x0 = c * TILE;
+    const y0 = r * TILE;
+    const x1 = x0 + TILE - 2;
+    const y1 = y0 + TILE - 2;
+    const mx = x0 + (TILE - 2) / 2;
+    const my = y0 + (TILE - 2) / 2;
+    g.lineBetween(x0, y0, x1, y1);
+    g.lineBetween(x1, y0, x0, y1);
+    g.lineBetween(mx, y0, mx, y1);
+    g.lineBetween(x0, my, x1, my);
+    g.strokeCircle(mx, my, (TILE - 2) / 4);
+  }
 }
 
 function worldDrawOverlay(g, c, r, ch, forPlayers) {
@@ -815,6 +843,13 @@ function drawPlayerView(scene, data) {
     if (isTuffName(o.name)) TUFF.cells.push([o.col, o.row]);
     if (HZ_WEB_RE.test(String(o.name))) TUFF.webCells.push([o.col, o.row]);
   }
+  for (let r = 0; r < data.rows.length; r++) {
+    const line = data.rows[r];
+    for (let c = 0; c < line.length; c++) {
+      if (line[c] === "w") TUFF.webCells.push([data.c0 + c, data.r0 + r]);
+    }
+  }
+  if (data.hv) TUFF.webCells = [];
   worldSyncPool(scene, worldArtPool, wantedArt, "tile");
   worldSyncPool(scene, worldObjectPool, wantedObjs, "object");
   worldSyncItems(scene, data.items);
@@ -1627,6 +1662,9 @@ function gmOvBuild(scene, c0, r0, w, h, k) {
     if (ch === undefined || ch === " ") return null;
     if (ch === "#") return [107, 79, 58];
     if (ch === "x") return [192, 57, 43];
+    if (ch === "l" && WG.art[rr] && (!WG.art[rr][cc] || WG.art[rr][cc] === " ")) return [240, 138, 28];
+    if (ch === "w" && WG.art[rr] && (!WG.art[rr][cc] || WG.art[rr][cc] === " ")) return [200, 200, 220];
+    if (ch === "o" && WG.art[rr] && (!WG.art[rr][cc] || WG.art[rr][cc] === " ")) return [12, 12, 18];
     if (ch === "P") return [155, 89, 182];
     const artLine = WG.art[rr];
     const ac = artLine ? artLine[cc] : " ";
@@ -2077,7 +2115,7 @@ function gmUpdateHoverStatus() {
     return;
   }
   const ch = WG.rows[WG.hoverRow][WG.hoverCol];
-  const names = { " ": "empty", ".": "floor", "#": "wall", "x": "barrier", "P": "portal" };
+  const names = { " ": "empty", ".": "floor", "#": "wall", "x": "barrier", "o": "pit", "l": "lava", "w": "web", "P": "portal" };
   let text = "Layer " + WG.layer + " | " + WG.hoverCol + ", " + WG.hoverRow + " | " + names[ch];
   for (const eid in WG.entities) {
     const he = WG.entities[eid];
@@ -2723,6 +2761,9 @@ function gmBuildPanel() {
     + "<button class='wgBtn on' data-wgtool='floor'>Floor</button>"
     + "<button class='wgBtn' data-wgtool='wall'>Wall</button>"
     + "<button class='wgBtn' data-wgtool='barrier'>Barrier</button>"
+    + "<button class='wgBtn' data-wgtool='pit'>Pit</button>"
+    + "<button class='wgBtn' data-wgtool='lava'>Lava</button>"
+    + "<button class='wgBtn' data-wgtool='web'>Web</button>"
     + "<button class='wgBtn' data-wgtool='void'>Erase</button>"
     + "<button class='wgBtn' data-wgtool='portal'>Portal</button>"
     + "<button class='wgBtn' data-wgtool='link'>Link switch</button>"
