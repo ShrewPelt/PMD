@@ -620,6 +620,7 @@ const MIN_LAYER = -999;
 const CHAT_RANGE = 10;
 const VIEW_HALF_W = 10;
 const VIEW_HALF_H = 10;
+const VIEW_OBJ_PAD = 5;
 const TILE_CHARS = " .#xPolw";
 const MAX_EDIT_OPS = 6000;
 const TILE_ASSET_DIR = path.join(__dirname, "assets", "tilemap");
@@ -2217,7 +2218,7 @@ function sendView(p) {
   const selfLight = playerLightInfo(p);
   p._lightSig = selfLight.r + "|" + selfLight.c;
   const layerObj = layers[p.layer];
-  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, art: artRows, sol: solRows, palette: tilePalette, objects: objectsInWindow(p.layer, c0, r0, w, h), entities: entitiesInWindow(p.layer, c0, r0, w, h), items: itemsInWindow(p.layer, c0, r0, w, h), lm: layerObj && layerObj.light ? layerObj.light : "outdoor", nv: playerNightVision(p) ? 1 : 0, sl: selfLight.r, slc: selfLight.c, hv: playerHovers(p) ? 1 : 0 });
+  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, art: artRows, sol: solRows, palette: tilePalette, objects: objectsInWindow(p.layer, c0 - VIEW_OBJ_PAD, r0 - VIEW_OBJ_PAD, w + VIEW_OBJ_PAD * 2, h + VIEW_OBJ_PAD * 2), entities: entitiesInWindow(p.layer, c0, r0, w, h), items: itemsInWindow(p.layer, c0 - VIEW_OBJ_PAD, r0 - VIEW_OBJ_PAD, w + VIEW_OBJ_PAD * 2, h + VIEW_OBJ_PAD * 2), lm: layerObj && layerObj.light ? layerObj.light : "outdoor", nv: playerNightVision(p) ? 1 : 0, sl: selfLight.r, slc: selfLight.c, hv: playerHovers(p) ? 1 : 0 });
 }
 
 function notifyItem(layer, col, row, data) {
@@ -5681,7 +5682,7 @@ function refreshViewsNear(layer, col, row) {
   for (const id in worldSession.players) {
     const q = worldSession.players[id];
     if (!q || q.layer !== layer) continue;
-    if (Math.abs(q.col - col) > VIEW_HALF_W + 1 || Math.abs(q.row - row) > VIEW_HALF_H + 1) continue;
+    if (Math.abs(q.col - col) > VIEW_HALF_W + VIEW_OBJ_PAD + 1 || Math.abs(q.row - row) > VIEW_HALF_H + VIEW_OBJ_PAD + 1) continue;
     sendView(q);
   }
 }
