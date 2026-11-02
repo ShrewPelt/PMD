@@ -5635,7 +5635,46 @@ function sendPosCorrect(p) {
   sendPlayer(p, { type: "poscorrect", x: cur.x, y: cur.y, direction: p.direction });
 }
 
+function gmDynCell(layer, col, row) {
+  const L = layers[layer];
+  if (!L) return null;
+  const key = col + "," + row;
+  const base = L.objects[key] || null;
+  const cur = objAt(layer, col, row);
+  const plug = tileAt(layer, col, row) === "o" && !tilePitActive(layer, col, row) ? 1 : 0;
+  if (cur) {
+    const shown = switchShownName(layer, col, row, cur.name);
+    if (cur === base && shown === cur.name) return [col, row, 0, "", 0, 0, 0, plug];
+    return [col, row, 2, shown, cur.solid ? 1 : 0, cur.rot || 0, cur.flip ? 1 : 0, plug];
+  }
+  if (base) return [col, row, 1, "", 0, 0, 0, plug];
+  return [col, row, 0, "", 0, 0, 0, plug];
+}
+
+function gmDynSnapshot(layer) {
+  const d = dynState[layer];
+  const out = [];
+  if (!d) return out;
+  const seen = {};
+  const keys = [];
+  for (const k of Object.keys(d.hidden)) keys.push(k);
+  for (const k of Object.keys(d.occ)) keys.push(k);
+  for (const k of Object.keys(d.boulders)) keys.push(k);
+  for (const k of Object.keys(d.open)) keys.push(k);
+  for (const k of Object.keys(d.sw)) keys.push(k);
+  for (const k of keys) {
+    if (seen[k]) continue;
+    seen[k] = true;
+    const parts = k.split(",");
+    const cell = gmDynCell(layer, parseInt(parts[0], 10), parseInt(parts[1], 10));
+    if (cell) out.push(cell);
+  }
+  return out;
+}
+
 function refreshViewsNear(layer, col, row) {
+  const dynCell = gmDynCell(layer, col, row);
+  if (dynCell) sendGms(layer, { type: "gm_dyn", layer: layer, cells: [dynCell] });
   for (const id in worldSession.players) {
     const q = worldSession.players[id];
     if (!q || q.layer !== layer) continue;
@@ -6464,7 +6503,7 @@ function sendGmLayer(gm) {
     if (farmCell && farmCell[2] !== "") objList.push(farmCell);
   }
   const passList = Object.keys(L.passable || {}).map((k) => k.split(",").map((v) => parseInt(v, 10)));
-  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, passable: passList, name: L.name, rows: L.rows.map(trimRowEnd), art: L.art.map(trimRowEnd), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer && !entities[id].down).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: null, spawns: spawnList(), floorItems: items, layers: layerSummaries(), light: L.light || "outdoor", links: L.links || {} });
+  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, passable: passList, name: L.name, rows: L.rows.map(trimRowEnd), art: L.art.map(trimRowEnd), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer && !entities[id].down).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: null, spawns: spawnList(), floorItems: items, layers: layerSummaries(), light: L.light || "outdoor", links: L.links || {}, dyn: gmDynSnapshot(gm.layer) });
 }
 
 function handleGmMessage(gm, data) {

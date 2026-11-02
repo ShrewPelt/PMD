@@ -888,7 +888,7 @@ function gmRedrawChunk(scene, cx, cy) {
   for (let r = cy * CHUNK; r < rMax; r++) {
     const line = WG.rows[r];
     for (let c = cx * CHUNK; c < cMax; c++) {
-      worldDrawBase(g, c, r, line[c]);
+      worldDrawBase(g, c, r, line[c] === "o" && WG.dyn && WG.dyn.plug[c + "," + r] ? "." : line[c]);
       worldDrawOverlay(over, c, r, line[c], false);
     }
   }
@@ -970,7 +970,9 @@ function gmSyncArt(scene) {
       if (ch !== " " && logicLine[c] !== " " && logicLine[c] !== "#" && WG.palette[ch]) {
         wantedArt[c + "," + r] = { name: WG.palette[ch], c: c, r: r };
       }
-      const obj = WG.objects[c + "," + r];
+      const dynO = WG.dyn ? WG.dyn.o : null;
+      const dynKey = c + "," + r;
+      const obj = dynO && dynKey in dynO ? dynO[dynKey] : WG.objects[dynKey];
       if (obj) wantedObjs[c + "," + r] = { name: obj.name, c: c, r: r, rot: obj.rot || 0, flip: !!obj.flip, alpha: obj.solid && !WG.passable[c + "," + r] ? 1 : 0.7 };
     }
   }
@@ -1928,9 +1930,26 @@ function gmApplyArt(scene, cells, palette) {
   WG.artDirty = true;
 }
 
+function gmApplyDyn(cells) {
+  if (!WG.dyn) WG.dyn = { o: {}, plug: {} };
+  for (const cell of cells || []) {
+    const key = cell[0] + "," + cell[1];
+    if (cell[2] === 0) delete WG.dyn.o[key];
+    else if (cell[2] === 1) WG.dyn.o[key] = null;
+    else WG.dyn.o[key] = { name: cell[3], solid: cell[4] !== 0, rot: cell[5] || 0, flip: cell[6] === 1 };
+    const wasPlug = !!WG.dyn.plug[key];
+    if (cell[7]) WG.dyn.plug[key] = 1;
+    else delete WG.dyn.plug[key];
+    if (wasPlug !== !!cell[7] && sceneRef && gmInBounds(cell[0], cell[1])) gmRedrawChunk(sceneRef, Math.floor(cell[0] / CHUNK), Math.floor(cell[1] / CHUNK));
+  }
+  WG.artDirty = true;
+}
+
 function gmApplyObjs(scene, cells) {
+  if (!WG.dyn) WG.dyn = { o: {}, plug: {} };
   for (const cell of cells) {
     const key = cell[0] + "," + cell[1];
+    delete WG.dyn.o[key];
     if (cell[2]) WG.objects[key] = { name: cell[2], solid: cell[3] !== 0, rot: cell[4] || 0, flip: cell[5] === 1 };
     else delete WG.objects[key];
   }
@@ -4592,6 +4611,8 @@ function gmLoadLayer(scene, data) {
   VIS.layerMode = data.light || "outdoor";
   const lightSelect = document.getElementById("wgLightMode");
   if (lightSelect) lightSelect.value = VIS.layerMode;
+  WG.dyn = { o: {}, plug: {} };
+  gmApplyDyn(data.dyn || []);
   WG.objects = {};
   for (const o of data.objects || []) {
     WG.objects[o[0] + "," + o[1]] = { name: o[2], solid: o[3] !== 0, rot: o[4] || 0, flip: o[5] === 1 };
@@ -7487,6 +7508,10 @@ window.worldHook = function (scene, data) {
         gmLinkRender();
         gmDrawMarkers();
       }
+      return true;
+    }
+    if (data.type === "gm_dyn") {
+      if (data.layer === WG.layer) gmApplyDyn(data.cells);
       return true;
     }
     if (data.type === "gm_objs") {
