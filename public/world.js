@@ -307,13 +307,47 @@ function webUnderPlayer() {
   return false;
 }
 
+const HZ_HOLD = { gfx: null, col: 0, row: 0, start: 0, need: 1, last: 0, bound: false };
+
+function boulderHoldShow(scene, data) {
+  const now = Date.now();
+  HZ_HOLD.col = data.col;
+  HZ_HOLD.row = data.row;
+  HZ_HOLD.need = Math.max(1, data.need || 1000);
+  HZ_HOLD.start = now - (data.elapsed || 0);
+  HZ_HOLD.last = now;
+  if (!HZ_HOLD.gfx) {
+    HZ_HOLD.gfx = scene.add.graphics();
+    HZ_HOLD.gfx.setDepth(40);
+  }
+  if (!HZ_HOLD.bound) {
+    HZ_HOLD.bound = true;
+    scene.events.on("update", () => boulderHoldDraw());
+  }
+}
+
+function boulderHoldDraw() {
+  const g = HZ_HOLD.gfx;
+  if (!g) return;
+  const now = Date.now();
+  g.clear();
+  if (now - HZ_HOLD.last > 700) return;
+  const frac = Math.max(0, Math.min(1, (now - HZ_HOLD.start) / HZ_HOLD.need));
+  const x = HZ_HOLD.col * TILE;
+  const y = HZ_HOLD.row * TILE - 10;
+  g.fillStyle(0x000000, 0.7);
+  g.fillRect(x, y, TILE - 2, 7);
+  g.fillStyle(0xf0b030, 1);
+  g.fillRect(x + 1, y + 1, (TILE - 4) * frac, 5);
+}
+
 function boulderTryPush(dir) {
   if (!worldPlayerMode || !worldLastView || !player) return;
   const deltas = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
   const d = deltas[dir];
   if (!d) return;
   const now = Date.now();
-  if (now - HZ_PUSH.lastAt < 350) return;
+  if (now - HZ_PUSH.lastAt < 250) return;
   const pc = Math.floor(player.x / TILE);
   const pr = Math.floor(player.y / TILE);
   const tc = pc + d[0];
@@ -6482,7 +6516,9 @@ function freeMoveFrame() {
   const len = Math.hypot(v[0], v[1]);
   const vx = v[0] / len;
   const vy = v[1] / len;
-  const dir = Math.abs(vx) >= Math.abs(vy) ? (vx > 0 ? "right" : "left") : (vy > 0 ? "down" : "up");
+  const pushDir = Math.abs(vx) >= Math.abs(vy) ? (vx > 0 ? "right" : "left") : (vy > 0 ? "down" : "up");
+  let dir = pushDir;
+  if (Math.abs(vx) > 0.2 && Math.abs(vy) > 0.2) dir = (vy > 0 ? "down" : "up") + (vx > 0 ? "right" : "left");
   let walkSpeed = FREE.speed;
   if (tuffUnderPlayer()) walkSpeed = Math.max(0.5, walkSpeed - TUFF.slow);
   if (webUnderPlayer()) walkSpeed = Math.max(0.5, walkSpeed - TUFF.webSlow);
@@ -6494,7 +6530,7 @@ function freeMoveFrame() {
     if (freeCanStand(nx, player.y + vy * step)) ny = player.y + vy * step;
   }
   const moved = nx !== player.x || ny !== player.y;
-  if (!moved && step > 0) boulderTryPush(dir);
+  if (!moved && step > 0) boulderTryPush(pushDir);
   if (dir !== player.direction) {
     player.direction = dir;
     FREE.anim = "";
@@ -7243,6 +7279,10 @@ window.worldHook = function (scene, data) {
       const lightSel = document.getElementById("wgLightMode");
       if (lightSel) lightSel.value = data.mode;
     }
+    return true;
+  }
+  if (data.type === "boulder_hold") {
+    boulderHoldShow(scene, data);
     return true;
   }
   if (data.type === "boulder_roll") {

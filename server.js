@@ -1601,6 +1601,34 @@ const VISION_BLOCK_RE = VISION.sightBlockers.length > 0 ? new RegExp(VISION.sigh
 const NIGHT_SPECIES_SET = {};
 for (const name of VISION.nightVisionSpecies) NIGHT_SPECIES_SET[String(name).toLowerCase()] = true;
 
+const SPECIES_SIZES_FILE = path.join(__dirname, "StorageData", "SpeciesSizes.json");
+const speciesSizeMap = {};
+try {
+  const rawSizes = JSON.parse(fs.readFileSync(SPECIES_SIZES_FILE, "utf8"));
+  for (const name of Object.keys(rawSizes)) speciesSizeMap[name.toLowerCase()] = rawSizes[name];
+} catch (e) {}
+
+const BOULDER_HOLD_MS = { small: 3000, medium: 2000, large: 1000 };
+
+function sizeOfSpecies(species) {
+  const words = String(species || "").toLowerCase().replace(/[^a-z0-9. \-']/g, " ").split(/\s+/).filter((w) => w);
+  const whole = words.join(" ");
+  if (speciesSizeMap[whole]) return speciesSizeMap[whole];
+  for (let i = 0; i < words.length; i++) {
+    const tail = words.slice(i).join(" ");
+    if (speciesSizeMap[tail]) return speciesSizeMap[tail];
+  }
+  for (let i = words.length - 1; i >= 0; i--) {
+    if (speciesSizeMap[words[i]]) return speciesSizeMap[words[i]];
+  }
+  return "medium";
+}
+
+function boulderHoldMsFor(p) {
+  const sheet = p._sheet || {};
+  return BOULDER_HOLD_MS[sizeOfSpecies(sheet.species)] || BOULDER_HOLD_MS.medium;
+}
+
 const speciesTypeMap = {};
 try {
   const rawTypes = JSON.parse(fs.readFileSync(SPECIES_TYPES_FILE, "utf8"));
@@ -5753,10 +5781,22 @@ function handleBoulderPush(p, data) {
   if (!Number.isInteger(col) || !Number.isInteger(row)) return;
   if (p.col + d.dc !== col || p.row + d.dr !== row) return;
   const now = Date.now();
-  if (p._pushAt && now - p._pushAt < 300) return;
+  if (p._pushAt && now - p._pushAt < 200) return;
   p._pushAt = now;
   const obj = objAt(p.layer, col, row);
   if (!obj || !BOULDER_RE.test(obj.name)) return;
+  const need = boulderHoldMsFor(p);
+  const holdKey = p.layer + ":" + col + "," + row + ":" + String(data.dir);
+  let hold = p._pushHold;
+  if (!hold || hold.key !== holdKey || now - hold.last > 900) {
+    hold = { key: holdKey, since: now, last: now };
+    p._pushHold = hold;
+  }
+  hold.last = now;
+  const elapsed = now - hold.since;
+  sendPlayer(p, { type: "boulder_hold", col: col, row: row, need: need, elapsed: elapsed });
+  if (elapsed < need) return;
+  p._pushHold = null;
   const destC = col + d.dc;
   const destR = row + d.dr;
   const tile = tileAt(p.layer, destC, destR);
