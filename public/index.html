@@ -790,7 +790,18 @@ function hpColor(r) {
   return 0xd83030;
 }
 
+function barsNeeded(s) {
+  if (!(s.maxHp > 0)) return false;
+  if (s.hp < s.maxHp) return true;
+  if (s.maxMp > 0 && s.mp < s.maxMp) return true;
+  return false;
+}
+
 function drawEntityBars(s) {
+  if (!barsNeeded(s)) {
+    drawStatusIcons(s);
+    return;
+  }
   const w = 34;
   const h = 4;
   const x = -w / 2;
@@ -1011,6 +1022,20 @@ function updatePlayerLift() {
   player.y = playerRestingY(player.col, player.row);
 }
 
+let CUSTOM_EXPR = {};
+
+function resolveCustomClient(raw) {
+  const tags = String(raw || "").match(/\[[^\]]+\]/g) || [];
+  for (let i = 0; i < tags.length; i++) {
+    const inner = tags[i].slice(1, -1).trim();
+    const explicit = /^custom:/i.test(inner);
+    const lower = inner.replace(/^custom:/i, "").trim().toLowerCase();
+    if (!explicit && EMOTION_LOOKUP[lower]) return null;
+    if (CUSTOM_EXPR[lower]) return CUSTOM_EXPR[lower];
+  }
+  return null;
+}
+
 function parseMessage(raw) {
   let emotion = "Normal";
   const tags = raw.match(/\[[^\]]+\]/g);
@@ -1036,7 +1061,10 @@ function makeBubble(scene) {
   portrait.setDepth(501);
   portrait.setDisplaySize(48, 48);
   portrait.setVisible(false);
-  return { gfx: gfx, txt: txt, portrait: portrait, target: null, timer: null, visible: false };
+  const nameTxt = scene.add.text(0, 0, "", { fontSize: "12px", fontStyle: "bold", color: "#4a2c0a", fontFamily: "sans-serif" });
+  nameTxt.setDepth(502);
+  nameTxt.setVisible(false);
+  return { gfx: gfx, txt: txt, portrait: portrait, nameTxt: nameTxt, nameStr: "", target: null, timer: null, visible: false };
 }
 
 const CHATLOG = { max: 200, unread: 0, collapsed: false, range: 10, ready: false };
@@ -1136,7 +1164,7 @@ function chatLogShow() {
   box.classList.remove("hidden");
 }
 
-function chatLogAdd(name, dex, text, emotion, mine, ts) {
+function chatLogAdd(name, dex, text, emotion, mine, ts, customUrl) {
   if (typeof worldPlayerMode === "undefined" || !worldPlayerMode) return;
   if (!text) return;
   chatLogShow();
@@ -1150,7 +1178,7 @@ function chatLogAdd(name, dex, text, emotion, mine, ts) {
   portrait.className = "clportrait";
   const img = document.createElement("img");
   img.alt = "";
-  img.src = "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/portrait/" + (dex || "0004") + "/" + (emotion || "Normal") + ".png";
+  img.src = customUrl || ("https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/portrait/" + (dex || "0004") + "/" + (emotion || "Normal") + ".png");
   img.addEventListener("error", () => {
     img.remove();
     portrait.textContent = String(name || "?").charAt(0).toUpperCase();
@@ -1186,12 +1214,13 @@ function chatLogAdd(name, dex, text, emotion, mine, ts) {
 
 function showBubble(raw) {
   const parsedOwn = parseMessage(raw);
-  chatLogAdd("You", DEX, parsedOwn.text, parsedOwn.emotion, true, Date.now());
-  showBubbleFor(sceneRef, "me", player, DEX, raw);
+  const ownCustom = resolveCustomClient(raw);
+  chatLogAdd("You", DEX, parsedOwn.text, parsedOwn.emotion, true, Date.now(), ownCustom);
+  showBubbleFor(sceneRef, "me", player, DEX, raw, undefined, ownCustom);
   sendChat(raw);
 }
 
-function showBubbleFor(scene, key, target, dex, raw) {
+function showBubbleFor(scene, key, target, dex, raw, speakerName, customUrl) {
   const parsed = parseMessage(raw);
   let b = bubbles[key];
   if (!b) {
@@ -1201,14 +1230,17 @@ function showBubbleFor(scene, key, target, dex, raw) {
   b.target = target;
   b.visible = true;
   b.txt.setText(parsed.text);
+  b.nameStr = speakerName ? String(speakerName) : "";
+  b.nameTxt.setText(b.nameStr);
+  b.nameTxt.setVisible(b.nameStr !== "");
 
-  const texKey = "portrait_" + dex + "_" + parsed.emotion;
+  const texKey = customUrl ? "cx_" + customUrl : "portrait_" + dex + "_" + parsed.emotion;
   if (scene.textures.exists(texKey)) {
     b.portrait.setTexture(texKey);
     b.portrait.setDisplaySize(48, 48);
     b.portrait.setVisible(true);
   } else {
-    const url = "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/portrait/" + dex + "/" + parsed.emotion + ".png";
+    const url = customUrl || ("https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/portrait/" + dex + "/" + parsed.emotion + ".png");
     scene.load.image(texKey, url);
     scene.load.once("complete", () => {
       if (scene.textures.exists(texKey)) {
@@ -1247,7 +1279,23 @@ function positionBubbleObj(b) {
   b.gfx.fillStyle(0xffffff, 0.95);
   b.gfx.fillRoundedRect(boxX, boxY, boxW, boxH, 6);
   b.gfx.fillTriangle(-6, boxY + boxH, 6, boxY + boxH, 0, boxY + boxH + 8);
+  let tabW = 0;
+  let tabH = 0;
+  if (b.nameStr) {
+    tabW = b.nameTxt.width + 16;
+    tabH = b.nameTxt.height + 6;
+    b.gfx.fillStyle(0xf0c869, 1);
+    b.gfx.fillRoundedRect(boxX, boxY - tabH + 2, tabW, tabH, { tl: 6, tr: 6, bl: 0, br: 0 });
+    b.gfx.lineStyle(1, 0x8a5a1c, 1);
+    b.gfx.strokeRoundedRect(boxX, boxY - tabH + 2, tabW, tabH, { tl: 6, tr: 6, bl: 0, br: 0 });
+  }
   b.gfx.restore();
+  if (b.nameStr) {
+    const nx = boxX + 8;
+    const ny = boxY - tabH + 5;
+    b.nameTxt.setRotation(-viewRot);
+    b.nameTxt.setPosition(ax + nx * cosA - ny * sinA, ay + nx * sinA + ny * cosA);
+  }
 
   const tx = boxX + pad;
   const ty = boxY + pad;
@@ -1267,6 +1315,9 @@ function hideBubbleObj(b) {
   b.gfx.clear();
   b.txt.setText("");
   b.portrait.setVisible(false);
+  b.nameStr = "";
+  b.nameTxt.setText("");
+  b.nameTxt.setVisible(false);
 }
 
 function sendChat(raw) {
@@ -1558,6 +1609,7 @@ function connectMultiplayer(scene) {
 
     if (data.type === "init") {
       if (data.chatRange) CHATLOG.range = data.chatRange;
+      CUSTOM_EXPR = data.cxm && typeof data.cxm === "object" ? data.cxm : {};
       myId = data.id;
       turnCount = data.turn;
       if (Array.isArray(data.map) && data.map.length > 0) {
@@ -1703,11 +1755,11 @@ function connectMultiplayer(scene) {
     } else if (data.type === "chat") {
       if (!isGM) {
         const parsedIn = parseMessage(String(data.text || ""));
-        chatLogAdd(data.name, data.dex, parsedIn.text, parsedIn.emotion, false, data.ts);
+        chatLogAdd(data.name, data.dex, parsedIn.text, parsedIn.emotion, false, data.ts, data.cx || null);
       }
       const sprite = otherPlayers[data.id];
       if (sprite && sprite !== "loading") {
-        showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text);
+        showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text, undefined, data.cx || null);
       }
     } else if (data.type === "ended") {
       updateReadout(data.reason ? data.reason : "dungeon ended by GM");

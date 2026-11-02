@@ -495,6 +495,10 @@ function dummyAttack(p, data) {
     if (q.id !== p.id && ctx.cellInView(q, p.layer, col, row)) ctx.sendPlayer(q, hit);
   }
   ctx.sendPlayer(p, hit);
+  if (damage > 0 && typeof ctx.isBreakableAt === "function" && ctx.isBreakableAt(p.layer, col, row)) {
+    ctx.breakObjectAt(p.layer, col, row);
+    notice(p, "You smashed it to pieces!");
+  }
 }
 
 function startDuel(p, data) {

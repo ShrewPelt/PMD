@@ -53,11 +53,53 @@ function gatePassValid(pass) {
   return false;
 }
 
-function gateDeny(req, res) {
+function gateDeny(req, res, message) {
+  const text = message || "This page can only be opened through the Discord bot.";
   res.status(403);
   res.set("Cache-Control", "no-store");
-  res.type("html").send("<!doctype html><html><head><meta charset='utf-8'><meta name='robots' content='noindex,nofollow'><title>Access denied</title></head><body style='background:#14141f;color:#ddd;font-family:sans-serif;text-align:center;padding-top:20vh'><h2>Access denied</h2><p>This page can only be opened through the Discord bot.</p></body></html>");
+  res.type("html").send("<!doctype html><html><head><meta charset='utf-8'><meta name='robots' content='noindex,nofollow'><title>Access denied</title></head><body style='background:#14141f;color:#ddd;font-family:sans-serif;text-align:center;padding-top:20vh'><h2>Access denied</h2><p>" + text + "</p></body></html>");
 }
+
+const BROWSER_COOKIE = "pmd_id";
+const BROWSER_COOKIE_MAX_AGE = 365 * 24 * 60 * 60;
+
+function readCookie(headerValue, name) {
+  const parts = String(headerValue || "").split(";");
+  for (const part of parts) {
+    const idx = part.indexOf("=");
+    if (idx < 0) continue;
+    if (part.slice(0, idx).trim() !== name) continue;
+    return part.slice(idx + 1).trim();
+  }
+  return "";
+}
+
+function validBrowserId(value) {
+  return typeof value === "string" && /^[a-f0-9]{48}$/.test(value);
+}
+
+function makeBrowserId() {
+  return crypto.randomBytes(24).toString("hex");
+}
+
+function requestIsSecure(req) {
+  return req.secure || String((req.headers && req.headers["x-forwarded-proto"]) || "").split(",")[0].trim() === "https";
+}
+
+function bindWorldPass(pass, browserId) {
+  const info = worldPasses[pass];
+  if (!info) return "invalid";
+  if (!validBrowserId(browserId)) return "nocookie";
+  if (!info.bound) {
+    info.bound = browserId;
+    writeJsonFile(PASSES_FILE, worldPasses);
+    return "ok";
+  }
+  if (info.bound === browserId) return "ok";
+  return "taken";
+}
+
+const BOUND_MESSAGE = "This link is already being used by another browser. Use /joinworld in Discord to get a new link.";
 
 app.disable("x-powered-by");
 
@@ -91,8 +133,25 @@ app.use((req, res, next) => {
       gateDeny(req, res);
       return;
     }
-    const secure = req.secure || String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https";
-    res.append("Set-Cookie", GATE_COOKIE + "=" + gateMakeCookie() + "; Path=/; Max-Age=" + Math.floor(GATE_TTL_MS / 1000) + "; HttpOnly; SameSite=Lax" + (secure ? "; Secure" : ""));
+    const secure = requestIsSecure(req);
+    const secureFlag = secure ? "; Secure" : "";
+    if (worldPasses[pass]) {
+      let browserId = readCookie(req.headers.cookie, BROWSER_COOKIE);
+      let freshId = false;
+      if (!validBrowserId(browserId)) {
+        browserId = makeBrowserId();
+        freshId = true;
+      }
+      const result = bindWorldPass(pass, browserId);
+      if (result === "taken") {
+        gateDeny(req, res, BOUND_MESSAGE);
+        return;
+      }
+      if (freshId) {
+        res.append("Set-Cookie", BROWSER_COOKIE + "=" + browserId + "; Path=/; Max-Age=" + BROWSER_COOKIE_MAX_AGE + "; HttpOnly; SameSite=Lax" + secureFlag);
+      }
+    }
+    res.append("Set-Cookie", GATE_COOKIE + "=" + gateMakeCookie() + "; Path=/; Max-Age=" + Math.floor(GATE_TTL_MS / 1000) + "; HttpOnly; SameSite=Lax" + secureFlag);
     res.set("Cache-Control", "no-store");
     return next();
   }
@@ -174,7 +233,19 @@ app.get("/assets/objects/:file", (req, res, next) => {
 });
 app.use("/assets", express.static(path.join(__dirname, "assets")));
 
-app.use(express.json());
+const joinJsonParser = express.json({ limit: "16mb" });
+const defaultJsonParser = express.json();
+app.use((req, res, next) => {
+  if (req.method === "POST" && req.path === "/api/world/join") {
+    if (!API_SECRET || req.headers["x-api-key"] !== API_SECRET) {
+      res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    joinJsonParser(req, res, next);
+    return;
+  }
+  defaultJsonParser(req, res, next);
+});
 
 const API_SECRET = process.env.API_SECRET || "";
 
@@ -909,11 +980,11 @@ function cleanRot(value) {
 function makeLayer(name) {
   const rows = [];
   for (let r = 0; r < LAYER_H; r++) rows.push(BLANK_ROW);
-  return { name: name || "", rows: rows, art: rows.slice(), objects: {}, passable: {}, portals: {}, spawn: null, light: "outdoor" };
+  return { name: name || "", rows: rows, art: rows.slice(), objects: {}, passable: {}, portals: {}, links: {}, spawn: null, light: "outdoor" };
 }
 
 function layerHasContent(L) {
-  if (L.name || L.spawn || (L.light && L.light !== "outdoor") || Object.keys(L.portals).length > 0 || Object.keys(L.objects).length > 0 || Object.keys(L.passable).length > 0) return true;
+  if (L.name || L.spawn || (L.light && L.light !== "outdoor") || Object.keys(L.portals).length > 0 || Object.keys(L.objects).length > 0 || Object.keys(L.passable).length > 0 || (L.links && Object.keys(L.links).length > 0)) return true;
   for (const row of L.rows) {
     if (row !== BLANK_ROW && row.trim().length > 0) return true;
   }
@@ -940,13 +1011,20 @@ function loadLayers() {
       }
       const objList = Array.isArray(saved.objects) ? saved.objects : [];
       for (const o of objList) {
-        if (Array.isArray(o) && o.length >= 3) L.objects[o[0] + "," + o[1]] = { name: String(o[2]), solid: o[3] !== 0 && !/tuff/i.test(String(o[2])), rot: cleanRot(o[4]), flip: o[5] === 1 };
+        if (Array.isArray(o) && o.length >= 3) L.objects[o[0] + "," + o[1]] = { name: String(o[2]), solid: o[3] !== 0 && !forcedNonSolid(o[2]), rot: cleanRot(o[4]), flip: o[5] === 1 };
       }
       const passList = Array.isArray(saved.passable) ? saved.passable : [];
       for (const pc of passList) {
         if (Array.isArray(pc) && pc.length >= 2) L.passable[pc[0] + "," + pc[1]] = 1;
       }
       L.portals = saved.portals && typeof saved.portals === "object" ? saved.portals : {};
+      L.links = {};
+      if (saved.links && typeof saved.links === "object") {
+        for (const lk of Object.keys(saved.links)) {
+          const spec = cleanLinkSpec(saved.links[lk]);
+          if (spec && /^\d+,\d+$/.test(lk)) L.links[lk] = spec;
+        }
+      }
       L.spawn = saved.spawn || null;
       L.light = saved.light === "indoor" || saved.light === "dark" ? saved.light : "outdoor";
       layers[n] = L;
@@ -961,6 +1039,19 @@ function loadLayers() {
   L.spawn = { col: 32, row: 22 };
   layers[0] = L;
 }
+
+const BOULDER_RE = /boulder/i;
+const BREAKABLE_RE = /breakable|^pot\d*$|^clay_pot|worn_crate|^crate\d*$|^vase\d*$/i;
+const PIT_RE = /(^|[^a-z])pit([^a-z]|$)/i;
+const LAVA_RE = /lava/i;
+const WEB_RE = /web/i;
+
+const dynState = {};
+
+const LEVER_RE = /^lever\d*$/i;
+const PAD_RE = /^pressure_pad\d*$/i;
+const SWITCH_REACH = 2;
+const SWITCH_MODES = ["toggle", "held", "latch"];
 
 loadPalette();
 loadLayers();
@@ -1032,7 +1123,7 @@ function saveLayersNow() {
       const parts = k.split(",");
       passOut.push([parseInt(parts[0], 10), parseInt(parts[1], 10)]);
     }
-    out[key] = { name: L.name, passable: passOut, rows: L.rows.map(trimRowEnd), art: L.art.map(trimRowEnd), objects: objList, portals: L.portals, spawn: L.spawn, light: L.light || "outdoor" };
+    out[key] = { name: L.name, passable: passOut, rows: L.rows.map(trimRowEnd), art: L.art.map(trimRowEnd), objects: objList, portals: L.portals, links: L.links || {}, spawn: L.spawn, light: L.light || "outdoor" };
   }
   writeJsonFile(LAYERS_FILE, out);
   layersDirty = false;
@@ -1060,11 +1151,116 @@ function tileAt(layer, col, row) {
   return L.rows[row][col];
 }
 
+const DYN_RESET_MS = 10 * 60 * 1000;
+const HAZARD_PIT_DAMAGE_PCT = 0.1;
+const HAZARD_LAVA_DAMAGE_PCT = 0.05;
+const HAZARD_LAVA_TICK_MS = 1000;
+
+function dynOf(layer) {
+  if (!dynState[layer]) dynState[layer] = { hidden: {}, boulders: {}, occ: {}, sw: {}, open: {} };
+  return dynState[layer];
+}
+
+function switchKind(name) {
+  const n = String(name || "");
+  if (LEVER_RE.test(n)) return "lever";
+  if (PAD_RE.test(n)) return "pad";
+  return null;
+}
+
+function switchOnName(name, kind) {
+  if (kind === "lever") return String(name).replace(/^lever/i, "Lever_Flicked");
+  if (kind === "pad") return "Pressed_" + String(name);
+  return String(name);
+}
+
+function cleanLinkSpec(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const mode = SWITCH_MODES.indexOf(raw.mode) !== -1 ? raw.mode : "toggle";
+  const targets = [];
+  const seen = {};
+  for (const t of Array.isArray(raw.targets) ? raw.targets.slice(0, 60) : []) {
+    if (!Array.isArray(t)) continue;
+    const c = parseInt(t[0], 10);
+    const r = parseInt(t[1], 10);
+    if (!Number.isInteger(c) || !Number.isInteger(r)) continue;
+    if (c < 0 || c >= LAYER_W || r < 0 || r >= LAYER_H) continue;
+    const key = c + "," + r;
+    if (seen[key]) continue;
+    seen[key] = true;
+    targets.push([c, r, t[2] ? 1 : 0]);
+  }
+  return { mode: mode, targets: targets };
+}
+
+function dynRecompute(layer) {
+  const L = layers[layer];
+  if (!L) return;
+  const d = dynOf(layer);
+  const open = {};
+  for (const sk of Object.keys(L.links || {})) {
+    const link = L.links[sk];
+    const on = !!(d.sw[sk] && d.sw[sk].on);
+    for (const t of link.targets) {
+      if (on !== !!t[2]) open[t[0] + "," + t[1]] = true;
+    }
+  }
+  d.open = open;
+}
+
+function dynRecomputeAll() {
+  for (const key of Object.keys(layers)) {
+    const L = layers[key];
+    if (L.links && Object.keys(L.links).length > 0) dynRecompute(parseInt(key, 10));
+  }
+}
+
+function switchAffectedRefresh(layer, switchKey) {
+  const L = layers[layer];
+  if (!L) return;
+  const sp = switchKey.split(",");
+  refreshViewsNear(layer, parseInt(sp[0], 10), parseInt(sp[1], 10));
+  const link = L.links ? L.links[switchKey] : null;
+  if (!link) return;
+  for (const t of link.targets) refreshViewsNear(layer, t[0], t[1]);
+}
+
+function hazardKind(name) {
+  const n = String(name || "");
+  if (PIT_RE.test(n)) return "pit";
+  if (LAVA_RE.test(n)) return "lava";
+  if (WEB_RE.test(n)) return "web";
+  return null;
+}
+
+function forcedNonSolid(name) {
+  return /tuff/i.test(String(name || "")) || hazardKind(name) !== null;
+}
+
+function objAt(layer, col, row) {
+  const L = layers[layer];
+  if (!L) return null;
+  const key = col + "," + row;
+  const d = dynState[layer];
+  if (d) {
+    const home = d.occ[key];
+    if (home) {
+      const b = d.boulders[home];
+      return b ? b.obj : null;
+    }
+    if (d.hidden[key] !== undefined) return null;
+    if (d.boulders[key]) return null;
+    if (d.open[key] && L.objects[key]) return null;
+  }
+  return L.objects[key] || null;
+}
+
 function isWalkable(layer, col, row) {
-  const ch = tileAt(layer, col, row);
+  let ch = tileAt(layer, col, row);
+  if (ch === "x" && dynState[layer] && dynState[layer].open[col + "," + row]) ch = ".";
   if (ch !== "." && ch !== "P") return false;
   const L = layers[layer];
-  const obj = L ? L.objects[col + "," + row] : null;
+  const obj = L ? objAt(layer, col, row) : null;
   if (obj && obj.solid && !(L.passable && L.passable[col + "," + row])) return false;
   return true;
 }
@@ -1206,7 +1402,7 @@ function objectsInWindow(layer, c0, r0, w, h) {
   if (!L) return out;
   for (let r = r0; r < r0 + h; r++) {
     for (let c = c0; c < c0 + w; c++) {
-      const obj = L.objects[c + "," + r];
+      const obj = objAt(layer, c, r);
       if (!obj) {
         const farmPlot = farmState.plots[layer + "," + c + "," + r];
         if (farmPlot) {
@@ -1216,7 +1412,7 @@ function objectsInWindow(layer, c0, r0, w, h) {
       if (obj) {
         const walk = !obj.solid || !!(L.passable && L.passable[c + "," + r]);
         const blocks = !walk && VISION_BLOCK_RE !== null && VISION_BLOCK_RE.test(obj.name);
-        out.push({ col: c, row: r, name: harvestedShownName(layer, c, r, obj), rot: obj.rot || 0, flip: obj.flip ? 1 : 0, w: walk ? 1 : 0, b: blocks ? 1 : 0 });
+        out.push({ col: c, row: r, name: switchShownName(layer, c, r, harvestedShownName(layer, c, r, obj)), rot: obj.rot || 0, flip: obj.flip ? 1 : 0, w: walk ? 1 : 0, b: blocks ? 1 : 0 });
       }
     }
   }
@@ -2465,6 +2661,98 @@ function cleanSheet(sheet) {
   return out;
 }
 
+const EXPR_DIR = path.join(WORLD_DIR, "Expressions");
+const EXPR_MAX_FILES = 24;
+const EXPR_MAX_BYTES = 400 * 1024;
+const STANDARD_EMOTIONS = new Set(["angry", "crying", "determined", "dizzy", "happy", "inspired", "joyous", "normal", "pain", "sad", "shouting", "sigh", "special0", "special1", "special2", "special3", "stunned", "surprised", "teary-eyed", "worried"]);
+
+function exprSafeUser(userId) {
+  const v = String(userId || "");
+  return /^[0-9A-Za-z_-]{1,40}$/.test(v) ? v : "";
+}
+
+function exprCharKey(name) {
+  const k = String(name || "").toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60);
+  return k || "character";
+}
+
+function saveWorldExpressions(userId, charName, source) {
+  const uid = exprSafeUser(userId);
+  if (!uid) return { key: null, names: [] };
+  const key = exprCharKey(charName);
+  const dir = path.join(EXPR_DIR, uid, key);
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch (e) {}
+  const names = [];
+  if (!source || typeof source !== "object" || Array.isArray(source)) return { key: key, names: names };
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (e) {
+    return { key: key, names: names };
+  }
+  for (const rawName of Object.keys(source)) {
+    if (names.length >= EXPR_MAX_FILES) break;
+    if (!/^[A-Za-z0-9-]{1,32}$/.test(rawName)) continue;
+    const data = source[rawName];
+    if (typeof data !== "string") continue;
+    let buf;
+    try {
+      buf = Buffer.from(data, "base64");
+    } catch (e) {
+      continue;
+    }
+    if (buf.length < 8 || buf.length > EXPR_MAX_BYTES) continue;
+    if (buf[0] !== 0x89 || buf[1] !== 0x50 || buf[2] !== 0x4e || buf[3] !== 0x47) continue;
+    try {
+      fs.writeFileSync(path.join(dir, rawName + ".png"), buf);
+      names.push(rawName);
+    } catch (e) {}
+  }
+  return { key: key, names: names };
+}
+
+function exprUrl(userId, key, name) {
+  return "/world-expr/" + encodeURIComponent(exprSafeUser(userId)) + "/" + encodeURIComponent(key) + "/" + encodeURIComponent(name) + ".png";
+}
+
+function exprMap(p) {
+  const out = {};
+  if (!p || !p._exprKey || !Array.isArray(p._exprNames)) return out;
+  for (const name of p._exprNames) out[name.toLowerCase()] = exprUrl(p.userId, p._exprKey, name);
+  return out;
+}
+
+function resolveCustomExpression(p, text) {
+  const map = exprMap(p);
+  const tags = String(text || "").match(/\[[^\]]+\]/g) || [];
+  for (const tag of tags) {
+    const inner = tag.slice(1, -1).trim();
+    const explicit = /^custom:/i.test(inner);
+    const lower = inner.replace(/^custom:/i, "").trim().toLowerCase();
+    if (!explicit && STANDARD_EMOTIONS.has(lower)) return null;
+    if (map[lower]) return map[lower];
+  }
+  return null;
+}
+
+app.get("/world-expr/:uid/:key/:file", (req, res) => {
+  const uid = exprSafeUser(req.params.uid);
+  const key = String(req.params.key || "");
+  const file = String(req.params.file || "");
+  if (!uid || !/^[a-z0-9_-]{1,60}$/.test(key) || !/^[A-Za-z0-9-]{1,32}\.png$/.test(file)) {
+    res.status(404).end();
+    return;
+  }
+  const full = path.join(EXPR_DIR, uid, key, file);
+  if (!fs.existsSync(full)) {
+    res.status(404).end();
+    return;
+  }
+  res.set("Cache-Control", "private, max-age=300");
+  res.type("png").sendFile(full);
+});
+
 app.post("/api/world/join", (req, res) => {
   if (!checkSecret(req, res)) return;
   const body = req.body || {};
@@ -2493,9 +2781,12 @@ app.post("/api/world/join", (req, res) => {
     npcName: body.npcName ? String(body.npcName).slice(0, 60) : null,
     companions: (Array.isArray(body.companions) ? body.companions : []).map(cleanCompanion).filter((c) => c).slice(0, 5)
   };
+  const exprSaved = saveWorldExpressions(userId, body.npcName || body.name, body.expressions);
+  worldPasses[pass].exprKey = exprSaved.key;
+  worldPasses[pass].exprNames = exprSaved.names;
   worldByUser[userId] = pass;
   writeJsonFile(PASSES_FILE, worldPasses);
-  res.json({ pass: pass, link: "/?session=" + WORLD_SESSION + "&pass=" + pass });
+  res.json({ pass: pass, link: "/?session=" + WORLD_SESSION + "&pass=" + pass, expressions: exprSaved.names });
 });
 
 app.get("/api/world/species", (req, res) => {
@@ -3762,6 +4053,16 @@ function plainBushName() {
   return null;
 }
 
+function switchShownName(layer, col, row, name) {
+  const kind = switchKind(name);
+  if (!kind) return name;
+  const d = dynState[layer];
+  const sw = d ? d.sw[col + "," + row] : null;
+  if (!sw || !sw.on) return name;
+  const onName = switchOnName(name, kind);
+  return allObjectNames().indexOf(onName) !== -1 ? onName : name;
+}
+
 function harvestedShownName(layer, col, row, obj) {
   const st = bushStates[layer + "," + col + "," + row];
   if (!st || !st.harvested || st.name !== obj.name) return obj.name;
@@ -4435,10 +4736,14 @@ function farmInReach(p, col, row) {
   return Math.max(Math.abs(p.col - col), Math.abs(p.row - row)) <= reach;
 }
 
-function isDummyAt(layer, col, row) {
+function isDummyAtStrict(layer, col, row) {
   const L = layers[layer];
   const obj = L ? L.objects[col + "," + row] : null;
   return !!obj && String(obj.name).toLowerCase() === "dummy";
+}
+
+function isDummyAt(layer, col, row) {
+  return isDummyAtStrict(layer, col, row) || isBreakableAt(layer, col, row);
 }
 
 function handleFarmQuery(p, data) {
@@ -5296,6 +5601,310 @@ function sendPosCorrect(p) {
   sendPlayer(p, { type: "poscorrect", x: cur.x, y: cur.y, direction: p.direction });
 }
 
+function refreshViewsNear(layer, col, row) {
+  for (const id in worldSession.players) {
+    const q = worldSession.players[id];
+    if (!q || q.layer !== layer) continue;
+    if (Math.abs(q.col - col) > VIEW_HALF_W + 1 || Math.abs(q.row - row) > VIEW_HALF_H + 1) continue;
+    sendView(q);
+  }
+}
+
+function envNotice(p, text) {
+  sendPlayer(p, { type: "c_notice", text: text });
+}
+
+function envDamage(p, amount, text) {
+  const dmg = Math.max(1, Math.floor(amount));
+  p.hp = Math.max(1, p.hp - dmg);
+  sendPlayer(p, { type: "vitals", hp: p.hp, mp: p.mp, maxHp: p.maxHp, maxMp: p.maxMp });
+  envNotice(p, text + " (-" + dmg + " HP)");
+}
+
+function hazardOnEnter(p, prevCol, prevRow) {
+  if (worldCombat.isInFight(p)) return false;
+  const obj = objAt(p.layer, p.col, p.row);
+  if (!obj) return false;
+  const kind = hazardKind(obj.name);
+  if (kind !== "pit") return false;
+  const lower = p.layer - 1;
+  const pitDamage = p.maxHp * HAZARD_PIT_DAMAGE_PCT;
+  if (layers[lower] && validLayerNumber(lower)) {
+    envDamage(p, pitDamage, "You fell into a pit!");
+    teleportPlayer(p, lower, p.col, p.row);
+    return true;
+  }
+  envDamage(p, pitDamage, "You stumbled into a pit and climbed back out!");
+  p.col = prevCol;
+  p.row = prevRow;
+  p._fx = prevCol + 0.5;
+  p._fy = prevRow + 0.5;
+  refreshVisibility(p);
+  sendGms(null, { type: "gm_player", player: publicPlayer(p) });
+  sendView(p);
+  sendPosCorrect(p);
+  return true;
+}
+
+function hazardTick() {
+  const now = Date.now();
+  for (const id in worldSession.players) {
+    const p = worldSession.players[id];
+    if (!p || worldCombat.isInFight(p)) continue;
+    const obj = objAt(p.layer, p.col, p.row);
+    if (!obj || hazardKind(obj.name) !== "lava") continue;
+    if (p._lavaAt && now - p._lavaAt < HAZARD_LAVA_TICK_MS - 50) continue;
+    p._lavaAt = now;
+    envDamage(p, p.maxHp * HAZARD_LAVA_DAMAGE_PCT, "The lava burns you!");
+  }
+}
+
+function cellOccupied(layer, col, row) {
+  if (entityAt(layer, col, row)) return true;
+  for (const id in worldSession.players) {
+    const o = worldSession.players[id];
+    if (o.layer === layer && o.col === col && o.row === row) return true;
+  }
+  return false;
+}
+
+function handleBoulderPush(p, data) {
+  if (!data || typeof data !== "object") return;
+  if (worldCombat.isInFight(p)) return;
+  const d = DELTAS[String(data.dir)];
+  if (!d) return;
+  const col = parseInt(data.col, 10);
+  const row = parseInt(data.row, 10);
+  if (!Number.isInteger(col) || !Number.isInteger(row)) return;
+  if (p.col + d.dc !== col || p.row + d.dr !== row) return;
+  const now = Date.now();
+  if (p._pushAt && now - p._pushAt < 300) return;
+  p._pushAt = now;
+  const obj = objAt(p.layer, col, row);
+  if (!obj || !BOULDER_RE.test(obj.name)) return;
+  const destC = col + d.dc;
+  const destR = row + d.dr;
+  const tile = tileAt(p.layer, destC, destR);
+  if (tile !== "." && tile !== "P") {
+    envNotice(p, "The boulder won't budge.");
+    return;
+  }
+  const destObj = objAt(p.layer, destC, destR);
+  const destIsPit = !!destObj && hazardKind(destObj.name) === "pit";
+  const destIsPad = !!destObj && switchKind(destObj.name) === "pad";
+  if (destObj && !destIsPit && !destIsPad) {
+    envNotice(p, "Something is blocking the boulder.");
+    return;
+  }
+  if (cellOccupied(p.layer, destC, destR)) {
+    envNotice(p, "Something is in the way of the boulder.");
+    return;
+  }
+  const dyn = dynOf(p.layer);
+  const srcKey = col + "," + row;
+  const destKey = destC + "," + destR;
+  let home = dyn.occ[srcKey];
+  if (home) {
+    delete dyn.occ[srcKey];
+  } else {
+    home = srcKey;
+    dyn.boulders[home] = { obj: obj, cur: srcKey, at: now };
+  }
+  const entry = dyn.boulders[home];
+  entry.at = now;
+  if (destIsPit) {
+    entry.cur = null;
+    dyn.hidden[destKey] = now;
+    envNotice(p, "The boulder tumbles into the pit and fills it!");
+  } else {
+    entry.cur = destKey;
+    dyn.occ[destKey] = home;
+  }
+  refreshViewsNear(p.layer, col, row);
+  refreshViewsNear(p.layer, destC, destR);
+}
+
+function dynResetTick() {
+  const now = Date.now();
+  for (const layerKey in dynState) {
+    const layer = parseInt(layerKey, 10);
+    const d = dynState[layerKey];
+    let changed = false;
+    for (const key in d.hidden) {
+      if (now - d.hidden[key] < DYN_RESET_MS) continue;
+      delete d.hidden[key];
+      changed = true;
+      const parts = key.split(",");
+      refreshViewsNear(layer, parseInt(parts[0], 10), parseInt(parts[1], 10));
+    }
+    for (const home in d.boulders) {
+      const b = d.boulders[home];
+      if (now - b.at < DYN_RESET_MS) continue;
+      const homeOcc = d.occ[home];
+      if (homeOcc && homeOcc !== home) continue;
+      const hp = home.split(",");
+      const hc = parseInt(hp[0], 10);
+      const hr = parseInt(hp[1], 10);
+      if (b.cur !== home && cellOccupied(layer, hc, hr)) continue;
+      if (b.cur) {
+        delete d.occ[b.cur];
+        const cp = b.cur.split(",");
+        refreshViewsNear(layer, parseInt(cp[0], 10), parseInt(cp[1], 10));
+      }
+      delete d.boulders[home];
+      refreshViewsNear(layer, hc, hr);
+      changed = true;
+    }
+    let switchChanged = false;
+    for (const sk of Object.keys(d.sw)) {
+      const sw = d.sw[sk];
+      if (!sw.on || now - sw.at < DYN_RESET_MS) continue;
+      if (sw.holding) continue;
+      sw.on = false;
+      sw.at = now;
+      switchChanged = true;
+      switchAffectedRefresh(layer, sk);
+    }
+    if (switchChanged) dynRecompute(layer);
+    const linkCount = layers[layerKey] && layers[layerKey].links ? Object.keys(layers[layerKey].links).length : 0;
+    if (linkCount === 0 && (changed || switchChanged) && Object.keys(d.hidden).length === 0 && Object.keys(d.boulders).length === 0 && Object.keys(d.sw).length === 0) delete dynState[layerKey];
+  }
+}
+
+function setSwitchState(layer, key, on, holding) {
+  const d = dynOf(layer);
+  const sw = d.sw[key] || { on: false, at: Date.now(), holding: false };
+  if (sw.on === on && !!sw.holding === !!holding) return false;
+  const changed = sw.on !== on;
+  sw.on = on;
+  sw.holding = !!holding;
+  if (changed) sw.at = Date.now();
+  d.sw[key] = sw;
+  if (changed) {
+    dynRecompute(layer);
+    switchAffectedRefresh(layer, key);
+  }
+  return changed;
+}
+
+function padOccupied(layer, col, row) {
+  if (entityAt(layer, col, row)) return true;
+  for (const id in worldSession.players) {
+    const o = worldSession.players[id];
+    if (o.layer === layer && o.col === col && o.row === row) return true;
+  }
+  const d = dynState[layer];
+  if (d && d.occ[col + "," + row]) return true;
+  return false;
+}
+
+function padTick() {
+  for (const layerKey of Object.keys(dynState)) {
+    const layer = parseInt(layerKey, 10);
+    const L = layers[layer];
+    if (!L || !L.links) continue;
+    for (const sk of Object.keys(L.links)) {
+      const obj = L.objects[sk];
+      if (!obj || switchKind(obj.name) !== "pad") continue;
+      const link = L.links[sk];
+      const parts = sk.split(",");
+      const occupied = padOccupied(layer, parseInt(parts[0], 10), parseInt(parts[1], 10));
+      const d = dynOf(layer);
+      const sw = d.sw[sk];
+      const isOn = !!(sw && sw.on);
+      if (link.mode === "latch") {
+        if (occupied && !isOn) setSwitchState(layer, sk, true, false);
+      } else if (occupied !== isOn) {
+        setSwitchState(layer, sk, occupied, occupied);
+      }
+    }
+  }
+}
+
+function handleSwitchToggle(p, data) {
+  if (!data || typeof data !== "object") return;
+  if (worldCombat.isInFight(p)) return;
+  const col = parseInt(data.col, 10);
+  const row = parseInt(data.row, 10);
+  if (!Number.isInteger(col) || !Number.isInteger(row)) return;
+  const now = Date.now();
+  if (p._switchAt && now - p._switchAt < 400) return;
+  p._switchAt = now;
+  const L = layers[p.layer];
+  const obj = L ? L.objects[col + "," + row] : null;
+  if (!obj || switchKind(obj.name) !== "lever") return;
+  if (Math.max(Math.abs(p.col - col), Math.abs(p.row - row)) > SWITCH_REACH) {
+    envNotice(p, "You are too far away to reach the lever.");
+    return;
+  }
+  const key = col + "," + row;
+  const d = dynOf(p.layer);
+  const isOn = !!(d.sw[key] && d.sw[key].on);
+  setSwitchState(p.layer, key, !isOn, false);
+  const link = L.links ? L.links[key] : null;
+  const hasTargets = !!link && link.targets.length > 0;
+  envNotice(p, isOn ? "You pull the lever back." : "You flick the lever." + (hasTargets ? "" : " Nothing seems to happen."));
+}
+
+function handleGmLinkSet(gm, data) {
+  const n = parseInt(data.layer, 10);
+  const c = parseInt(data.col, 10);
+  const r = parseInt(data.row, 10);
+  if (!validLayerNumber(n) || !Number.isInteger(c) || !Number.isInteger(r)) return;
+  const L = layers[n];
+  const key = c + "," + r;
+  const obj = L ? L.objects[key] : null;
+  if (!obj || !switchKind(obj.name)) {
+    sendSocket(gm.socket, { type: "gm_notice", text: "Place a Lever or Pressure_Pad object there first." });
+    return;
+  }
+  const spec = cleanLinkSpec({ mode: data.mode, targets: data.targets });
+  if (!spec) return;
+  spec.targets = spec.targets.filter((t) => !(t[0] === c && t[1] === r));
+  if (switchKind(obj.name) === "lever") spec.mode = "toggle";
+  else if (spec.mode === "toggle") spec.mode = "held";
+  const before = L.links[key];
+  L.links[key] = spec;
+  if (spec.targets.length === 0 && !data.keepEmpty) delete L.links[key];
+  dynRecompute(n);
+  scheduleLayerSave();
+  if (before) switchAffectedRefresh(n, key);
+  const after = L.links[key] || null;
+  if (after) switchAffectedRefresh(n, key);
+  if (before) for (const t of before.targets) refreshViewsNear(n, t[0], t[1]);
+  sendGms(n, { type: "gm_link", layer: n, col: c, row: r, link: after });
+}
+
+function handleGmLinkClear(gm, data) {
+  const n = parseInt(data.layer, 10);
+  const c = parseInt(data.col, 10);
+  const r = parseInt(data.row, 10);
+  if (!validLayerNumber(n) || !Number.isInteger(c) || !Number.isInteger(r)) return;
+  const L = layers[n];
+  const key = c + "," + r;
+  if (!L || !L.links[key]) return;
+  const before = L.links[key];
+  delete L.links[key];
+  const d = dynState[n];
+  if (d) delete d.sw[key];
+  dynRecompute(n);
+  scheduleLayerSave();
+  refreshViewsNear(n, c, r);
+  for (const t of before.targets) refreshViewsNear(n, t[0], t[1]);
+  sendGms(n, { type: "gm_link", layer: n, col: c, row: r, link: null });
+}
+
+function isBreakableAt(layer, col, row) {
+  const obj = objAt(layer, col, row);
+  return !!obj && BREAKABLE_RE.test(String(obj.name));
+}
+
+function breakObjectAt(layer, col, row) {
+  const key = col + "," + row;
+  dynOf(layer).hidden[key] = Date.now();
+  refreshViewsNear(layer, col, row);
+}
+
 function handleFreePos(p, data) {
   if (worldCombat.isInFight(p)) {
     p._fx = p.col + 0.5;
@@ -5349,10 +5958,13 @@ function handleFreePos(p, data) {
   }
   p._moveBudget = Math.max(0, p._moveBudget - dist);
   if (DELTAS[data.dir]) p.direction = data.dir;
+  const prevCol = p.col;
+  const prevRow = p.row;
   p.col = nc;
   p.row = nr;
   p._fx = x;
   p._fy = y;
+  if (tileChanged && hazardOnEnter(p, prevCol, prevRow)) return;
   const moved = { type: "moved", id: p.id, col: nc, row: nr, fx: x, fy: y, direction: p.direction };
   if (tileChanged) {
     refreshVisibility(p);
@@ -5562,7 +6174,7 @@ function applyObjects(layer, ops) {
     const c = op[0];
     const r = op[1];
     const name = typeof op[2] === "string" ? op[2] : "";
-    const solid = op[3] === 0 || op[3] === false || /tuff/i.test(name) ? false : true;
+    const solid = op[3] === 0 || op[3] === false || forcedNonSolid(name) ? false : true;
     const rot = cleanRot(op[4]);
     const flip = op[5] === 1 || op[5] === true;
     if (!Number.isInteger(c) || !Number.isInteger(r)) continue;
@@ -5579,6 +6191,17 @@ function applyObjects(layer, ops) {
     if (old && old.name === name && old.solid === solid && (old.rot || 0) === rot && !!old.flip === flip) continue;
     L.objects[key] = { name: name, solid: solid, rot: rot, flip: flip };
     changedObjs.push([c, r, name, solid ? 1 : 0, rot, flip ? 1 : 0]);
+  }
+  for (const co of changedObjs) {
+    const lk = co[0] + "," + co[1];
+    if (L.links && L.links[lk] && (co[2] === "" || !switchKind(co[2]))) {
+      const dead = L.links[lk];
+      delete L.links[lk];
+      if (dynState[layer]) delete dynState[layer].sw[lk];
+      dynRecompute(layer);
+      for (const t of dead.targets) refreshViewsNear(layer, t[0], t[1]);
+      sendGms(layer, { type: "gm_link", layer: layer, col: co[0], row: co[1], link: null });
+    }
   }
   if (changedObjs.length > 0) {
     scheduleLayerSave();
@@ -5632,7 +6255,7 @@ function sendGmLayer(gm) {
     if (farmCell && farmCell[2] !== "") objList.push(farmCell);
   }
   const passList = Object.keys(L.passable || {}).map((k) => k.split(",").map((v) => parseInt(v, 10)));
-  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, passable: passList, name: L.name, rows: L.rows.map(trimRowEnd), art: L.art.map(trimRowEnd), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer && !entities[id].down).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: null, spawns: spawnList(), floorItems: items, layers: layerSummaries(), light: L.light || "outdoor" });
+  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, passable: passList, name: L.name, rows: L.rows.map(trimRowEnd), art: L.art.map(trimRowEnd), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer && !entities[id].down).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: null, spawns: spawnList(), floorItems: items, layers: layerSummaries(), light: L.light || "outdoor", links: L.links || {} });
 }
 
 function handleGmMessage(gm, data) {
@@ -5658,6 +6281,16 @@ function handleGmMessage(gm, data) {
     if (!validLayerNumber(n) || !Array.isArray(data.ops)) return;
     applyCells(n, data.ops.slice(0, MAX_EDIT_OPS));
     sendLayerSummaries();
+    return;
+  }
+
+  if (data.type === "gm_link_set") {
+    handleGmLinkSet(gm, data);
+    return;
+  }
+
+  if (data.type === "gm_link_clear") {
+    handleGmLinkClear(gm, data);
     return;
   }
 
@@ -6098,6 +6731,8 @@ function startWorldPlayer(socket, pass, info, spawn) {
     _npcTpl: takenTpl,
     _pass: pass,
     _sheet: info.sheet || cleanSheet({}),
+    _exprKey: info.exprKey || null,
+    _exprNames: Array.isArray(info.exprNames) ? info.exprNames : [],
     _inv: inventory,
     _reported: countInventory(inventory),
     _seen: {},
@@ -6133,7 +6768,7 @@ function startWorldPlayer(socket, pass, info, spawn) {
     if (q) players[seenId] = publicPlayer(q);
   }
   players[id] = publicPlayer(p);
-  sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W, p.row - VIEW_HALF_H, w, h), inventory: inventory, sheet: clientSheet(p._sheet), itemFx: ITEM_FX, vision: VISION, chatRange: CHAT_RANGE });
+  sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W, p.row - VIEW_HALF_H, w, h), inventory: inventory, sheet: clientSheet(p._sheet), itemFx: ITEM_FX, vision: VISION, chatRange: CHAT_RANGE, cxm: exprMap(p) });
   sendPlayer(p, timeMessage());
   for (const notice of joinNotices) sendPlayer(p, { type: "item_result", ok: !combatLogged, text: notice });
   if (!restored) p._kills = [];
@@ -6219,6 +6854,10 @@ function startWorldPlayer(socket, pass, info, spawn) {
       handleWorldMove(me, data.dir);
     } else if (data.type === "pos") {
       handleFreePos(me, data);
+    } else if (data.type === "boulder_push") {
+      handleBoulderPush(me, data);
+    } else if (data.type === "switch_toggle") {
+      handleSwitchToggle(me, data);
     } else if (data.type === "pickup") {
       if (worldCombat.isInFight(me)) {
         sendPlayer(me, { type: "c_notice", text: "You can't pick things up during battle." });
@@ -6278,6 +6917,8 @@ function startWorldPlayer(socket, pass, info, spawn) {
     } else if (data.type === "chat") {
       const text = String(data.text || "").slice(0, 200);
       const message = { type: "chat", id: me.id, dex: me.dex, name: me.name, text: text, ts: Date.now() };
+      const customUrl = resolveCustomExpression(me, text);
+      if (customUrl) message.cx = customUrl;
       for (const otherId in worldSession.players) {
         const q = worldSession.players[otherId];
         if (!q || q === me || q.layer !== me.layer) continue;
@@ -7119,6 +7760,8 @@ worldCombat.init({
   queueEnemyRespawn: queueEnemyRespawn,
   cellInView: cellInView,
   isDummyAt: isDummyAt,
+  isBreakableAt: isBreakableAt,
+  breakObjectAt: breakObjectAt,
   enemyCanSee: enemyCanSee
 });
 
@@ -7127,6 +7770,10 @@ setInterval(entityTick, ENTITY_TICK_MS);
 setInterval(idleTick, 2000);
 setInterval(fireTick, 5000);
 setInterval(farmTick, 1000);
+setInterval(hazardTick, HAZARD_LAVA_TICK_MS);
+setInterval(dynResetTick, 15000);
+setInterval(padTick, 250);
+dynRecomputeAll();
 setInterval(overrideTick, 20000);
 setInterval(mapAreaTick, 1000);
 setInterval(chestTick, 1000);
@@ -7171,6 +7818,15 @@ wss.on("connection", (socket, req) => {
   }
 
   if (sessionId === WORLD_SESSION) {
+    if (pass && worldPasses[pass]) {
+      const bindResult = bindWorldPass(pass, readCookie(req.headers.cookie, BROWSER_COOKIE));
+      if (bindResult !== "ok") {
+        const reason = bindResult === "taken" ? BOUND_MESSAGE : "Your browser did not accept the cookie this world needs. Allow cookies for this site and open your link again, or use /joinworld in Discord to get a new link.";
+        socket.send(JSON.stringify({ type: "denied", reason: reason }));
+        socket.close();
+        return;
+      }
+    }
     handleWorldConnection(socket, pass);
     return;
   }

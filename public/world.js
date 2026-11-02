@@ -229,7 +229,13 @@ function worldEnsureAsset(scene, kind, name) {
   return null;
 }
 
-const TUFF = { cells: [], count: 0, active: false, slow: 2 };
+const TUFF = { cells: [], count: 0, active: false, slow: 2, webCells: [], webSlow: 3.6 };
+const HZ_BOULDER_RE = /boulder/i;
+const HZ_BREAKABLE_RE = /breakable|^pot\d*$|^clay_pot|worn_crate|^crate\d*$|^vase\d*$/i;
+const HZ_WEB_RE = /web/i;
+const HZ_PUSH = { lastAt: 0 };
+const HZ_LEVER_RE = /^lever(_flicked)?\d*$/i;
+const LINK_SWITCH_RE = /^(lever|pressure_pad)\d*$/i;
 
 function isTuffName(name) {
   return /tuff/i.test(String(name || ""));
@@ -261,6 +267,36 @@ function tuffUnderPlayer() {
     if (Math.abs(px - cx) < halfX && Math.abs(py - cy) < halfY) return true;
   }
   return false;
+}
+
+function webUnderPlayer() {
+  if (TUFF.webCells.length === 0 || !player) return false;
+  const pc = Math.floor(player.x / TILE);
+  const pr = Math.floor(player.y / TILE);
+  for (const cell of TUFF.webCells) {
+    if (cell[0] === pc && cell[1] === pr) return true;
+  }
+  return false;
+}
+
+function boulderTryPush(dir) {
+  if (!worldPlayerMode || !worldLastView || !player) return;
+  const deltas = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
+  const d = deltas[dir];
+  if (!d) return;
+  const now = Date.now();
+  if (now - HZ_PUSH.lastAt < 350) return;
+  const pc = Math.floor(player.x / TILE);
+  const pr = Math.floor(player.y / TILE);
+  const tc = pc + d[0];
+  const tr = pr + d[1];
+  for (const o of worldLastView.objects || []) {
+    if (o.col !== tc || o.row !== tr) continue;
+    if (!HZ_BOULDER_RE.test(String(o.name))) continue;
+    HZ_PUSH.lastAt = now;
+    gmSend({ type: "boulder_push", dir: dir, col: tc, row: tr });
+    return;
+  }
 }
 
 function tuffFrame() {
@@ -774,8 +810,10 @@ function drawPlayerView(scene, data) {
     wantedObjs[o.col + "," + o.row + (o.k ? "|k" : "")] = { name: o.name, c: o.col, r: o.row, rot: o.rot || 0, flip: !!o.flip, walk: !!o.w, over: !!o.k };
   }
   TUFF.cells = [];
+  TUFF.webCells = [];
   for (const o of data.objects || []) {
     if (isTuffName(o.name)) TUFF.cells.push([o.col, o.row]);
+    if (HZ_WEB_RE.test(String(o.name))) TUFF.webCells.push([o.col, o.row]);
   }
   worldSyncPool(scene, worldArtPool, wantedArt, "tile");
   worldSyncPool(scene, worldObjectPool, wantedObjs, "object");
@@ -1422,6 +1460,7 @@ function gmDrawMarkers() {
     g.strokeRect(pc * TILE + 4, pr * TILE + 4, TILE - 8, TILE - 8);
   }
   schedDraw(g);
+  gmLinkDraw(g);
   const picked = WG.selectedEntity ? WG.entities[WG.selectedEntity] : null;
   if (picked) {
     g.lineStyle(3, 0xff9f1c, 1);
@@ -2059,6 +2098,109 @@ function gmUpdateHoverStatus() {
   gmStatus(text);
 }
 
+function gmLinkSwitchAt(c, r) {
+  const obj = WG.objects[c + "," + r];
+  if (!obj || !LINK_SWITCH_RE.test(String(obj.name))) return null;
+  return /^lever/i.test(String(obj.name)) ? "lever" : "pad";
+}
+
+function gmLinkClick(c, r) {
+  const kind = gmLinkSwitchAt(c, r);
+  if (kind) {
+    WG.linkSel = { c: c, r: r, kind: kind };
+    gmLinkRender();
+    gmDrawMarkers();
+    return;
+  }
+  if (!WG.linkSel) {
+    gmNotice("Click a Lever or Pressure_Pad first.");
+    return;
+  }
+  const key = WG.linkSel.c + "," + WG.linkSel.r;
+  const current = WG.links[key] ? WG.links[key] : { mode: WG.linkSel.kind === "lever" ? "toggle" : "held", targets: [] };
+  const targets = current.targets.map((t) => [t[0], t[1], t[2]]);
+  let found = -1;
+  for (let i = 0; i < targets.length; i++) {
+    if (targets[i][0] === c && targets[i][1] === r) found = i;
+  }
+  if (found >= 0) targets.splice(found, 1);
+  else targets.push([c, r, document.getElementById("wgLinkInvert").checked ? 1 : 0]);
+  gmSend({ type: "gm_link_set", layer: WG.layer, col: WG.linkSel.c, row: WG.linkSel.r, mode: current.mode, targets: targets, keepEmpty: true });
+}
+
+function gmLinkRender() {
+  const head = document.getElementById("wgLinkHead");
+  if (!head) return;
+  const modeRow = document.getElementById("wgLinkModeRow");
+  const list = document.getElementById("wgLinkList");
+  const sel = WG.linkSel;
+  if (!sel) {
+    head.textContent = "No switch selected.";
+    modeRow.style.display = "none";
+    list.textContent = "";
+    return;
+  }
+  const key = sel.c + "," + sel.r;
+  const link = WG.links[key];
+  head.textContent = (sel.kind === "lever" ? "Lever" : "Pressure pad") + " at " + sel.c + ", " + sel.r + " | " + (link ? link.targets.length : 0) + " linked";
+  modeRow.style.display = sel.kind === "pad" ? "block" : "none";
+  if (sel.kind === "pad") document.getElementById("wgLinkMode").value = link && link.mode === "latch" ? "latch" : "held";
+  list.textContent = link ? link.targets.map((t) => t[0] + "," + t[1] + (t[2] ? " (appears when ON)" : "")).join(" | ") : "";
+}
+
+function gmLinkBind() {
+  const done = document.getElementById("wgLinkDone");
+  if (!done) return;
+  done.addEventListener("click", () => {
+    WG.linkSel = null;
+    gmLinkRender();
+    gmDrawMarkers();
+  });
+  document.getElementById("wgLinkClear").addEventListener("click", () => {
+    if (!WG.linkSel) return;
+    gmSend({ type: "gm_link_clear", layer: WG.layer, col: WG.linkSel.c, row: WG.linkSel.r });
+  });
+  document.getElementById("wgLinkMode").addEventListener("change", (ev) => {
+    const sel = WG.linkSel;
+    if (!sel) return;
+    const key = sel.c + "," + sel.r;
+    const link = WG.links[key];
+    if (!link) return;
+    gmSend({ type: "gm_link_set", layer: WG.layer, col: sel.c, row: sel.r, mode: ev.target.value, targets: link.targets, keepEmpty: true });
+  });
+}
+
+function gmLinkDraw(g) {
+  if (!WG.links) return;
+  for (const key in WG.links) {
+    const link = WG.links[key];
+    const parts = key.split(",");
+    const sc = parseInt(parts[0], 10);
+    const sr = parseInt(parts[1], 10);
+    const selected = WG.linkSel && WG.linkSel.c === sc && WG.linkSel.r === sr;
+    if (!selected && WG.tool !== "link") continue;
+    const sx = sc * TILE + TILE / 2 - 1;
+    const sy = sr * TILE + TILE / 2 - 1;
+    g.lineStyle(selected ? 3 : 1.5, selected ? 0xffd23f : 0x66ccff, selected ? 1 : 0.7);
+    g.strokeCircle(sx, sy, 14);
+    for (const t of link.targets) {
+      const tx = t[0] * TILE + TILE / 2 - 1;
+      const ty = t[1] * TILE + TILE / 2 - 1;
+      const color = t[2] ? 0xff66dd : (selected ? 0xffd23f : 0x66ccff);
+      g.lineStyle(selected ? 3 : 1.5, color, selected ? 1 : 0.7);
+      g.beginPath();
+      g.moveTo(sx, sy);
+      g.lineTo(tx, ty);
+      g.strokePath();
+      g.strokeRect(t[0] * TILE + 3, t[1] * TILE + 3, TILE - 8, TILE - 8);
+    }
+  }
+  if (WG.linkSel && !WG.links[WG.linkSel.c + "," + WG.linkSel.r]) {
+    g.lineStyle(3, 0xffd23f, 1);
+    g.strokeCircle(WG.linkSel.c * TILE + TILE / 2 - 1, WG.linkSel.r * TILE + TILE / 2 - 1, 14);
+  }
+}
+
 function gmHandleClickTool(scene, c, r) {
   if (!gmInBounds(c, r)) return;
   if (WG.tool === "portal") {
@@ -2085,6 +2227,10 @@ function gmHandleClickTool(scene, c, r) {
     const nameInput = document.getElementById("wgSpawnName");
     gmSend({ type: "gm_spawn_add", name: nameInput ? nameInput.value : "", layer: WG.layer, col: c, row: r });
     if (nameInput) nameInput.value = "";
+    return;
+  }
+  if (WG.tool === "link") {
+    gmLinkClick(c, r);
     return;
   }
   if (WG.tool === "item") return;
@@ -2579,6 +2725,7 @@ function gmBuildPanel() {
     + "<button class='wgBtn' data-wgtool='barrier'>Barrier</button>"
     + "<button class='wgBtn' data-wgtool='void'>Erase</button>"
     + "<button class='wgBtn' data-wgtool='portal'>Portal</button>"
+    + "<button class='wgBtn' data-wgtool='link'>Link switch</button>"
     + "<button class='wgBtn' data-wgtool='tileclear'>Clear tile art</button>"
     + "<button class='wgBtn' data-wgtool='objerase'>Remove object</button>"
     + "<button class='wgBtn' data-wgtool='passable'>Passable</button>"
@@ -2642,6 +2789,14 @@ function gmBuildPanel() {
     + "</div>"
     + "<div id='wgESel' style='margin-top:4px;color:#c8c8ff'>Nothing selected.</div>"
     + "</div>"
+    + "<div class='wgSecHead' data-wgsec='links'><span class='wgArrow'></span>Switch links</div><div class='wgSecBody' data-wgbody='links'>"
+    + "<div style='margin-bottom:4px'>Use the Link switch tool. Click a Lever or Pressure_Pad to select it, then click each door, gate, object or barrier tile it should open. Click a linked tile again to unlink it. An opened object disappears and an opened barrier tile becomes walkable. Esc finishes.</div>"
+    + "<div id='wgLinkHead' style='color:#c8c8ff;margin-bottom:4px'>No switch selected.</div>"
+    + "<div><button class='wgBtn' data-wgtool='link'>Link switch</button><button class='wgBtn' id='wgLinkDone'>Done</button><button class='wgBtn' id='wgLinkClear'>Clear links</button></div>"
+    + "<div id='wgLinkModeRow' style='margin-top:4px;display:none'>Pad mode <select id='wgLinkMode'><option value='held'>Pressed while stood on</option><option value='latch'>Stays pressed</option></select></div>"
+    + "<div style='margin-top:4px'><label><input type='checkbox' id='wgLinkInvert'> New targets appear when ON (hidden while OFF)</label></div>"
+    + "<div id='wgLinkList' style='margin-top:4px;color:#aab;font-size:11px'></div>"
+    + "</div>"
     + "<div class='wgSecHead' data-wgsec='schedule'><span class='wgArrow'></span>NPC schedule</div><div class='wgSecBody' data-wgbody='schedule'>"
     + "<div style='margin-bottom:4px'>Select an NPC with the Select tool. Each stop says when it leaves and where it walks. Click tiles in order while drawing; the NPC walks to each in turn. Ctrl+Z removes the last tile, Esc finishes.</div>"
     + "<div id='wgSchedHead' style='color:#c8c8ff;margin-bottom:4px'></div>"
@@ -2686,7 +2841,7 @@ function gmBuildPanel() {
   document.body.appendChild(panel);
   WG.panel = panel;
 
-  const secDefaults = { layer: true, build: true, tiles: true, objects: true, spawn: false, creatures: false, items: false, moderation: false, time: false, schedule: false, patrol: false, override: false };
+  const secDefaults = { layer: true, build: true, tiles: true, objects: true, spawn: false, creatures: false, items: false, moderation: false, time: false, schedule: false, patrol: false, override: false, links: false };
   let secState = {};
   try {
     secState = JSON.parse(localStorage.getItem("pmdGmSections") || "{}") || {};
@@ -2718,6 +2873,8 @@ function gmBuildPanel() {
   schedBind();
   schedRender();
   patRender();
+  gmLinkBind();
+  gmLinkRender();
   document.getElementById("wgToggleCreative").addEventListener("click", () => {
     const creative = document.getElementById("wgCreative");
     const coords = document.getElementById("wgCoords");
@@ -4362,6 +4519,10 @@ function enterGmWorld(scene) {
     if (e.key === "Escape") {
       WG.portalSource = null;
       WG.tpTarget = null;
+      if (WG.linkSel) {
+        WG.linkSel = null;
+        gmLinkRender();
+      }
       gmPlayerDragCancel();
       gmDrawMarkers();
       gmRenderPlayers();
@@ -4408,6 +4569,8 @@ function gmLoadLayer(scene, data) {
   WG.selectedEntity = null;
   gmShowSelection();
   WG.portals = data.portals || {};
+  WG.links = data.links && typeof data.links === "object" ? data.links : {};
+  WG.linkSel = null;
   WG.spawn = null;
   if (Array.isArray(data.spawns)) WG.spawns = data.spawns;
   WG.layers = data.layers || WG.layers;
@@ -5430,7 +5593,7 @@ function atkOpen(target) {
   atkMenuEl.innerHTML = "";
   const title = document.createElement("div");
   title.className = "atkTitle";
-  title.textContent = (target.type === "player" ? "Challenge " : target.type === "dummy" ? "Practice on " : "Attack ") + target.name + " (" + dist + " tile" + (dist === 1 ? "" : "s") + " away). Pick a move:";
+  title.textContent = (target.type === "player" ? "Challenge " : target.breakable ? "Smash the " : target.type === "dummy" ? "Practice on " : "Attack ") + target.name + " (" + dist + " tile" + (dist === 1 ? "" : "s") + " away). Pick a move:";
   atkMenuEl.appendChild(title);
   if (infos.length === 0) {
     const none = document.createElement("div");
@@ -5496,6 +5659,7 @@ function atkPointer(scene, pointer) {
       atkOpen(dummy);
       return;
     }
+    if (leverClickTry(clickCol, clickRow)) return;
     if (farmClickTry(clickCol, clickRow)) return;
     atkClose();
     return;
@@ -5503,11 +5667,29 @@ function atkPointer(scene, pointer) {
   atkOpen(target);
 }
 
+function leverClickTry(col, row) {
+  if (!worldLastView || !player) return false;
+  for (const o of worldLastView.objects || []) {
+    if (o.col !== col || o.row !== row) continue;
+    if (!HZ_LEVER_RE.test(String(o.name))) continue;
+    const dist = Math.max(Math.abs(player.col - col), Math.abs(player.row - row));
+    if (dist > 2) {
+      itemToast("You are too far away to reach the lever.");
+      return true;
+    }
+    atkClose();
+    gmSend({ type: "switch_toggle", col: col, row: row });
+    return true;
+  }
+  return false;
+}
+
 function atkFindDummy(c, r) {
   if (!worldLastView) return null;
   for (const o of worldLastView.objects || []) {
     if (o.col !== c || o.row !== r) continue;
     if (String(o.name).toLowerCase() === "dummy") return { id: "dummy", type: "dummy", name: "Dummy", col: c, row: r };
+    if (HZ_BREAKABLE_RE.test(String(o.name))) return { id: "dummy", type: "dummy", name: String(o.name).replace(/_/g, " "), col: c, row: r, breakable: true };
   }
   return null;
 }
@@ -6238,7 +6420,10 @@ function freeMoveFrame() {
   const vx = v[0] / len;
   const vy = v[1] / len;
   const dir = Math.abs(vx) >= Math.abs(vy) ? (vx > 0 ? "right" : "left") : (vy > 0 ? "down" : "up");
-  const step = (tuffUnderPlayer() ? Math.max(0.5, FREE.speed - TUFF.slow) : FREE.speed) * TILE * dt;
+  let walkSpeed = FREE.speed;
+  if (tuffUnderPlayer()) walkSpeed = Math.max(0.5, walkSpeed - TUFF.slow);
+  if (webUnderPlayer()) walkSpeed = Math.max(0.5, walkSpeed - TUFF.webSlow);
+  const step = walkSpeed * TILE * dt;
   let nx = player.x;
   let ny = player.y;
   if (step > 0) {
@@ -6246,6 +6431,7 @@ function freeMoveFrame() {
     if (freeCanStand(nx, player.y + vy * step)) ny = player.y + vy * step;
   }
   const moved = nx !== player.x || ny !== player.y;
+  if (!moved && step > 0) boulderTryPush(dir);
   if (dir !== player.direction) {
     player.direction = dir;
     FREE.anim = "";
@@ -7192,6 +7378,16 @@ window.worldHook = function (scene, data) {
       if (data.layer === WG.layer) {
         gmApplyArt(scene, data.cells, data.palette);
         gmUpdateHoverStatus();
+      }
+      return true;
+    }
+    if (data.type === "gm_link") {
+      if (data.layer === WG.layer) {
+        const lk = data.col + "," + data.row;
+        if (data.link) WG.links[lk] = data.link;
+        else delete WG.links[lk];
+        gmLinkRender();
+        gmDrawMarkers();
       }
       return true;
     }
