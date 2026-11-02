@@ -6484,11 +6484,26 @@ function freeSendPos() {
   FREE.sentY = player.y;
 }
 
-function freePlay(kind) {
+function freePlay(kind, reverse) {
   const key = DEX + "_" + kind + "_" + player.direction;
-  if (FREE.anim === key) return;
-  FREE.anim = key;
-  player.play(key, true);
+  const stamp = key + (reverse ? "_rev" : "");
+  if (FREE.anim === stamp) return;
+  FREE.anim = stamp;
+  if (reverse) player.anims.playReverse(key, true);
+  else player.play(key, true);
+}
+
+function freeNearestDir(ang) {
+  let best = null;
+  let bestDiff = 99;
+  for (const name in VIS_DIR_ANGLE) {
+    const diff = Math.abs(visAngleDiff(ang, VIS_DIR_ANGLE[name]));
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = name;
+    }
+  }
+  return best;
 }
 
 function freeMoveFrame() {
@@ -6519,7 +6534,15 @@ function freeMoveFrame() {
   const pushDir = Math.abs(vx) >= Math.abs(vy) ? (vx > 0 ? "right" : "left") : (vy > 0 ? "down" : "up");
   let dir = pushDir;
   if (Math.abs(vx) > 0.2 && Math.abs(vy) > 0.2) dir = (vy > 0 ? "down" : "up") + (vx > 0 ? "right" : "left");
+  const lookHeld = !!VIS.look && (VIS.lookMouse || (VIS.touch && VIS.touch.active));
+  let backward = false;
+  if (lookHeld) {
+    const faceDir = freeNearestDir(VIS.look.ang);
+    if (faceDir) dir = faceDir;
+    backward = vx * Math.cos(VIS.look.ang) + vy * Math.sin(VIS.look.ang) < -0.3;
+  }
   let walkSpeed = FREE.speed;
+  if (backward) walkSpeed = walkSpeed * 0.5;
   if (tuffUnderPlayer()) walkSpeed = Math.max(0.5, walkSpeed - TUFF.slow);
   if (webUnderPlayer()) walkSpeed = Math.max(0.5, walkSpeed - TUFF.webSlow);
   const step = walkSpeed * TILE * dt;
@@ -6549,7 +6572,7 @@ function freeMoveFrame() {
   player.col = Math.floor(nx / TILE);
   player.row = Math.floor(ny / TILE);
   FREE.moving = true;
-  freePlay("walk");
+  freePlay("walk", backward);
   if (now - FREE.lastSend >= 50) freeSendPos();
 }
 
