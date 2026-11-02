@@ -5593,7 +5593,7 @@ function atkOpen(target) {
   atkMenuEl.innerHTML = "";
   const title = document.createElement("div");
   title.className = "atkTitle";
-  title.textContent = (target.type === "player" ? "Challenge " : target.breakable ? "Smash the " : target.type === "dummy" ? "Practice on " : "Attack ") + target.name + " (" + dist + " tile" + (dist === 1 ? "" : "s") + " away). Pick a move:";
+  title.textContent = (target.type === "player" ? "Challenge " : target.boulder ? "Strike the " : target.breakable ? "Smash the " : target.type === "dummy" ? "Practice on " : "Attack ") + target.name + " (" + dist + " tile" + (dist === 1 ? "" : "s") + " away). Pick a move:";
   atkMenuEl.appendChild(title);
   if (infos.length === 0) {
     const none = document.createElement("div");
@@ -5689,6 +5689,7 @@ function atkFindDummy(c, r) {
   for (const o of worldLastView.objects || []) {
     if (o.col !== c || o.row !== r) continue;
     if (String(o.name).toLowerCase() === "dummy") return { id: "dummy", type: "dummy", name: "Dummy", col: c, row: r };
+    if (HZ_BOULDER_RE.test(String(o.name))) return { id: "dummy", type: "dummy", name: String(o.name).replace(/_/g, " "), col: c, row: r, boulder: true };
     if (HZ_BREAKABLE_RE.test(String(o.name))) return { id: "dummy", type: "dummy", name: String(o.name).replace(/_/g, " "), col: c, row: r, breakable: true };
   }
   return null;
@@ -7072,6 +7073,58 @@ function bushPlaySound(file, volume) {
   } catch (e) {}
 }
 
+function boulderRollAnim(scene, data) {
+  if (!scene || !data || !Array.isArray(data.from) || !Array.isArray(data.to)) return;
+  const frameNames = ["Boulder1", "Boulder2", "Boulder3", "Boulder4"];
+  if (data.cycle) {
+    for (const n of frameNames) worldEnsureAsset(scene, "object", n);
+  }
+  const firstName = data.cycle ? frameNames[data.startFrame || 0] : String(data.name);
+  let tex = worldEnsureAsset(scene, "object", firstName);
+  if (!tex) {
+    for (const n of frameNames) {
+      if (scene.textures.exists("object_" + n)) {
+        tex = "object_" + n;
+        break;
+      }
+    }
+  }
+  if (!tex) return;
+  const x0 = data.from[0] * TILE + TILE / 2 - 1;
+  const y0 = data.from[1] * TILE + TILE / 2 - 1;
+  const x1 = data.to[0] * TILE + TILE / 2 - 1;
+  const y1 = data.to[1] * TILE + TILE / 2 - 1;
+  const sp = scene.add.image(x0, y0, tex);
+  const scale = (TILE - 2) / Math.max(sp.width, sp.height);
+  sp.setScale(scale);
+  sp.setDepth(5);
+  sp.setRotation(-viewRot);
+  const dirSign = data.forward ? 1 : -1;
+  const tiles = Math.max(1, data.tiles || 1);
+  const duration = tiles * (data.stepMs || 150);
+  scene.tweens.addCounter({
+    from: 0,
+    to: 1,
+    duration: duration,
+    ease: "Linear",
+    onUpdate: (tween) => {
+      const t = tween.getValue();
+      sp.x = x0 + (x1 - x0) * t;
+      sp.y = y0 + (y1 - y0) * t;
+      sp.setRotation(-viewRot + dirSign * t * tiles * (Math.PI * 2 / 3));
+      if (data.cycle) {
+        const moved = Math.floor(t * tiles * 2);
+        const idx = (((data.startFrame || 0) + dirSign * moved) % 4 + 4) % 4;
+        const key = "object_" + frameNames[idx];
+        if (sp.texture.key !== key && scene.textures.exists(key)) sp.setTexture(key);
+      }
+    },
+    onComplete: () => {
+      scene.time.delayedCall(180, () => sp.destroy());
+    }
+  });
+}
+
 function bushWobble(scene, data) {
   const sp = worldObjectPool[data.col + "," + data.row];
   if (data.sound) bushPlaySound(data.sound, typeof data.volume === "number" ? data.volume : 0.5);
@@ -7128,6 +7181,10 @@ window.worldHook = function (scene, data) {
       const lightSel = document.getElementById("wgLightMode");
       if (lightSel) lightSel.value = data.mode;
     }
+    return true;
+  }
+  if (data.type === "boulder_roll") {
+    boulderRollAnim(scene, data);
     return true;
   }
   if (data.type === "obj_wobble") {

@@ -477,6 +477,10 @@ function dummyAttack(p, data) {
     p.direction = Math.abs(dc) >= Math.abs(dr) ? (dc > 0 ? "right" : "left") : (dr > 0 ? "down" : "up");
     ctx.broadcastFacing(p);
   }
+  if (typeof ctx.isBoulderAt === "function" && ctx.isBoulderAt(p.layer, col, row)) {
+    ctx.rollBoulder(p, col, row);
+    return;
+  }
   const attacker = buildPlayerCombatant(p);
   attacker.mp = attacker.maxMp;
   attacker.energy = 0;
@@ -860,7 +864,11 @@ function nextTurn(f) {
   A.c.protected = false;
   A.acted = false;
 
-  const act = engine.canAct(A.c);
+  let act = engine.canAct(A.c);
+  if (A.kind === "enemy" && A.ref && A.ref._skipTurn) {
+    A.ref._skipTurn = false;
+    act = { canAct: false, reason: `${A.c.name} is stunned by the boulder and loses its turn!` };
+  }
   if (!act.canAct) {
     const tick = tickAllActors(f);
     pushLog(f, [act.reason].concat(tick));

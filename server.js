@@ -3734,6 +3734,7 @@ function entityTick() {
     if (e.kind === "companion" || e.kind === "corpse") continue;
     if (!layerHasViewers(e.layer)) continue;
     if (e._fight) continue;
+    if (e._stunUntil && now < e._stunUntil) continue;
 
     if (e.kind === "npc" && Array.isArray(e.schedule) && e.schedule.length > 0) {
       if (schedTickEntity(e, now)) continue;
@@ -4743,7 +4744,7 @@ function isDummyAtStrict(layer, col, row) {
 }
 
 function isDummyAt(layer, col, row) {
-  return isDummyAtStrict(layer, col, row) || isBreakableAt(layer, col, row);
+  return isDummyAtStrict(layer, col, row) || isBreakableAt(layer, col, row) || isBoulderAt(layer, col, row);
 }
 
 function handleFarmQuery(p, data) {
@@ -5722,6 +5723,184 @@ function handleBoulderPush(p, data) {
   }
   refreshViewsNear(p.layer, col, row);
   refreshViewsNear(p.layer, destC, destR);
+}
+
+const BOULDER_ROLL_STEP_MS = 150;
+const BOULDER_ROLL_MAX_TILES = 40;
+const BOULDER_STUN_MS = 6000;
+const BOULDER_FRAME_RE = /^boulder([1-4])$/i;
+const rollingBoulders = {};
+
+function isBoulderAt(layer, col, row) {
+  const obj = objAt(layer, col, row);
+  return !!obj && BOULDER_RE.test(String(obj.name));
+}
+
+function entityHovers(e) {
+  const types = typesOfSpecies(e.species);
+  for (const t of types) {
+    const name = String(t).toLowerCase();
+    if (name === "flying" || name === "psychic") return true;
+  }
+  return false;
+}
+
+function rollFloor(layer, col, row) {
+  const ch = tileAt(layer, col, row);
+  return ch === "." || ch === "P";
+}
+
+function rollPushable(layer, col, row) {
+  return isWalkable(layer, col, row) && !cellOccupied(layer, col, row);
+}
+
+function rollBoulder(p, col, row) {
+  if (!isBoulderAt(p.layer, col, row)) return false;
+  const layer = p.layer;
+  const dc = col - p.col;
+  const dr = row - p.row;
+  if (dc === 0 && dr === 0) return false;
+  const sx = dc > 0 ? 1 : (dc < 0 ? -1 : 0);
+  const sy = dr > 0 ? 1 : (dr < 0 ? -1 : 0);
+  let dirName;
+  if (sx !== 0) dirName = sx > 0 ? "right" : "left";
+  else dirName = sy > 0 ? "down" : "up";
+  const dyn = dynOf(layer);
+  const startKey = col + "," + row;
+  const obj = objAt(layer, col, row);
+  let home = dyn.occ[startKey];
+  if (!home) home = startKey;
+  const rollId = layer + ":" + home;
+  if (rollingBoulders[rollId]) {
+    envNotice(p, "The boulder is already rolling.");
+    return true;
+  }
+
+  const path = [];
+  let endKind = "wall";
+  let cc = col;
+  let rr = row;
+  for (let i = 0; i < BOULDER_ROLL_MAX_TILES; i++) {
+    const nc = cc + sx;
+    const nr = rr + sy;
+    if (sx !== 0 && sy !== 0) {
+      if (!rollFloor(layer, cc + sx, rr) || !rollFloor(layer, cc, rr + sy)) break;
+    }
+    if (!rollFloor(layer, nc, nr)) break;
+    const destObj = objAt(layer, nc, nr);
+    const destIsPit = !!destObj && hazardKind(destObj.name) === "pit";
+    const destIsPad = !!destObj && switchKind(destObj.name) === "pad";
+    if (destObj && !destIsPit && !destIsPad) break;
+    if (playerAt(layer, nc, nr)) break;
+    const hitEntity = entityAt(layer, nc, nr);
+    if (hitEntity) {
+      if (hitEntity.kind !== "enemy" || hitEntity._fight) break;
+      if (!rollPushable(layer, nc + sx, nr + sy)) break;
+      path.push([nc, nr]);
+      endKind = "enemy";
+      break;
+    }
+    path.push([nc, nr]);
+    if (destIsPit) {
+      endKind = "pit";
+      break;
+    }
+    if (destIsPad) {
+      endKind = "pad";
+      break;
+    }
+    cc = nc;
+    rr = nr;
+    endKind = "max";
+  }
+  if (path.length === 0) {
+    envNotice(p, "The boulder won't budge.");
+    return true;
+  }
+
+  const now = Date.now();
+  if (!dyn.boulders[home]) dyn.boulders[home] = { obj: obj, cur: startKey, at: now };
+  const entry = dyn.boulders[home];
+  entry.at = now;
+  delete dyn.occ[startKey];
+  entry.cur = null;
+  rollingBoulders[rollId] = true;
+  refreshViewsNear(layer, col, row);
+
+  const last = path[path.length - 1];
+  const tiles = path.length;
+  const totalMs = tiles * BOULDER_ROLL_STEP_MS;
+  const forward = sx > 0 || (sx === 0 && sy > 0);
+  const nameNow = String(entry.obj.name);
+  const frameMatch = nameNow.match(BOULDER_FRAME_RE);
+  const startFrame = frameMatch ? parseInt(frameMatch[1], 10) - 1 : 0;
+  const message = { type: "boulder_roll", from: [col, row], to: [last[0], last[1]], tiles: tiles, stepMs: BOULDER_ROLL_STEP_MS, startFrame: startFrame, forward: forward, cycle: !!frameMatch, name: nameNow };
+  for (const id in worldSession.players) {
+    const q = worldSession.players[id];
+    if (!q || q.layer !== layer) continue;
+    const near = Math.abs(q.col - col) <= VIEW_HALF_W + tiles && Math.abs(q.row - row) <= VIEW_HALF_H + tiles;
+    if (near) sendPlayer(q, message);
+  }
+
+  setTimeout(() => {
+    delete rollingBoulders[rollId];
+    const fin = Date.now();
+    entry.at = fin;
+    let stopC = last[0];
+    let stopR = last[1];
+    if (endKind === "pit") {
+      entry.cur = null;
+      dyn.hidden[stopC + "," + stopR] = fin;
+      refreshViewsNear(layer, stopC, stopR);
+      envNotice(p, "The boulder tumbles into the pit and fills it!");
+      return;
+    }
+    const target = entityAt(layer, stopC, stopR);
+    const blocker = playerAt(layer, stopC, stopR);
+    let shove = null;
+    if (target && target.kind === "enemy" && !target._fight && !blocker && rollPushable(layer, stopC + sx, stopR + sy)) shove = target;
+    if ((target && !shove) || blocker) {
+      if (tiles >= 2) {
+        stopC = path[tiles - 2][0];
+        stopR = path[tiles - 2][1];
+      } else {
+        stopC = col;
+        stopR = row;
+      }
+    }
+    const stopKey = stopC + "," + stopR;
+    dyn.occ[stopKey] = home;
+    entry.cur = stopKey;
+    if (frameMatch) {
+      const moved = Math.floor(tiles * 2);
+      const idx = (((startFrame + (forward ? 1 : -1) * moved) % 4) + 4) % 4;
+      entry.obj = Object.assign({}, entry.obj, { name: "Boulder" + (idx + 1) });
+    }
+    refreshViewsNear(layer, stopC, stopR);
+    refreshViewsNear(layer, col, row);
+    if (!shove) return;
+    const oldC = shove.col;
+    const oldR = shove.row;
+    const pc = oldC + sx;
+    const pr = oldR + sy;
+    const label = shove.name || shove.species || "The enemy";
+    const pushedObj = objAt(layer, pc, pr);
+    const intoPit = !!pushedObj && hazardKind(pushedObj.name) === "pit";
+    if (intoPit && !entityHovers(shove)) {
+      cancelEnemyRespawn(shove.id);
+      removeEntity(shove.id);
+      envNotice(p, label + " was knocked into the pit and is gone for good!");
+      return;
+    }
+    shove.col = pc;
+    shove.row = pr;
+    shove.direction = dirName === "left" ? "right" : (dirName === "right" ? "left" : (dirName === "up" ? "down" : "up"));
+    shove._skipTurn = true;
+    shove._stunUntil = fin + BOULDER_STUN_MS;
+    broadcastEntity(shove, layer, oldC, oldR);
+    envNotice(p, label + (intoPit ? " hovers over the pit and is stunned!" : " was knocked back and stunned!"));
+  }, totalMs);
+  return true;
 }
 
 function dynResetTick() {
@@ -7761,6 +7940,8 @@ worldCombat.init({
   cellInView: cellInView,
   isDummyAt: isDummyAt,
   isBreakableAt: isBreakableAt,
+  isBoulderAt: isBoulderAt,
+  rollBoulder: rollBoulder,
   breakObjectAt: breakObjectAt,
   enemyCanSee: enemyCanSee
 });
