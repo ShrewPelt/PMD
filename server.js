@@ -2674,6 +2674,19 @@ function leaveWorldPlayer(id, skipPenalty) {
   return true;
 }
 
+function npcInUseByOther(npcName, userId) {
+  const want = String(npcName || "").trim().toLowerCase();
+  if (!want) return null;
+  for (const id in worldSession.players) {
+    const q = worldSession.players[id];
+    if (!q._npcName) continue;
+    if (String(q._npcName).trim().toLowerCase() !== want) continue;
+    if (String(q.userId) === String(userId)) continue;
+    return q;
+  }
+  return null;
+}
+
 function forceLeaveUser(userId, reason) {
   let left = false;
   for (const id of Object.keys(worldSession.players)) {
@@ -2830,6 +2843,10 @@ app.post("/api/world/join", (req, res) => {
     return;
   }
   const userId = String(body.userId);
+  if (body.npcName && npcInUseByOther(body.npcName, userId)) {
+    res.status(409).json({ error: "Access denied: " + String(body.npcName) + " is already being used by another game master." });
+    return;
+  }
   forceLeaveUser(userId, "You joined the world with another character.");
   const oldPass = worldByUser[userId];
   if (oldPass) delete worldPasses[oldPass];
@@ -7952,6 +7969,12 @@ function handleWorldConnection(socket, pass) {
 
   if (info.role === "gm") {
     handleWorldGmConnection(socket, info);
+    return;
+  }
+
+  if (info.npcName && npcInUseByOther(info.npcName, info.userId)) {
+    socket.send(JSON.stringify({ type: "denied", reason: "Access denied: " + info.npcName + " is already being used by another game master right now." }));
+    socket.close();
     return;
   }
 
