@@ -2246,7 +2246,7 @@ function sendView(p) {
   const selfLight = playerLightInfo(p);
   p._lightSig = selfLight.r + "|" + selfLight.c;
   const layerObj = layers[p.layer];
-  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, art: artRows, sol: solRows, palette: tilePalette, objects: objectsInWindow(p.layer, c0 - VIEW_OBJ_PAD, r0 - VIEW_OBJ_PAD, w + VIEW_OBJ_PAD * 2, h + VIEW_OBJ_PAD * 2), entities: entitiesInWindow(p.layer, c0, r0, w, h), items: itemsInWindow(p.layer, c0 - VIEW_OBJ_PAD, r0 - VIEW_OBJ_PAD, w + VIEW_OBJ_PAD * 2, h + VIEW_OBJ_PAD * 2), lm: layerObj && layerObj.light ? layerObj.light : "outdoor", nv: playerNightVision(p) ? 1 : 0, sl: selfLight.r, slc: selfLight.c, hv: playerHovers(p) ? 1 : 0 });
+  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, art: artRows, sol: solRows, palette: tilePalette, objects: objectsInWindow(p.layer, c0 - VIEW_OBJ_PAD, r0 - VIEW_OBJ_PAD, w + VIEW_OBJ_PAD * 2, h + VIEW_OBJ_PAD * 2), entities: entitiesInWindow(p.layer, c0, r0, w, h), items: itemsInWindow(p.layer, c0 - VIEW_OBJ_PAD, r0 - VIEW_OBJ_PAD, w + VIEW_OBJ_PAD * 2, h + VIEW_OBJ_PAD * 2), lm: layerObj && layerObj.light ? layerObj.light : "outdoor", nv: playerNightVision(p) ? 1 : 0, sl: selfLight.r, slc: selfLight.c, hv: playerHovers(p) ? 1 : 0, gl: guildsForView(p), cs: sitesForView(p) });
 }
 
 function notifyItem(layer, col, row, data) {
@@ -2278,7 +2278,7 @@ function scheduleJournalWrite() {
 
 function journalSignature(p) {
   const coins = p._sheet ? Number(p._sheet.coins) || 0 : 0;
-  return JSON.stringify([p._inv, p._reported, p._coinsPending || 0, p._kills || [], p.hp, p.mp, coins]);
+  return JSON.stringify([p._inv, p._reported, p._coinsPending || 0, p._coinsSpent || 0, p._kills || [], p.hp, p.mp, coins]);
 }
 
 function journalPlayer(p) {
@@ -2289,6 +2289,7 @@ function journalPlayer(p) {
     reported: p._reported || {},
     coins: p._sheet ? Number(p._sheet.coins) || 0 : 0,
     coinsPending: p._coinsPending || 0,
+    coinsSpent: p._coinsSpent || 0,
     kills: Array.isArray(p._kills) ? p._kills.slice() : [],
     hp: p.hp,
     mp: p.mp
@@ -2320,6 +2321,7 @@ function journalRestore(p, info, pass) {
   }
   p._reported = entry.reported && typeof entry.reported === "object" ? entry.reported : countInventory(info.inventory);
   p._coinsPending = Number(entry.coinsPending) || 0;
+  p._coinsSpent = Number(entry.coinsSpent) || 0;
   p._kills = Array.isArray(entry.kills) ? entry.kills.slice() : [];
   if (p._sheet) p._sheet.coins = Number(entry.coins) || 0;
   if (Number(entry.hp) > 0) p.hp = Math.min(p.maxHp, Number(entry.hp));
@@ -2350,11 +2352,14 @@ function queueWorldSave(p, final) {
   const vitalsChanged = p.hp !== p._reportedHp || p.mp !== p._reportedMp;
   const accDirty = !!p._accDirty;
   const coinsPending = p._coinsPending || 0;
-  if (!final && Object.keys(delta).length === 0 && kills.length === 0 && !vitalsChanged && !accDirty && coinsPending === 0 && !p._coinLossPercent) return;
+  const coinsSpent = p._coinsSpent || 0;
+  if (!final && Object.keys(delta).length === 0 && kills.length === 0 && !vitalsChanged && !accDirty && coinsPending === 0 && coinsSpent === 0 && !p._coinLossPercent) return;
   p._coinsPending = 0;
+  p._coinsSpent = 0;
   const ailments = p._sheet && Array.isArray(p._sheet.ailments) ? p._sheet.ailments : [];
   const entry = { id: makeToken(), kind: p._npcName ? "npc" : undefined, npcName: p._npcName || undefined, userId: p.userId, name: p.name, slot: p._slot, pass: p._pass, delta: delta, kills: kills, hp: p.hp, mp: p.mp, ailments: ailments, layer: p.layer, col: p.col, row: p.row, final: final, ts: Date.now() };
   if (coinsPending > 0) entry.coins = coinsPending;
+  if (coinsSpent > 0) entry.coinsSpent = coinsSpent;
   if (p._coinLossPercent) {
     entry.coinLossPercent = p._coinLossPercent;
     p._coinLossPercent = 0;
@@ -2989,7 +2994,7 @@ function saveEntitiesNow() {
   for (const id of Object.keys(entities)) {
     const e = entities[id];
     if (e.kind === "companion") continue;
-    list.push({ id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, schedule: Array.isArray(e.schedule) && e.schedule.length > 0 ? e.schedule : undefined, patrol: Array.isArray(e.patrol) && e.patrol.length > 0 ? e.patrol : undefined, chatter: e.chatter ? true : undefined, fainted: e.fainted || false, faintUntil: e.faintUntil || 0 });
+    list.push({ id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, schedule: Array.isArray(e.schedule) && e.schedule.length > 0 ? e.schedule : undefined, patrol: Array.isArray(e.patrol) && e.patrol.length > 0 ? e.patrol : undefined, chatter: e.chatter ? true : undefined, occupation: e.occupation || undefined, guildId: e.guildId || undefined, noGuild: e.noGuild ? true : undefined, workSite: e.workSite || undefined, carry: e.carry || undefined, fainted: e.fainted || false, faintUntil: e.faintUntil || 0 });
   }
   writeJsonFile(ENTITIES_FILE, { nextId: entityNextId, list: list, respawns: respawnQueue });
 }
@@ -3001,7 +3006,7 @@ function scheduleEntitySave() {
 
 function publicEntity(e) {
   const lightInfo = entityLightInfo(e);
-  return { id: e.id, kind: e.kind, name: e.name, dex: e.dex, layer: e.layer, col: e.col, row: e.row, direction: e.direction, state: e.state, fainted: !!e.fainted, light: lightInfo.r, lc: lightInfo.c };
+  return { id: e.id, kind: e.kind, name: e.name, dex: e.dex, layer: e.layer, col: e.col, row: e.row, direction: e.direction, state: e.state, fainted: !!e.fainted, light: lightInfo.r, lc: lightInfo.c, cy: e.carry || "" };
 }
 
 function gmEntity(e) {
@@ -3090,6 +3095,7 @@ function removeEntity(id) {
   const e = entities[id];
   if (!e) return;
   worldCombat.onEntityRemoved(e);
+  guildPurgeEntity(id);
   for (const pid in worldSession.players) {
     const q = worldSession.players[pid];
     if (cellInView(q, e.layer, e.col, e.row)) sendPlayer(q, { type: "e_del", id: id });
@@ -3799,6 +3805,7 @@ function entityTick() {
     if (!layerHasViewers(e.layer)) continue;
     if (e._fight) continue;
     if (e._stunUntil && now < e._stunUntil) continue;
+    if (e.kind === "npc" && e.workSite) continue;
 
     if (e.kind === "npc" && Array.isArray(e.schedule) && e.schedule.length > 0) {
       if (schedTickEntity(e, now)) continue;
@@ -4012,11 +4019,11 @@ function inspectPayload(t) {
     let expGained = 0;
     for (const k of Array.isArray(p._kills) ? p._kills : []) expGained += (Number(k && k.level) || 0) * 12;
     const stats = { species: sheet.species || "", dex: p.dex, types: Array.isArray(sheet.types) ? sheet.types : [], level: sheet.level || 1, exp: sheet.exp || 0, expGained: expGained, hp: p.hp, maxHp: p.maxHp, mp: p.mp, maxMp: p.maxMp, moves: worldCombat.sheetMoveInfo(sheet) };
-    return { type: "gm_inspect", target: { type: "player", id: p.id }, name: p.name, inv: p._inv.map((s) => ({ name: s.name, count: s.count })), accessories: { head: acc.head || null, neck: acc.neck || null, back: acc.back || null }, capacity: capacityOf(p), stats: stats };
+    return { type: "gm_inspect", target: { type: "player", id: p.id }, name: p.name, inv: p._inv.map((s) => ({ name: s.name, count: s.count })), accessories: { head: acc.head || null, neck: acc.neck || null, back: acc.back || null }, capacity: capacityOf(p), stats: stats, occupation: occupationOf(p), guild: guildOfMaster(p) ? guildOfMaster(p).name : "" };
   }
   const e = t.ref;
   const acc = e.accessories || {};
-  return { type: "gm_inspect", target: { type: "entity", id: e.id }, name: e.name, inv: (e.loot || []).map((s) => ({ name: s.name, count: s.count })), accessories: { head: acc.head || null, neck: acc.neck || null, back: acc.back || null }, capacity: 12 };
+  return { type: "gm_inspect", target: { type: "entity", id: e.id }, name: e.name, inv: (e.loot || []).map((s) => ({ name: s.name, count: s.count })), accessories: { head: acc.head || null, neck: acc.neck || null, back: acc.back || null }, capacity: 12, occupation: e.occupation || "", noGuild: !!e.noGuild, isNpc: e.kind === "npc", guild: guildOfEntity(e) ? guildOfEntity(e).name : "" };
 }
 
 function syncPlayerInventory(p) {
@@ -5667,6 +5674,1033 @@ function sendPosCorrect(p) {
   sendPlayer(p, { type: "poscorrect", x: cur.x, y: cur.y, direction: p.direction });
 }
 
+const GUILDS_FILE = path.join(WORLD_DIR, "guilds.json");
+const OCC_FILE = path.join(WORLD_DIR, "occupations.json");
+const GUILD_CONFIG_FILE = path.join(__dirname, "StorageData", "GuildConfig.json");
+const GUILD_CONFIG_DEFAULTS = { claimMaxSide: 20, claimMinSide: 3, reach: 6, recruitBase: 20, recruitPerLevelSq: 0.6, accessoryCost: 40, itemCost: 5, itemCap: 300 };
+const guildConfig = Object.assign({}, GUILD_CONFIG_DEFAULTS, readJsonFile(GUILD_CONFIG_FILE, {}));
+let occupations = readJsonFile(OCC_FILE, {});
+if (!occupations || typeof occupations !== "object" || Array.isArray(occupations)) occupations = {};
+let guildStore = readJsonFile(GUILDS_FILE, { nextId: 1, list: [] });
+if (!guildStore || typeof guildStore !== "object" || !Array.isArray(guildStore.list)) guildStore = { nextId: 1, list: [] };
+if (!Number.isInteger(guildStore.nextId)) guildStore.nextId = guildStore.list.length + 1;
+
+function saveGuilds() {
+  writeJsonFile(GUILDS_FILE, guildStore);
+}
+
+function saveOccupations() {
+  writeJsonFile(OCC_FILE, occupations);
+}
+
+function charKeyOf(p) {
+  return String(p.userId) + "|" + String(p.name).toLowerCase();
+}
+
+function occupationOf(p) {
+  const found = occupations[charKeyOf(p)];
+  return typeof found === "string" ? found : "";
+}
+
+function isGuildMasterText(text) {
+  return String(text || "").trim().toLowerCase() === "guild master";
+}
+
+function guildById(id) {
+  for (const g of guildStore.list) {
+    if (g.id === id) return g;
+  }
+  return null;
+}
+
+function guildOfMaster(p) {
+  const key = charKeyOf(p);
+  for (const g of guildStore.list) {
+    if (g.masterKey === key) return g;
+  }
+  return null;
+}
+
+function guildOfEntity(e) {
+  if (!e || !e.guildId) return null;
+  return guildById(e.guildId);
+}
+
+function guildPayload(g) {
+  const members = [];
+  for (const id of g.members) {
+    const e = entities[id];
+    if (!e) continue;
+    members.push({ id: e.id, name: e.name, species: e.species, dex: e.dex, level: e.level, occupation: e.occupation || "" });
+  }
+  const sites = sitesOfGuild(g).map(sitePayload);
+  const workerSite = {};
+  for (const s of sites) {
+    for (const w of s.workers) workerSite[w.id] = s.id;
+  }
+  for (const m of members) m.site = workerSite[m.id] || "";
+  return { id: g.id, name: g.name, layer: g.layer, rect: g.rect, masterName: g.masterName, members: members, sites: sites, stock: guildStock(g) };
+}
+
+function guildStateFor(p) {
+  const occ = occupationOf(p);
+  const master = isGuildMasterText(occ);
+  const g = master ? guildOfMaster(p) : null;
+  return { type: "guild_state", occupation: occ, isMaster: master, guild: g ? guildPayload(g) : null, presets: master ? presetSummaries() : [], materials: GUILD_MATERIALS, cfg: { claimMax: guildConfig.claimMaxSide, claimMin: guildConfig.claimMinSide, reach: guildConfig.reach } };
+}
+
+function sendGuildState(p) {
+  sendPlayer(p, guildStateFor(p));
+}
+
+function guildsForGm() {
+  const out = [];
+  for (const g of guildStore.list) out.push({ id: g.id, name: g.name, layer: g.layer, rect: g.rect, sites: sitesOfGuild(g).map((s) => ({ id: s.id, name: s.name, c0: s.c0, r0: s.r0, w: s.w, h: s.h, pct: siteProgress(s) })) });
+  return out;
+}
+
+function guildsForView(p) {
+  const out = [];
+  const key = charKeyOf(p);
+  for (const g of guildStore.list) {
+    if (!g.rect || g.layer !== p.layer) continue;
+    if (g.rect.c1 < p.col - 60 || g.rect.c0 > p.col + 60 || g.rect.r1 < p.row - 60 || g.rect.r0 > p.row + 60) continue;
+    out.push({ id: g.id, n: g.name, c0: g.rect.c0, r0: g.rect.r0, c1: g.rect.c1, r1: g.rect.r1, own: g.masterKey === key ? 1 : 0 });
+  }
+  return out;
+}
+
+function guildChanged(g) {
+  saveGuilds();
+  sendGms(null, { type: "gm_guilds", guilds: guildsForGm() });
+  for (const id in worldSession.players) {
+    const q = worldSession.players[id];
+    if (!q) continue;
+    if (g && g.masterKey === charKeyOf(q)) sendGuildState(q);
+    if (g && g.rect && q.layer === g.layer) sendView(q);
+  }
+}
+
+function guildMsg(p, ok, text) {
+  sendPlayer(p, { type: "guild_msg", ok: ok, text: text });
+}
+
+function guildPurgeEntity(id) {
+  let changed = null;
+  const gone = entities[id];
+  if (gone && gone.workSite) workerRelease(gone);
+  for (const g of guildStore.list) {
+    const at = g.members.indexOf(id);
+    if (at !== -1) {
+      g.members.splice(at, 1);
+      changed = g;
+    }
+  }
+  if (changed) guildChanged(changed);
+}
+
+function recruitCostFor(e) {
+  const level = Math.max(1, Math.min(100, parseInt(e.level, 10) || 1));
+  let cost = Math.round(guildConfig.recruitBase + level * level * guildConfig.recruitPerLevelSq);
+  const acc = e.accessories || {};
+  let accCount = 0;
+  for (const slot of ["head", "neck", "back"]) {
+    if (acc[slot]) accCount = accCount + 1;
+  }
+  cost = cost + accCount * guildConfig.accessoryCost;
+  let itemCount = 0;
+  for (const stack of Array.isArray(e.loot) ? e.loot : []) itemCount = itemCount + (Number(stack && stack.count) || 1);
+  cost = cost + Math.min(guildConfig.itemCap, itemCount * guildConfig.itemCost);
+  return Math.max(1, cost);
+}
+
+function spendPlayerCoins(p, amount) {
+  const have = p._sheet ? Number(p._sheet.coins) || 0 : 0;
+  if (!p._sheet || have < amount) return false;
+  p._sheet.coins = have - amount;
+  p._coinsSpent = (p._coinsSpent || 0) + amount;
+  syncPlayerInventory(p);
+  return true;
+}
+
+function guildRecruitCheck(p, data) {
+  const occ = occupationOf(p);
+  if (!isGuildMasterText(occ)) return { fail: "Only a Guild Master can recruit." };
+  const g = guildOfMaster(p);
+  if (!g) return { fail: "Found your guild first." };
+  const e = entities[String(data && data.id)];
+  if (!e || e.kind !== "npc" || e.layer !== p.layer || e.fainted) return { fail: "That NPC is not here." };
+  const dist = Math.max(Math.abs(e.col - p.col), Math.abs(e.row - p.row));
+  if (dist > guildConfig.reach) return { fail: "Get closer to " + e.name + " first." };
+  if (e.guildId) {
+    const other = guildById(e.guildId);
+    if (other && other.id === g.id) return { fail: e.name + " is already in your guild." };
+    return { fail: e.name + " already belongs to " + (other ? other.name : "a guild") + "." };
+  }
+  if (e._busy) return { fail: e.name + " is busy right now." };
+  return { g: g, e: e };
+}
+
+function handleGuildMessage(p, data) {
+  const type = String(data.type);
+  if (type === "guild_info") {
+    sendGuildState(p);
+    return;
+  }
+  if (worldCombat.isInFight(p)) {
+    guildMsg(p, false, "You can't do that during a battle.");
+    return;
+  }
+  const occ = occupationOf(p);
+  if (!isGuildMasterText(occ)) {
+    guildMsg(p, false, "Only a Guild Master can manage a guild.");
+    return;
+  }
+  if (type === "guild_create") {
+    if (guildOfMaster(p)) {
+      guildMsg(p, false, "You already have a guild.");
+      return;
+    }
+    const name = String(data.name || "").trim().replace(/\s+/g, " ");
+    if (name.length < 3 || name.length > 24 || !/^[A-Za-z0-9 .'\-]+$/.test(name)) {
+      guildMsg(p, false, "Guild names are 3 to 24 letters, numbers, spaces, dots, apostrophes or dashes.");
+      return;
+    }
+    for (const other of guildStore.list) {
+      if (other.name.toLowerCase() === name.toLowerCase()) {
+        guildMsg(p, false, "A guild with that name already exists.");
+        return;
+      }
+    }
+    const g = { id: "g" + guildStore.nextId, name: name, masterKey: charKeyOf(p), masterName: p.name, layer: p.layer, rect: null, members: [], created: Date.now() };
+    guildStore.nextId = guildStore.nextId + 1;
+    guildStore.list.push(g);
+    guildChanged(g);
+    guildMsg(p, true, "You founded " + name + "! Now claim your guild grounds.");
+    return;
+  }
+  const g = guildOfMaster(p);
+  if (!g) {
+    guildMsg(p, false, "Found your guild first.");
+    return;
+  }
+  if (type === "guild_claim") {
+    let c0 = parseInt(data.c0, 10);
+    let r0 = parseInt(data.r0, 10);
+    let c1 = parseInt(data.c1, 10);
+    let r1 = parseInt(data.r1, 10);
+    if (![c0, r0, c1, r1].every(Number.isInteger)) return;
+    if (c0 > c1) { const t = c0; c0 = c1; c1 = t; }
+    if (r0 > r1) { const t = r0; r0 = r1; r1 = t; }
+    const w = c1 - c0 + 1;
+    const h = r1 - r0 + 1;
+    if (w < guildConfig.claimMinSide || h < guildConfig.claimMinSide) {
+      guildMsg(p, false, "Guild grounds must be at least " + guildConfig.claimMinSide + " by " + guildConfig.claimMinSide + " tiles.");
+      return;
+    }
+    if (w > guildConfig.claimMaxSide || h > guildConfig.claimMaxSide) {
+      guildMsg(p, false, "Guild grounds can be at most " + guildConfig.claimMaxSide + " by " + guildConfig.claimMaxSide + " tiles.");
+      return;
+    }
+    if (c0 < 0 || r0 < 0 || c1 >= LAYER_W || r1 >= LAYER_H) return;
+    for (const other of guildStore.list) {
+      if (other.id === g.id || !other.rect || other.layer !== p.layer) continue;
+      if (c0 <= other.rect.c1 && c1 >= other.rect.c0 && r0 <= other.rect.r1 && r1 >= other.rect.r0) {
+        guildMsg(p, false, "That area overlaps the grounds of " + other.name + ".");
+        return;
+      }
+    }
+    for (const s of sitesOfGuild(g)) {
+      if (s.layer !== p.layer || s.c0 < c0 || s.r0 < r0 || s.c0 + s.w - 1 > c1 || s.r0 + s.h - 1 > r1) {
+        guildMsg(p, false, "Your construction sites must stay inside the grounds. Cancel them first.");
+        return;
+      }
+    }
+    g.layer = p.layer;
+    g.rect = { c0: c0, r0: r0, c1: c1, r1: r1 };
+    guildChanged(g);
+    guildMsg(p, true, "Guild grounds claimed (" + w + " by " + h + " tiles).");
+    return;
+  }
+  if (type === "guild_unclaim") {
+    if (sitesOfGuild(g).length > 0) {
+      guildMsg(p, false, "Cancel your construction sites before releasing the grounds.");
+      return;
+    }
+    g.rect = null;
+    guildChanged(g);
+    guildMsg(p, true, "You released your guild grounds.");
+    return;
+  }
+  if (type === "guild_disband") {
+    guildStore.sites = guildStore.sites.filter((s) => s.gid !== g.id);
+    for (const id of g.members) {
+      const e = entities[id];
+      if (!e) continue;
+      if (e.workSite) workerUnassign(e);
+      e.guildId = null;
+      if (e.occupation === "Guild Member") e.occupation = "";
+    }
+    guildStore.list = guildStore.list.filter((x) => x.id !== g.id);
+    scheduleEntitySave();
+    guildChanged(g);
+    sendGuildState(p);
+    guildMsg(p, true, "Your guild was disbanded.");
+    return;
+  }
+  if (type === "guild_dismiss") {
+    const id = String(data.id);
+    const at = g.members.indexOf(id);
+    if (at === -1) return;
+    g.members.splice(at, 1);
+    const e = entities[id];
+    if (e) {
+      if (e.workSite) workerUnassign(e);
+      e.guildId = null;
+      if (e.occupation === "Guild Member") e.occupation = "";
+      scheduleEntitySave();
+    }
+    guildChanged(g);
+    guildMsg(p, true, (e ? e.name : "The member") + " left your guild.");
+    return;
+  }
+  if (handleGuildBuildMessage(p, g, type, data)) return;
+  if (type === "guild_quote") {
+    const check = guildRecruitCheck(p, data);
+    if (check.fail) {
+      sendPlayer(p, { type: "guild_quote_result", ok: false, id: String(data.id), reason: check.fail });
+      return;
+    }
+    const e = check.e;
+    if (e.noGuild) {
+      sendPlayer(p, { type: "guild_quote_result", ok: false, id: e.id, declined: true, name: e.name, reason: e.name + " has no interest in joining a guild." });
+      return;
+    }
+    sendPlayer(p, { type: "guild_quote_result", ok: true, id: e.id, name: e.name, level: e.level, cost: recruitCostFor(e), coins: p._sheet ? Number(p._sheet.coins) || 0 : 0 });
+    return;
+  }
+  if (type === "guild_recruit") {
+    const check = guildRecruitCheck(p, data);
+    if (check.fail) {
+      guildMsg(p, false, check.fail);
+      return;
+    }
+    const e = check.e;
+    if (e.noGuild) {
+      saySpeech(e, "I'm not joining any guild.");
+      guildMsg(p, false, e.name + " declined your offer.");
+      return;
+    }
+    const cost = recruitCostFor(e);
+    if (!spendPlayerCoins(p, cost)) {
+      guildMsg(p, false, "You need " + cost + " coins to recruit " + e.name + ".");
+      return;
+    }
+    e.guildId = check.g.id;
+    if (!e.occupation) e.occupation = "Guild Member";
+    check.g.members.push(e.id);
+    scheduleEntitySave();
+    saySpeech(e, "I'll join " + check.g.name + "!");
+    guildChanged(check.g);
+    guildMsg(p, true, e.name + " joined " + check.g.name + " for " + cost + " coins.");
+    return;
+  }
+}
+
+function handleGmOccupation(gm, data) {
+  const t = gmTargetOf(data.target);
+  if (!t) {
+    sendSocket(gm.socket, { type: "gm_notice", text: "That target is gone." });
+    return;
+  }
+  const text = String(data.occupation === undefined || data.occupation === null ? "" : data.occupation).trim().replace(/\s+/g, " ").slice(0, 30);
+  if (t.kind === "player") {
+    const key = charKeyOf(t.ref);
+    if (text) occupations[key] = text;
+    else delete occupations[key];
+    saveOccupations();
+    sendGuildState(t.ref);
+  } else {
+    if (t.ref.kind !== "npc") {
+      sendSocket(gm.socket, { type: "gm_notice", text: "Only NPCs can have an occupation." });
+      return;
+    }
+    t.ref.occupation = text;
+    if (typeof data.noGuild === "boolean") t.ref.noGuild = data.noGuild;
+    scheduleEntitySave();
+    const g = guildOfEntity(t.ref);
+    if (g) guildChanged(g);
+  }
+  sendSocket(gm.socket, inspectPayload(t));
+}
+
+const PRESETS_FILE = path.join(WORLD_DIR, "presets.json");
+const GUILD_MATERIALS = ["Log", "Stone", "Metal", "Crystal", "Plank", "Nails", "Rope"];
+const PRESET_MAX_SIDE = 24;
+const GUILD_MAX_SITES = 6;
+const GUILD_WORK_TICK_MS = 600;
+let presetStore = readJsonFile(PRESETS_FILE, { nextId: 1, list: [] });
+if (!presetStore || typeof presetStore !== "object" || !Array.isArray(presetStore.list)) presetStore = { nextId: 1, list: [] };
+if (!Number.isInteger(presetStore.nextId)) presetStore.nextId = presetStore.list.length + 1;
+if (!Array.isArray(guildStore.sites)) guildStore.sites = [];
+if (!Number.isInteger(guildStore.nextSite)) guildStore.nextSite = guildStore.sites.length + 1;
+const guildDirty = {};
+const guildResv = new Map();
+
+function savePresets() {
+  try {
+    fs.mkdirSync(WORLD_DIR, { recursive: true });
+    const lines = presetStore.list.map((p) => JSON.stringify(p));
+    const text = "{ \"nextId\": " + presetStore.nextId + ", \"list\": [\n" + lines.join(",\n") + "\n] }\n";
+    fs.writeFileSync(PRESETS_FILE + ".tmp", text);
+    fs.renameSync(PRESETS_FILE + ".tmp", PRESETS_FILE);
+  } catch (err) {
+    console.error("Could not write presets: " + err.message);
+  }
+}
+
+function materialKeyOf(name) {
+  const low = String(name || "").toLowerCase();
+  for (const m of GUILD_MATERIALS) {
+    if (low.indexOf(m.toLowerCase()) !== -1) return m;
+  }
+  return null;
+}
+
+function presetById(id) {
+  for (const p of presetStore.list) {
+    if (p.id === id) return p;
+  }
+  return null;
+}
+
+function presetSummaries() {
+  return presetStore.list.map((p) => ({ id: p.id, name: p.name, w: p.w, h: p.h, costs: p.costs }));
+}
+
+function presetsChanged() {
+  sendGms(null, { type: "gm_presets", presets: presetSummaries() });
+  for (const id in worldSession.players) {
+    const q = worldSession.players[id];
+    if (q && isGuildMasterText(occupationOf(q))) sendGuildState(q);
+  }
+}
+
+function handleGmPresetSave(gm, data) {
+  const layer = parseInt(data.layer, 10);
+  let c0 = parseInt(data.c0, 10);
+  let r0 = parseInt(data.r0, 10);
+  let c1 = parseInt(data.c1, 10);
+  let r1 = parseInt(data.r1, 10);
+  if (!validLayerNumber(layer) || ![c0, r0, c1, r1].every(Number.isInteger)) return;
+  if (c0 > c1) { const t = c0; c0 = c1; c1 = t; }
+  if (r0 > r1) { const t = r0; r0 = r1; r1 = t; }
+  if (c0 < 0 || r0 < 0 || c1 >= LAYER_W || r1 >= LAYER_H) return;
+  const w = c1 - c0 + 1;
+  const h = r1 - r0 + 1;
+  if (w > PRESET_MAX_SIDE || h > PRESET_MAX_SIDE) {
+    sendSocket(gm.socket, { type: "gm_notice", text: "Presets can be at most " + PRESET_MAX_SIDE + " by " + PRESET_MAX_SIDE + " tiles." });
+    return;
+  }
+  const name = String(data.name || "").trim().replace(/\s+/g, " ").slice(0, 30);
+  if (name.length < 2) {
+    sendSocket(gm.socket, { type: "gm_notice", text: "Give the preset a name." });
+    return;
+  }
+  const costs = {};
+  let total = 0;
+  const rawCosts = data.costs && typeof data.costs === "object" ? data.costs : {};
+  for (const m of GUILD_MATERIALS) {
+    const n = Math.max(0, Math.min(999, parseInt(rawCosts[m], 10) || 0));
+    if (n > 0) {
+      costs[m] = n;
+      total = total + n;
+    }
+  }
+  if (total === 0) {
+    sendSocket(gm.socket, { type: "gm_notice", text: "Set at least one material cost." });
+    return;
+  }
+  const L = layers[layer];
+  if (!L) return;
+  const rows = [];
+  const art = {};
+  const objects = {};
+  for (let r = r0; r <= r1; r++) {
+    rows.push(L.rows[r].substring(c0, c1 + 1));
+    for (let c = c0; c <= c1; c++) {
+      const ach = L.art[r][c];
+      if (ach !== " " && tilePalette[ach]) art[(c - c0) + "," + (r - r0)] = tilePalette[ach];
+      const obj = L.objects[c + "," + r];
+      if (obj) objects[(c - c0) + "," + (r - r0)] = { name: obj.name, solid: obj.solid ? 1 : 0, rot: obj.rot || 0, flip: obj.flip ? 1 : 0 };
+    }
+  }
+  const record = { id: "", name: name, w: w, h: h, costs: costs, rows: rows, art: art, objects: objects };
+  let replaced = false;
+  for (let i = 0; i < presetStore.list.length; i++) {
+    if (presetStore.list[i].name.toLowerCase() === name.toLowerCase()) {
+      record.id = presetStore.list[i].id;
+      presetStore.list[i] = record;
+      replaced = true;
+    }
+  }
+  if (!replaced) {
+    record.id = "b" + presetStore.nextId;
+    presetStore.nextId = presetStore.nextId + 1;
+    presetStore.list.push(record);
+  }
+  savePresets();
+  presetsChanged();
+  sendSocket(gm.socket, { type: "gm_notice", text: "Preset " + name + (replaced ? " updated." : " saved.") + " (" + w + " by " + h + ")" });
+}
+
+function handleGmPresetDel(gm, data) {
+  const id = String(data.id);
+  const before = presetStore.list.length;
+  presetStore.list = presetStore.list.filter((p) => p.id !== id);
+  if (presetStore.list.length === before) return;
+  savePresets();
+  presetsChanged();
+}
+
+function siteById(id) {
+  for (const s of guildStore.sites) {
+    if (s.id === id) return s;
+  }
+  return null;
+}
+
+function sitesOfGuild(g) {
+  return guildStore.sites.filter((s) => s.gid === g.id);
+}
+
+function siteWorkers(site) {
+  const out = [];
+  for (const id in entities) {
+    const e = entities[id];
+    if (e.workSite === site.id) out.push(e);
+  }
+  return out;
+}
+
+function siteProgress(site) {
+  let need = 0;
+  let have = 0;
+  for (const m in site.needs) {
+    need = need + site.needs[m];
+    have = have + Math.min(site.needs[m], site.have[m] || 0);
+  }
+  return need === 0 ? 100 : Math.floor((have * 100) / need);
+}
+
+function sitePayload(site) {
+  const workers = siteWorkers(site).map((e) => ({ id: e.id, name: e.name, status: e._gwStatus || "Idle" }));
+  return { id: site.id, pid: site.pid, name: site.name, c0: site.c0, r0: site.r0, w: site.w, h: site.h, needs: site.needs, have: site.have, workers: workers, pct: siteProgress(site) };
+}
+
+function guildStock(g) {
+  const out = {};
+  if (!g.rect) return out;
+  for (const m of GUILD_MATERIALS) out[m] = 0;
+  for (const it of worldSession.floorItems) {
+    if (it.layer !== g.layer || it.col < g.rect.c0 || it.col > g.rect.c1 || it.row < g.rect.r0 || it.row > g.rect.r1) continue;
+    const m = materialKeyOf(it.name);
+    if (m) out[m] = out[m] + 1;
+  }
+  const L = layers[g.layer];
+  if (!L) return out;
+  for (let r = g.rect.r0; r <= g.rect.r1; r++) {
+    for (let c = g.rect.c0; c <= g.rect.c1; c++) {
+      const obj = L.objects[c + "," + r];
+      if (!obj || !chestIsObject(obj.name)) continue;
+      const slots = chestData[farmKey(g.layer, c, r)];
+      if (!Array.isArray(slots)) continue;
+      for (const s of slots) {
+        if (!s || !s.name) continue;
+        const m = materialKeyOf(s.name);
+        if (m) out[m] = out[m] + (Number(s.count) || 0);
+      }
+    }
+  }
+  return out;
+}
+
+function sitesForView(p) {
+  const out = [];
+  for (const s of guildStore.sites) {
+    if (s.layer !== p.layer) continue;
+    if (s.c0 + s.w < p.col - 60 || s.c0 > p.col + 60 || s.r0 + s.h < p.row - 60 || s.r0 > p.row + 60) continue;
+    out.push({ id: s.id, n: s.name, c0: s.c0, r0: s.r0, w: s.w, h: s.h, pct: siteProgress(s) });
+  }
+  return out;
+}
+
+function guildMarkDirty(g, light) {
+  if (light) {
+    if (!guildDirty[g.id]) guildDirty[g.id] = "light";
+    return;
+  }
+  guildDirty[g.id] = "full";
+}
+
+function guildFlushTick() {
+  for (const gid in guildDirty) {
+    const kind = guildDirty[gid];
+    delete guildDirty[gid];
+    const g = guildById(gid);
+    if (!g) continue;
+    if (kind === "light") {
+      for (const id in worldSession.players) {
+        const q = worldSession.players[id];
+        if (q && g.masterKey === charKeyOf(q)) sendGuildState(q);
+      }
+      continue;
+    }
+    saveGuilds();
+    sendGms(null, { type: "gm_guilds", guilds: guildsForGm() });
+    for (const id in worldSession.players) {
+      const q = worldSession.players[id];
+      if (!q) continue;
+      if (g.masterKey === charKeyOf(q)) sendGuildState(q);
+      if (q.layer === g.layer) sendView(q);
+    }
+  }
+}
+
+function npcDropCarry(e) {
+  if (!e.carry) return;
+  const spot = findDropSpot(e);
+  if (spot) {
+    worldSession.floorItems.push({ layer: e.layer, col: spot.col, row: spot.row, name: e.carry });
+    notifyItem(e.layer, spot.col, spot.row, { type: "itemadded", col: spot.col, row: spot.row, name: e.carry });
+  }
+  e.carry = null;
+}
+
+function workerRelease(e) {
+  const gw = e._gw;
+  if (gw && gw.resv) guildResv.delete(gw.resv);
+  e._gw = null;
+  e._gwStatus = "";
+}
+
+function workerUnassign(e) {
+  workerRelease(e);
+  e.workSite = null;
+  if (e.carry) {
+    npcDropCarry(e);
+    broadcastEntity(e, e.layer, e.col, e.row);
+  }
+  scheduleEntitySave();
+}
+
+function siteApply(site, preset) {
+  const cells = [];
+  const artOps = [];
+  const objOps = [];
+  for (let dr = 0; dr < preset.h; dr++) {
+    const row = preset.rows[dr] || "";
+    for (let dc = 0; dc < preset.w; dc++) {
+      let ch = row.charAt(dc) || " ";
+      if (ch === "P") ch = ".";
+      if (ch !== " ") cells.push([site.c0 + dc, site.r0 + dr, ch]);
+    }
+  }
+  for (const key in preset.art) {
+    const parts = key.split(",");
+    artOps.push([site.c0 + parseInt(parts[0], 10), site.r0 + parseInt(parts[1], 10), preset.art[key]]);
+  }
+  for (const key in preset.objects) {
+    const parts = key.split(",");
+    const o = preset.objects[key];
+    objOps.push([site.c0 + parseInt(parts[0], 10), site.r0 + parseInt(parts[1], 10), o.name, o.solid, o.rot, o.flip]);
+  }
+  applyCells(site.layer, cells);
+  applyArt(site.layer, artOps);
+  applyObjects(site.layer, objOps);
+  sendLayerSummaries();
+}
+
+function siteFinish(site) {
+  const g = guildById(site.gid);
+  const preset = presetById(site.pid);
+  for (const e of siteWorkers(site)) workerUnassign(e);
+  guildStore.sites = guildStore.sites.filter((s) => s.id !== site.id);
+  if (preset) siteApply(site, preset);
+  if (g) {
+    guildChanged(g);
+    for (const id in worldSession.players) {
+      const q = worldSession.players[id];
+      if (q && g.masterKey === charKeyOf(q)) guildMsg(q, true, site.name + " has been built!");
+    }
+  }
+}
+
+function siteCheckDone(site) {
+  for (const m in site.needs) {
+    if ((site.have[m] || 0) < site.needs[m]) return false;
+  }
+  return true;
+}
+
+function siteStandCells(site) {
+  const out = [];
+  for (let r = site.r0 - 1; r <= site.r0 + site.h; r++) {
+    for (let c = site.c0 - 1; c <= site.c0 + site.w; c++) {
+      if (c < 0 || r < 0 || c >= LAYER_W || r >= LAYER_H) continue;
+      if (isWalkable(site.layer, c, r)) out.push([c, r]);
+    }
+  }
+  return out;
+}
+
+function nearestCell(list, e) {
+  let best = null;
+  let bestD = 1e9;
+  for (const cell of list) {
+    const d = Math.abs(cell[0] - e.col) + Math.abs(cell[1] - e.row);
+    if (d < bestD) {
+      bestD = d;
+      best = cell;
+    }
+  }
+  return best;
+}
+
+function guildFindSource(g, e, kw) {
+  const found = [];
+  const rect = g.rect;
+  for (const it of worldSession.floorItems) {
+    if (it.layer !== g.layer || it.col < rect.c0 || it.col > rect.c1 || it.row < rect.r0 || it.row > rect.r1) continue;
+    if (materialKeyOf(it.name) !== kw) continue;
+    const key = it.layer + "," + it.col + "," + it.row;
+    if (guildResv.has(key) && guildResv.get(key) !== e.id) continue;
+    found.push({ type: "floor", col: it.col, row: it.row, key: key, d: Math.abs(it.col - e.col) + Math.abs(it.row - e.row) });
+  }
+  const L = layers[g.layer];
+  if (L) {
+    for (let r = rect.r0; r <= rect.r1; r++) {
+      for (let c = rect.c0; c <= rect.c1; c++) {
+        const obj = L.objects[c + "," + r];
+        if (!obj || !chestIsObject(obj.name)) continue;
+        const slots = chestData[farmKey(g.layer, c, r)];
+        if (!Array.isArray(slots)) continue;
+        let has = false;
+        for (const s of slots) {
+          if (s && s.name && materialKeyOf(s.name) === kw && s.count > 0) has = true;
+        }
+        if (has) found.push({ type: "chest", col: c, row: r, key: "", d: Math.abs(c - e.col) + Math.abs(r - e.row) });
+      }
+    }
+  }
+  if (found.length === 0) return null;
+  found.sort((a, b) => a.d - b.d);
+  return found[0];
+}
+
+function workerEnRoute(site, kw, self) {
+  let n = 0;
+  for (const w of siteWorkers(site)) {
+    if (w.id === self.id) continue;
+    if (w.carry && materialKeyOf(w.carry) === kw) n = n + 1;
+    else if (w._gw && w._gw.mode === "fetch" && w._gw.kw === kw) n = n + 1;
+  }
+  return n;
+}
+
+function workerPlan(e, g, site, gw) {
+  const kinds = [];
+  for (const m in site.needs) {
+    const left = site.needs[m] - (site.have[m] || 0) - workerEnRoute(site, m, e);
+    if (left > 0) kinds.push(m);
+  }
+  if (kinds.length === 0) {
+    gw.mode = "idle";
+    e._gwStatus = "Waiting for others to finish";
+    return;
+  }
+  let best = null;
+  let bestKw = "";
+  for (const m of kinds) {
+    const src = guildFindSource(g, e, m);
+    if (src && (!best || src.d < best.d)) {
+      best = src;
+      bestKw = m;
+    }
+  }
+  if (!best) {
+    gw.mode = "idle";
+    e._gwStatus = "Waiting for materials";
+    return;
+  }
+  let target = null;
+  if (best.type === "floor") {
+    target = [best.col, best.row];
+  } else {
+    const around = [];
+    for (const d of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      if (isWalkable(g.layer, best.col + d[0], best.row + d[1])) around.push([best.col + d[0], best.row + d[1]]);
+    }
+    target = nearestCell(around, e);
+  }
+  if (!target) {
+    gw.mode = "idle";
+    e._gwStatus = "No way to reach " + bestKw;
+    return;
+  }
+  const route = e.col === target[0] && e.row === target[1] ? [] : schedFindPath(e.layer, e.col, e.row, target[0], target[1]);
+  if (route === null) {
+    gw.mode = "idle";
+    e._gwStatus = "No way to reach " + bestKw;
+    return;
+  }
+  if (best.type === "floor") {
+    guildResv.set(best.key, e.id);
+    gw.resv = best.key;
+  }
+  gw.mode = "fetch";
+  gw.kw = bestKw;
+  gw.src = best;
+  gw.path = route;
+  gw.pos = 0;
+  gw.blocked = 0;
+  e._gwStatus = "Fetching " + bestKw;
+}
+
+function workerPlanDeliver(e, site, gw) {
+  const target = nearestCell(siteStandCells(site), e);
+  if (!target) {
+    gw.mode = "idle";
+    e._gwStatus = "No way to reach the site";
+    return;
+  }
+  const route = e.col === target[0] && e.row === target[1] ? [] : schedFindPath(e.layer, e.col, e.row, target[0], target[1]);
+  if (route === null) {
+    gw.mode = "idle";
+    e._gwStatus = "No way to reach the site";
+    return;
+  }
+  gw.mode = "deliver";
+  gw.path = route;
+  gw.pos = 0;
+  gw.blocked = 0;
+  e._gwStatus = "Delivering " + (materialKeyOf(e.carry) || "materials");
+}
+
+function workerStep(e, gw) {
+  if (gw.pos >= gw.path.length) return "arrived";
+  const next = gw.path[gw.pos];
+  if (Math.abs(next[0] - e.col) + Math.abs(next[1] - e.row) !== 1) return "fail";
+  if (entityAt(e.layer, next[0], next[1], e.id) || playerAt(e.layer, next[0], next[1])) {
+    gw.blocked = gw.blocked + 1;
+    return gw.blocked >= 4 ? "fail" : "wait";
+  }
+  gw.blocked = 0;
+  const oldCol = e.col;
+  const oldRow = e.row;
+  const dc = next[0] - oldCol;
+  const dr = next[1] - oldRow;
+  e.col = next[0];
+  e.row = next[1];
+  if (Math.abs(dc) >= Math.abs(dr)) e.direction = dc > 0 ? "right" : "left";
+  else e.direction = dr > 0 ? "down" : "up";
+  gw.pos = gw.pos + 1;
+  broadcastEntity(e, e.layer, oldCol, oldRow);
+  scheduleEntitySave();
+  return gw.pos >= gw.path.length ? "arrived" : "moving";
+}
+
+function workerPickUp(e, g, gw) {
+  const src = gw.src;
+  let name = null;
+  if (src.type === "floor") {
+    for (let i = 0; i < worldSession.floorItems.length; i++) {
+      const it = worldSession.floorItems[i];
+      if (it.layer === e.layer && it.col === src.col && it.row === src.row && materialKeyOf(it.name) === gw.kw) {
+        name = it.name;
+        worldSession.floorItems.splice(i, 1);
+        notifyItem(it.layer, it.col, it.row, { type: "itemremoved", col: it.col, row: it.row });
+        break;
+      }
+    }
+  } else {
+    const key = farmKey(e.layer, src.col, src.row);
+    const slots = chestData[key];
+    if (Array.isArray(slots) && Math.max(Math.abs(e.col - src.col), Math.abs(e.row - src.row)) <= 1) {
+      for (let i = 0; i < slots.length; i++) {
+        const s = slots[i];
+        if (s && s.name && s.count > 0 && materialKeyOf(s.name) === gw.kw) {
+          name = s.name;
+          s.count = s.count - 1;
+          if (s.count <= 0) slots[i] = null;
+          saveChestData();
+          chestBroadcast(key);
+          break;
+        }
+      }
+    }
+  }
+  if (gw.resv) {
+    guildResv.delete(gw.resv);
+    gw.resv = "";
+  }
+  if (!name) return false;
+  e.carry = name;
+  broadcastEntity(e, e.layer, e.col, e.row);
+  scheduleEntitySave();
+  return true;
+}
+
+function workerDeliver(e, g, site, gw) {
+  const kw = materialKeyOf(e.carry);
+  const needed = kw ? (site.needs[kw] || 0) - (site.have[kw] || 0) : 0;
+  if (needed > 0) {
+    site.have[kw] = (site.have[kw] || 0) + 1;
+    e.carry = null;
+    broadcastEntity(e, e.layer, e.col, e.row);
+    guildMarkDirty(g);
+    if (siteCheckDone(site)) siteFinish(site);
+  } else {
+    npcDropCarry(e);
+    broadcastEntity(e, e.layer, e.col, e.row);
+  }
+  scheduleEntitySave();
+}
+
+function guildWorkTick() {
+  const now = Date.now();
+  for (const id in entities) {
+    const e = entities[id];
+    if (!e.workSite) continue;
+    const site = siteById(e.workSite);
+    const g = site ? guildById(site.gid) : null;
+    if (!site || !g || e.guildId !== g.id || !g.rect) {
+      workerUnassign(e);
+      continue;
+    }
+    if (e.down || e.fainted || e._fight || (e._stunUntil && now < e._stunUntil)) continue;
+    if (e.layer !== site.layer) {
+      e._gwStatus = "Not on the guild layer";
+      continue;
+    }
+    if (e._gwStatus !== e._gwLast) {
+      e._gwLast = e._gwStatus;
+      guildMarkDirty(g, true);
+    }
+    let gw = e._gw;
+    if (!gw) {
+      gw = { mode: "idle", path: [], pos: 0, blocked: 0, kw: "", src: null, resv: "", until: 0, nextPlan: 0 };
+      e._gw = gw;
+    }
+    if (now < gw.until) continue;
+    if (gw.mode === "idle") {
+      if (now < gw.nextPlan) continue;
+      gw.nextPlan = now + 2000;
+      if (e.carry) workerPlanDeliver(e, site, gw);
+      else workerPlan(e, g, site, gw);
+      if (gw.mode === "idle") continue;
+    }
+    const result = workerStep(e, gw);
+    if (result === "wait" || result === "moving") continue;
+    if (result === "fail") {
+      if (gw.resv) {
+        guildResv.delete(gw.resv);
+        gw.resv = "";
+      }
+      gw.mode = "idle";
+      gw.nextPlan = now + 1000;
+      continue;
+    }
+    if (gw.mode === "fetch") {
+      if (workerPickUp(e, g, gw)) {
+        gw.mode = "idle";
+        gw.nextPlan = 0;
+        gw.until = now + 700;
+        e._gwStatus = "Lifting " + (materialKeyOf(e.carry) || "materials");
+      } else {
+        gw.mode = "idle";
+        gw.nextPlan = now + 1000;
+      }
+    } else if (gw.mode === "deliver") {
+      workerDeliver(e, g, site, gw);
+      gw.mode = "idle";
+      gw.nextPlan = 0;
+      gw.until = now + 500;
+      e._gwStatus = "Idle";
+    }
+  }
+}
+
+function sitePlaceCheck(g, preset, c0, r0) {
+  if (!g.rect) return "Claim your guild grounds first.";
+  if (c0 < g.rect.c0 || r0 < g.rect.r0 || c0 + preset.w - 1 > g.rect.c1 || r0 + preset.h - 1 > g.rect.r1) return "The whole building must fit inside your guild grounds.";
+  for (const s of guildStore.sites) {
+    if (s.layer !== g.layer) continue;
+    if (c0 < s.c0 + s.w && c0 + preset.w > s.c0 && r0 < s.r0 + s.h && r0 + preset.h > s.r0) return "That overlaps another construction site.";
+  }
+  return "";
+}
+
+function handleGuildBuildMessage(p, g, type, data) {
+  if (type === "guild_site_place") {
+    const preset = presetById(String(data.preset));
+    const c0 = parseInt(data.c0, 10);
+    const r0 = parseInt(data.r0, 10);
+    if (!preset || !Number.isInteger(c0) || !Number.isInteger(r0)) {
+      guildMsg(p, false, "That building is not available.");
+      return true;
+    }
+    if (sitesOfGuild(g).length >= GUILD_MAX_SITES) {
+      guildMsg(p, false, "You can have at most " + GUILD_MAX_SITES + " construction sites at once.");
+      return true;
+    }
+    const fail = sitePlaceCheck(g, preset, c0, r0);
+    if (fail) {
+      guildMsg(p, false, fail);
+      return true;
+    }
+    const have = {};
+    for (const m in preset.costs) have[m] = 0;
+    const site = { id: "s" + guildStore.nextSite, gid: g.id, pid: preset.id, name: preset.name, layer: g.layer, c0: c0, r0: r0, w: preset.w, h: preset.h, needs: Object.assign({}, preset.costs), have: have };
+    guildStore.nextSite = guildStore.nextSite + 1;
+    guildStore.sites.push(site);
+    guildChanged(g);
+    guildMsg(p, true, "Construction site for " + preset.name + " placed. Assign members to start building.");
+    return true;
+  }
+  if (type === "guild_site_cancel") {
+    const site = siteById(String(data.id));
+    if (!site || site.gid !== g.id) return true;
+    for (const e of siteWorkers(site)) workerUnassign(e);
+    guildStore.sites = guildStore.sites.filter((s) => s.id !== site.id);
+    guildChanged(g);
+    guildMsg(p, true, "Construction site cancelled.");
+    return true;
+  }
+  if (type === "guild_assign") {
+    const site = siteById(String(data.site));
+    const e = entities[String(data.id)];
+    if (!site || site.gid !== g.id || !e || g.members.indexOf(e.id) === -1) return true;
+    if (e.workSite !== site.id) {
+      workerRelease(e);
+      e.workSite = site.id;
+      scheduleEntitySave();
+    }
+    guildChanged(g);
+    guildMsg(p, true, e.name + " will work on " + site.name + ".");
+    return true;
+  }
+  if (type === "guild_unassign") {
+    const e = entities[String(data.id)];
+    if (!e || g.members.indexOf(e.id) === -1 || !e.workSite) return true;
+    workerUnassign(e);
+    guildChanged(g);
+    guildMsg(p, true, e.name + " stopped working.");
+    return true;
+  }
+  return false;
+}
+
 function gmDynCell(layer, col, row) {
   const L = layers[layer];
   if (!L) return null;
@@ -6547,7 +7581,7 @@ function sendGmLayer(gm) {
     if (farmCell && farmCell[2] !== "") objList.push(farmCell);
   }
   const passList = Object.keys(L.passable || {}).map((k) => k.split(",").map((v) => parseInt(v, 10)));
-  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, passable: passList, name: L.name, rows: L.rows.map(trimRowEnd), art: L.art.map(trimRowEnd), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer && !entities[id].down).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: null, spawns: spawnList(), floorItems: items, layers: layerSummaries(), light: L.light || "outdoor", links: L.links || {}, dyn: gmDynSnapshot(gm.layer) });
+  sendSocket(gm.socket, { type: "gm_layer", layer: gm.layer, passable: passList, name: L.name, rows: L.rows.map(trimRowEnd), art: L.art.map(trimRowEnd), palette: tilePalette, objects: objList, entities: Object.keys(entities).filter((id) => entities[id].layer === gm.layer && !entities[id].down).map((id) => gmEntity(entities[id])), portals: L.portals, spawn: null, spawns: spawnList(), floorItems: items, layers: layerSummaries(), light: L.light || "outdoor", links: L.links || {}, dyn: gmDynSnapshot(gm.layer), guilds: guildsForGm(), presets: presetSummaries(), materials: GUILD_MATERIALS });
 }
 
 function handleGmMessage(gm, data) {
@@ -6789,6 +7823,21 @@ function handleGmMessage(gm, data) {
 
   if (data.type === "gm_inv") {
     handleGmInv(gm, data);
+    return;
+  }
+
+  if (data.type === "gm_preset_save") {
+    handleGmPresetSave(gm, data);
+    return;
+  }
+
+  if (data.type === "gm_preset_del") {
+    handleGmPresetDel(gm, data);
+    return;
+  }
+
+  if (data.type === "gm_occupation") {
+    handleGmOccupation(gm, data);
     return;
   }
 
@@ -7061,6 +8110,7 @@ function startWorldPlayer(socket, pass, info, spawn) {
   }
   players[id] = publicPlayer(p);
   sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W, p.row - VIEW_HALF_H, w, h), inventory: inventory, sheet: clientSheet(p._sheet), itemFx: ITEM_FX, vision: VISION, chatRange: CHAT_RANGE, cxm: exprMap(p) });
+  sendGuildState(p);
   sendPlayer(p, timeMessage());
   for (const notice of joinNotices) sendPlayer(p, { type: "item_result", ok: !combatLogged, text: notice });
   if (!restored) p._kills = [];
@@ -7148,6 +8198,8 @@ function startWorldPlayer(socket, pass, info, spawn) {
       handleFreePos(me, data);
     } else if (data.type === "boulder_push") {
       handleBoulderPush(me, data);
+    } else if (typeof data.type === "string" && data.type.indexOf("guild_") === 0) {
+      handleGuildMessage(me, data);
     } else if (data.type === "switch_toggle") {
       handleSwitchToggle(me, data);
     } else if (data.type === "pickup") {
@@ -8071,6 +9123,8 @@ dynRecomputeAll();
 setInterval(overrideTick, 20000);
 setInterval(mapAreaTick, 1000);
 setInterval(chestTick, 1000);
+setInterval(guildWorkTick, GUILD_WORK_TICK_MS);
+setInterval(guildFlushTick, 1000);
 setInterval(lightCarryTick, 2000);
 setInterval(journalTick, 2000);
 setInterval(scheduleJournalWrite, 30000);

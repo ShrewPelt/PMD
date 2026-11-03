@@ -15,7 +15,7 @@ const worldEntityMeta = {};
 const worldEntityLabels = {};
 
 function entityUpsert(scene, e) {
-  worldEntityMeta[e.id] = { kind: e.kind, name: e.name, state: e.state, dex: e.dex, fainted: !!e.fainted };
+  worldEntityMeta[e.id] = { kind: e.kind, name: e.name, state: e.state, dex: e.dex, fainted: !!e.fainted, cy: e.cy || "" };
   const sprite = otherPlayers[e.id];
   if (!sprite) {
     addOtherPlayer(scene, { id: e.id, dex: e.dex, col: e.col, row: e.row, direction: e.direction });
@@ -38,7 +38,44 @@ function entityUpsert(scene, e) {
   }
 }
 
+const worldCarrySprites = {};
+
+function carryFrame(scene, id, sp, meta) {
+  let img = worldCarrySprites[id];
+  if (!meta.cy) {
+    if (img && img.destroy) img.destroy();
+    delete worldCarrySprites[id];
+    return;
+  }
+  if (img && img.carryName !== meta.cy) {
+    img.destroy();
+    img = null;
+    delete worldCarrySprites[id];
+  }
+  if (!img) {
+    if (worldCarrySprites[id] === false) return;
+    worldCarrySprites[id] = false;
+    ensureItemTexture(scene, meta.cy, (texKey) => {
+      if (!texKey || !worldEntityMeta[id] || worldEntityMeta[id].cy !== meta.cy) {
+        delete worldCarrySprites[id];
+        return;
+      }
+      const made = scene.add.image(0, 0, texKey);
+      made.setDisplaySize(26, 26);
+      made.setDepth(202);
+      made.carryName = meta.cy;
+      worldCarrySprites[id] = made;
+    });
+    return;
+  }
+  const bob = Math.sin(Date.now() / 220) * 2;
+  const lift = 46 + bob;
+  img.setPosition(sp.x - lift * Math.sin(viewRot), sp.y - lift * Math.cos(viewRot));
+}
+
 function entityRemove(id) {
+  if (worldCarrySprites[id]) worldCarrySprites[id].destroy();
+  delete worldCarrySprites[id];
   removeOtherPlayer(id);
   delete worldEntityMeta[id];
   if (worldEntityLabels[id]) {
@@ -102,6 +139,7 @@ function entityLabelsFrame(scene) {
     const off = (sp.feetOff !== undefined ? sp.feetOff : TILE / 2 - 2) + 12;
     label.setRotation(-viewRot);
     label.setPosition(sp.x + off * Math.sin(viewRot), sp.y + off * Math.cos(viewRot));
+    carryFrame(scene, id, sp, meta);
   }
   for (const id of Object.keys(worldEntityLabels)) {
     if (!worldEntityMeta[id]) {
@@ -821,6 +859,9 @@ function enterPlayerWorld(scene) {
     worldViewGfx.setDepth(0);
   }
   scene.input.on("pointerdown", (pointer) => atkPointer(scene, pointer));
+  scene.input.on("pointerdown", (pointer) => guildPointer(scene, pointer, "down"));
+  scene.input.on("pointermove", (pointer) => guildPointer(scene, pointer, "move"));
+  scene.input.on("pointerup", (pointer) => guildPointer(scene, pointer, "up"));
   scene.input.on("pointerdown", (pointer) => visLookDown(pointer));
   if (!VIS.lookBound) {
     VIS.lookBound = true;
@@ -887,6 +928,7 @@ function drawPlayerView(scene, data) {
   worldSyncPool(scene, worldArtPool, wantedArt, "tile");
   worldSyncPool(scene, worldObjectPool, wantedObjs, "object");
   worldSyncItems(scene, data.items);
+  guildDrawBorders(scene, data.gl || [], "player", data.cs || []);
 }
 
 function gmRedrawChunk(scene, cx, cy) {
@@ -1532,6 +1574,7 @@ function gmDrawMarkers() {
   }
   schedDraw(g);
   gmLinkDraw(g);
+  guildDrawGm(g.scene);
   const picked = WG.selectedEntity ? WG.entities[WG.selectedEntity] : null;
   if (picked) {
     g.lineStyle(3, 0xff9f1c, 1);
@@ -2491,6 +2534,10 @@ function gmPointerDown(scene, pointer) {
   const cell = gmCellFromPointer(scene, pointer);
   WG.hoverCol = cell.c;
   WG.hoverRow = cell.r;
+  if (GPRE.sel.active && pointer.leftButtonDown()) {
+    gpreSelPointer(scene, cell, "down");
+    return;
+  }
   if (pointer.rightButtonDown() || pointer.middleButtonDown() || WG.tool === "pan" || gmSpaceDown) {
     const cam = scene.cameras.main;
     WG.pan = { x: pointer.x, y: pointer.y, sx: cam.scrollX, sy: cam.scrollY };
@@ -2521,6 +2568,10 @@ function gmPointerMove(scene, pointer) {
   const cell = gmCellFromPointer(scene, pointer);
   WG.hoverCol = cell.c;
   WG.hoverRow = cell.r;
+  if (GPRE.sel.active && GPRE.sel.down) {
+    gpreSelPointer(scene, cell, "move");
+    return;
+  }
   gmUpdateCoords(cell.c, cell.r);
   if (WG.pan) {
     const cam = scene.cameras.main;
@@ -2546,6 +2597,10 @@ function gmPointerMove(scene, pointer) {
 }
 
 function gmPointerUp(scene, pointer) {
+  if (GPRE.sel.active && GPRE.sel.down) {
+    gpreSelPointer(scene, gmCellFromPointer(scene, pointer), "up");
+    return;
+  }
   if (WG.pan) {
     WG.pan = null;
     return;
@@ -4666,6 +4721,11 @@ function gmLoadLayer(scene, data) {
   gmShowSelection();
   WG.portals = data.portals || {};
   WG.links = data.links && typeof data.links === "object" ? data.links : {};
+  WG.guilds = Array.isArray(data.guilds) ? data.guilds : [];
+  WG.presets = Array.isArray(data.presets) ? data.presets : [];
+  if (Array.isArray(data.materials)) WG.materials = data.materials;
+  gpreInit();
+  gpreRender();
   WG.linkSel = null;
   WG.spawn = null;
   if (Array.isArray(data.spawns)) WG.spawns = data.spawns;
@@ -5673,11 +5733,657 @@ function atkFindTarget(c, r) {
     const meta = worldEntityMeta[id];
     if (meta) {
       if ((meta.kind !== "npc" && meta.kind !== "enemy") || meta.fainted) continue;
-      return { id: id, type: "entity", name: meta.name, col: c, row: r };
+      return { id: id, type: "entity", name: meta.name, col: c, row: r, kind: meta.kind };
     }
     return { id: id, type: "player", name: worldPlayerNames[id] || "Player", col: c, row: r };
   }
   return null;
+}
+
+const GUILD = { occ: "", isMaster: false, guild: null, cfg: { claimMax: 20, claimMin: 3, reach: 6 }, panel: null, body: null, btn: null, claim: { active: false, down: false, c0: 0, r0: 0, c1: 0, r1: 0 }, place: { active: false, preset: null, c: 0, r: 0 }, presets: [], materials: [], gfx: null, claimGfx: null, labels: {}, banner: null, uiReady: false };
+
+function guildIsMemberId(id) {
+  if (!GUILD.guild) return false;
+  for (const m of GUILD.guild.members) {
+    if (m.id === id) return true;
+  }
+  return false;
+}
+
+function guildUiInit() {
+  if (GUILD.uiReady) return;
+  GUILD.uiReady = true;
+  const style = document.createElement("style");
+  style.textContent = "#gldBtn{position:fixed;right:12px;top:56px;z-index:14;padding:6px 14px;background:rgba(20,20,34,0.94);color:#ffd23f;border:1px solid #55557a;border-radius:5px;cursor:pointer;font-size:12px;font-weight:bold}"
+    + "#gldBtn.hidden{display:none}"
+    + "#gldPanel{position:fixed;right:12px;top:92px;width:290px;max-height:70vh;display:flex;flex-direction:column;background:rgba(20,20,34,0.96);border:1px solid #3a3a55;border-radius:8px;color:#fff;font-size:12px;z-index:14}"
+    + "#gldPanel.hidden{display:none}"
+    + "#gldHead{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border-bottom:1px solid #3a3a55;color:#ffd23f;font-size:13px;font-weight:bold}"
+    + "#gldBody{overflow-y:auto;padding:6px 10px 10px 10px}"
+    + "#gldBody h5{margin:10px 0 4px 0;color:#9be39b;font-size:12px}"
+    + "#gldBody h5:first-child{margin-top:0}"
+    + ".gldBtn{background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;cursor:pointer;font-size:12px;padding:3px 9px;margin:2px 4px 2px 0}"
+    + ".gldBtn:disabled{opacity:0.45;cursor:default}"
+    + ".gldBtn.danger{border-color:#a04545;color:#ff9a9a}"
+    + ".gldRow{display:flex;justify-content:space-between;align-items:center;gap:6px;margin:3px 0;padding:3px 6px;background:#2d2d44;border-radius:4px}"
+    + ".gldMuted{color:#99a}"
+    + "#gldBanner{position:fixed;left:50%;top:14px;transform:translateX(-50%);background:rgba(20,20,34,0.96);border:1px solid #ffd23f;border-radius:6px;color:#ffd23f;padding:6px 14px;z-index:16;font-size:13px}"
+    + "#gldBanner.hidden{display:none}"
+    + "#gldInput{background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;padding:4px 6px;width:150px;font-size:12px}";
+  document.head.appendChild(style);
+  const btn = document.createElement("button");
+  btn.id = "gldBtn";
+  btn.type = "button";
+  btn.textContent = "Manage Guild";
+  btn.className = "hidden";
+  const panel = document.createElement("div");
+  panel.id = "gldPanel";
+  panel.className = "hidden";
+  const head = document.createElement("div");
+  head.id = "gldHead";
+  const title = document.createElement("span");
+  title.textContent = "Manage Guild";
+  const close = document.createElement("button");
+  close.className = "gldBtn";
+  close.type = "button";
+  close.textContent = "Close";
+  head.appendChild(title);
+  head.appendChild(close);
+  const body = document.createElement("div");
+  body.id = "gldBody";
+  panel.appendChild(head);
+  panel.appendChild(body);
+  const banner = document.createElement("div");
+  banner.id = "gldBanner";
+  banner.className = "hidden";
+  document.body.appendChild(btn);
+  document.body.appendChild(panel);
+  document.body.appendChild(banner);
+  GUILD.btn = btn;
+  GUILD.panel = panel;
+  GUILD.body = body;
+  GUILD.banner = banner;
+  btn.addEventListener("click", () => {
+    panel.classList.toggle("hidden");
+    if (!panel.classList.contains("hidden")) {
+      gmSend({ type: "guild_info" });
+      guildRender();
+    }
+  });
+  close.addEventListener("click", () => panel.classList.add("hidden"));
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && GUILD.claim.active) guildClaimStop();
+    if (ev.key === "Escape" && GUILD.place.active) guildPlaceStop();
+  });
+}
+
+function guildButton(label, handler, cls) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "gldBtn" + (cls ? " " + cls : "");
+  b.textContent = label;
+  b.addEventListener("click", handler);
+  return b;
+}
+
+function guildHeading(text) {
+  const h = document.createElement("h5");
+  h.textContent = text;
+  return h;
+}
+
+function guildLine(text, muted) {
+  const d = document.createElement("div");
+  d.textContent = text;
+  if (muted) d.className = "gldMuted";
+  return d;
+}
+
+function guildRender() {
+  if (!GUILD.body) return;
+  const body = GUILD.body;
+  body.innerHTML = "";
+  body.appendChild(guildHeading("Overview"));
+  body.appendChild(guildLine("Occupation: " + (GUILD.occ || "none")));
+  const g = GUILD.guild;
+  if (!g) {
+    body.appendChild(guildLine("You have not founded a guild yet.", true));
+    const input = document.createElement("input");
+    input.id = "gldInput";
+    input.maxLength = 24;
+    input.placeholder = "Guild name";
+    const make = guildButton("Found guild", () => gmSend({ type: "guild_create", name: input.value }));
+    const wrap = document.createElement("div");
+    wrap.style.marginTop = "6px";
+    wrap.appendChild(input);
+    wrap.appendChild(make);
+    body.appendChild(wrap);
+    return;
+  }
+  body.appendChild(guildLine("Guild: " + g.name));
+  body.appendChild(guildHeading("Guild grounds"));
+  if (g.rect) {
+    const w = g.rect.c1 - g.rect.c0 + 1;
+    const h = g.rect.r1 - g.rect.r0 + 1;
+    body.appendChild(guildLine("Layer " + g.layer + " | " + w + " by " + h + " tiles | from " + g.rect.c0 + ", " + g.rect.r0));
+  } else {
+    body.appendChild(guildLine("No land claimed yet.", true));
+  }
+  const landRow = document.createElement("div");
+  landRow.appendChild(guildButton(g.rect ? "Re-claim land" : "Claim land", () => guildClaimStart()));
+  if (g.rect) landRow.appendChild(guildButton("Release land", () => gmSend({ type: "guild_unclaim" })));
+  body.appendChild(landRow);
+  body.appendChild(guildLine("Drag a rectangle on the map, up to " + GUILD.cfg.claimMax + " by " + GUILD.cfg.claimMax + " tiles.", true));
+  body.appendChild(guildHeading("Members (" + g.members.length + ")"));
+  if (g.members.length === 0) body.appendChild(guildLine("No members yet. Click an NPC in the world and choose Recruit.", true));
+  for (const m of g.members) {
+    const row = document.createElement("div");
+    row.className = "gldRow";
+    const label = document.createElement("span");
+    label.textContent = m.name + " | " + m.species + " Lv" + m.level;
+    row.appendChild(label);
+    const tools = document.createElement("span");
+    if (g.sites.length > 0) {
+      const sel = document.createElement("select");
+      sel.style.cssText = "background:#1c1c2e;color:#fff;border:1px solid #55557a;border-radius:4px;max-width:90px;font-size:11px";
+      const none = document.createElement("option");
+      none.value = "";
+      none.textContent = "No job";
+      sel.appendChild(none);
+      for (const s of g.sites) {
+        const opt = document.createElement("option");
+        opt.value = s.id;
+        opt.textContent = s.name;
+        sel.appendChild(opt);
+      }
+      sel.value = m.site || "";
+      sel.addEventListener("change", () => {
+        if (sel.value) gmSend({ type: "guild_assign", id: m.id, site: sel.value });
+        else gmSend({ type: "guild_unassign", id: m.id });
+      });
+      tools.appendChild(sel);
+    }
+    tools.appendChild(guildButton("Dismiss", () => gmSend({ type: "guild_dismiss", id: m.id }), "danger"));
+    row.appendChild(tools);
+    body.appendChild(row);
+  }
+  body.appendChild(guildHeading("Materials on the grounds"));
+  const stockParts = [];
+  for (const k of GUILD.materials) stockParts.push(k + " " + ((g.stock && g.stock[k]) || 0));
+  body.appendChild(guildLine(g.rect ? stockParts.join(" | ") : "Claim land first.", !g.rect));
+  body.appendChild(guildLine("Drop materials on the grounds or put them in a chest there. Members carry one item at a time.", true));
+  body.appendChild(guildHeading("Build menu"));
+  if (GUILD.presets.length === 0) body.appendChild(guildLine("No building presets yet. A Game Master creates them.", true));
+  for (const pr of GUILD.presets) {
+    const row = document.createElement("div");
+    row.className = "gldRow";
+    const label = document.createElement("span");
+    label.textContent = pr.name + " | " + pr.w + "x" + pr.h + " | " + gpreCostText(pr.costs);
+    row.appendChild(label);
+    const place = guildButton("Place", () => guildPlaceStart(pr));
+    place.disabled = !g.rect;
+    row.appendChild(place);
+    body.appendChild(row);
+  }
+  body.appendChild(guildHeading("Construction sites (" + g.sites.length + ")"));
+  if (g.sites.length === 0) body.appendChild(guildLine("Nothing under construction.", true));
+  for (const s of g.sites) {
+    const box = document.createElement("div");
+    box.className = "gldRow";
+    box.style.display = "block";
+    const top = document.createElement("div");
+    top.style.cssText = "display:flex;justify-content:space-between;align-items:center";
+    const nm = document.createElement("b");
+    nm.textContent = s.name + " " + s.pct + "%";
+    top.appendChild(nm);
+    top.appendChild(guildButton("Cancel", () => {
+      if (window.confirm("Cancel " + s.name + "? Materials already delivered are lost.")) gmSend({ type: "guild_site_cancel", id: s.id });
+    }, "danger"));
+    box.appendChild(top);
+    const parts = [];
+    for (const k in s.needs) parts.push(k + " " + (s.have[k] || 0) + "/" + s.needs[k]);
+    box.appendChild(guildLine(parts.join(" | "), true));
+    if (s.workers.length === 0) box.appendChild(guildLine("No workers assigned.", true));
+    for (const w of s.workers) box.appendChild(guildLine(w.name + ": " + w.status, true));
+    body.appendChild(box);
+  }
+  body.appendChild(guildHeading("Danger zone"));
+  body.appendChild(guildButton("Disband guild", () => {
+    if (window.confirm("Disband " + g.name + "? Your members will be released and your claim removed.")) gmSend({ type: "guild_disband" });
+  }, "danger"));
+}
+
+function guildApplyState(data) {
+  guildUiInit();
+  GUILD.occ = data.occupation || "";
+  GUILD.isMaster = !!data.isMaster;
+  GUILD.guild = data.guild || null;
+  if (data.cfg) GUILD.cfg = data.cfg;
+  GUILD.presets = data.presets || [];
+  GUILD.materials = data.materials || GUILD.materials;
+  GUILD.btn.classList.toggle("hidden", !GUILD.isMaster);
+  if (!GUILD.isMaster) {
+    GUILD.panel.classList.add("hidden");
+    if (GUILD.claim.active) guildClaimStop();
+    if (GUILD.place.active) guildPlaceStop();
+  }
+  guildRender();
+}
+
+function guildPlaceStart(preset) {
+  GUILD.place.active = true;
+  GUILD.place.preset = preset;
+  GUILD.place.c = 0;
+  GUILD.place.r = 0;
+  GUILD.banner.textContent = "Place " + preset.name + ": move over your grounds and click (Esc to cancel)";
+  GUILD.banner.classList.remove("hidden");
+  GUILD.panel.classList.add("hidden");
+  atkClose();
+}
+
+function guildPlaceStop() {
+  GUILD.place.active = false;
+  if (GUILD.banner) GUILD.banner.classList.add("hidden");
+  if (GUILD.claimGfx) GUILD.claimGfx.clear();
+}
+
+function guildPlaceDraw(scene) {
+  if (!GUILD.claimGfx) {
+    GUILD.claimGfx = scene.add.graphics();
+    GUILD.claimGfx.setDepth(160);
+  }
+  const g = GUILD.claimGfx;
+  g.clear();
+  const pl = GUILD.place;
+  const gd = GUILD.guild;
+  if (!pl.active || !gd) return;
+  const w = pl.preset.w;
+  const h = pl.preset.h;
+  const c0 = pl.c - Math.floor(w / 2);
+  const r0 = pl.r - Math.floor(h / 2);
+  const rect = gd.rect;
+  const ok = !!rect && c0 >= rect.c0 && r0 >= rect.r0 && c0 + w - 1 <= rect.c1 && r0 + h - 1 <= rect.r1;
+  g.fillStyle(ok ? 0x3ec13e : 0xc0392b, 0.28);
+  g.fillRect(c0 * TILE, r0 * TILE, w * TILE, h * TILE);
+  g.lineStyle(3, ok ? 0x7dff7d : 0xff6b5b, 1);
+  g.strokeRect(c0 * TILE, r0 * TILE, w * TILE, h * TILE);
+}
+
+function guildClaimStart() {
+  if (!GUILD.guild) return;
+  GUILD.claim.active = true;
+  GUILD.claim.down = false;
+  GUILD.banner.textContent = "Claim land: drag a rectangle on the map (Esc to cancel)";
+  GUILD.banner.classList.remove("hidden");
+  GUILD.panel.classList.add("hidden");
+  atkClose();
+}
+
+function guildClaimStop() {
+  GUILD.claim.active = false;
+  GUILD.claim.down = false;
+  if (GUILD.banner) GUILD.banner.classList.add("hidden");
+  if (GUILD.claimGfx) GUILD.claimGfx.clear();
+}
+
+function guildClaimRect() {
+  const cl = GUILD.claim;
+  const max = GUILD.cfg.claimMax;
+  let c1 = cl.c1;
+  let r1 = cl.r1;
+  if (Math.abs(c1 - cl.c0) + 1 > max) c1 = cl.c0 + (c1 >= cl.c0 ? max - 1 : -(max - 1));
+  if (Math.abs(r1 - cl.r0) + 1 > max) r1 = cl.r0 + (r1 >= cl.r0 ? max - 1 : -(max - 1));
+  return { c0: Math.min(cl.c0, c1), r0: Math.min(cl.r0, r1), c1: Math.max(cl.c0, c1), r1: Math.max(cl.r0, r1) };
+}
+
+function guildClaimDraw(scene) {
+  if (!GUILD.claimGfx) {
+    GUILD.claimGfx = scene.add.graphics();
+    GUILD.claimGfx.setDepth(160);
+  }
+  const g = GUILD.claimGfx;
+  g.clear();
+  if (!GUILD.claim.active || !GUILD.claim.down) return;
+  const r = guildClaimRect();
+  const w = r.c1 - r.c0 + 1;
+  const h = r.r1 - r.r0 + 1;
+  const ok = w >= GUILD.cfg.claimMin && h >= GUILD.cfg.claimMin;
+  g.fillStyle(ok ? 0x3ec13e : 0xc0392b, 0.25);
+  g.fillRect(r.c0 * TILE, r.r0 * TILE, w * TILE, h * TILE);
+  g.lineStyle(3, ok ? 0x7dff7d : 0xff6b5b, 1);
+  g.strokeRect(r.c0 * TILE, r.r0 * TILE, w * TILE, h * TILE);
+  GUILD.banner.textContent = "Claim land: " + w + " by " + h + " tiles. Release to confirm (Esc to cancel)";
+}
+
+function guildPointer(scene, pointer, phase) {
+  if (GUILD.place.active) {
+    const pw = scene.cameras.main.getWorldPoint(pointer.x, pointer.y);
+    GUILD.place.c = Math.floor(pw.x / TILE);
+    GUILD.place.r = Math.floor(pw.y / TILE);
+    guildPlaceDraw(scene);
+    if (phase === "down" && pointer.leftButtonDown()) {
+      const pr = GUILD.place.preset;
+      gmSend({ type: "guild_site_place", preset: pr.id, c0: GUILD.place.c - Math.floor(pr.w / 2), r0: GUILD.place.r - Math.floor(pr.h / 2) });
+      guildPlaceStop();
+      GUILD.panel.classList.remove("hidden");
+    }
+    return;
+  }
+  if (!GUILD.claim.active) return;
+  const wp = scene.cameras.main.getWorldPoint(pointer.x, pointer.y);
+  const c = Math.floor(wp.x / TILE);
+  const r = Math.floor(wp.y / TILE);
+  if (phase === "down") {
+    if (!pointer.leftButtonDown()) return;
+    GUILD.claim.down = true;
+    GUILD.claim.c0 = c;
+    GUILD.claim.r0 = r;
+    GUILD.claim.c1 = c;
+    GUILD.claim.r1 = r;
+    guildClaimDraw(scene);
+    return;
+  }
+  if (!GUILD.claim.down) return;
+  GUILD.claim.c1 = c;
+  GUILD.claim.r1 = r;
+  if (phase === "move") {
+    guildClaimDraw(scene);
+    return;
+  }
+  const rect = guildClaimRect();
+  guildClaimStop();
+  gmSend({ type: "guild_claim", c0: rect.c0, r0: rect.r0, c1: rect.c1, r1: rect.r1 });
+  GUILD.panel.classList.remove("hidden");
+}
+
+function guildLabelSync(scene, wanted) {
+  for (const id in GUILD.labels) {
+    if (!wanted[id]) {
+      GUILD.labels[id].destroy();
+      delete GUILD.labels[id];
+    }
+  }
+  for (const id in wanted) {
+    let t = GUILD.labels[id];
+    if (!t) {
+      t = scene.add.text(0, 0, "", { fontFamily: "sans-serif", fontSize: "13px", fontStyle: "bold", color: "#ffe9a0", stroke: "#000000", strokeThickness: 3 });
+      t.setOrigin(0, 1);
+      t.setDepth(7);
+      GUILD.labels[id] = t;
+    }
+    t.setText(wanted[id].text);
+    t.setColor(wanted[id].own === 2 ? "#ffcf8a" : (wanted[id].own ? "#ffe9a0" : "#a8dcff"));
+    t.setPosition(wanted[id].x, wanted[id].y);
+  }
+}
+
+function guildDrawBorders(scene, list, mode, sites) {
+  if (mode === "player" && worldGmMode) return;
+  if (!GUILD.gfx) {
+    GUILD.gfx = scene.add.graphics();
+    GUILD.gfx.setDepth(6);
+  }
+  const g = GUILD.gfx;
+  g.clear();
+  const wanted = {};
+  for (const item of list) {
+    const own = !!item.own;
+    const x = item.c0 * TILE;
+    const y = item.r0 * TILE;
+    const w = (item.c1 - item.c0 + 1) * TILE;
+    const h = (item.r1 - item.r0 + 1) * TILE;
+    g.fillStyle(own ? 0xffd23f : 0x66ccff, 0.07);
+    g.fillRect(x, y, w, h);
+    g.lineStyle(2, own ? 0xffd23f : 0x66ccff, 0.85);
+    g.strokeRect(x, y, w, h);
+    wanted[item.id] = { text: item.n, x: x + 4, y: y - 2, own: own };
+  }
+  for (const s of sites || []) {
+    const sx = s.c0 * TILE;
+    const sy = s.r0 * TILE;
+    const sw = s.w * TILE;
+    const sh = s.h * TILE;
+    g.fillStyle(0xff9f1c, 0.15);
+    g.fillRect(sx, sy, sw, sh);
+    g.lineStyle(3, 0xff9f1c, 0.95);
+    g.strokeRect(sx, sy, sw, sh);
+    g.fillStyle(0x000000, 0.55);
+    g.fillRect(sx + 4, sy + sh - 12, sw - 8, 8);
+    g.fillStyle(0x7dff7d, 0.95);
+    g.fillRect(sx + 4, sy + sh - 12, Math.max(0, (sw - 8) * s.pct / 100), 8);
+    wanted["s_" + s.id] = { text: s.n + " " + s.pct + "%", x: sx + 4, y: sy + sh - 14, own: 2 };
+  }
+  guildLabelSync(scene, wanted);
+}
+
+function guildDrawGm(scene) {
+  const list = [];
+  const sites = [];
+  for (const gd of WG.guilds || []) {
+    if (!gd.rect || gd.layer !== WG.layer) continue;
+    list.push({ id: gd.id, n: gd.name, c0: gd.rect.c0, r0: gd.rect.r0, c1: gd.rect.c1, r1: gd.rect.r1, own: 0 });
+    for (const s of gd.sites || []) sites.push({ id: s.id, n: s.name, c0: s.c0, r0: s.r0, w: s.w, h: s.h, pct: s.pct });
+  }
+  guildDrawBorders(scene, list, "gm", sites);
+}
+
+function guildOpenQuote(target) {
+  gmSend({ type: "guild_quote", id: target.id });
+}
+
+function guildQuoteResult(data) {
+  if (!atkMenuEl) return;
+  atkMenuEl.innerHTML = "";
+  const title = document.createElement("div");
+  title.className = "atkTitle";
+  if (!data.ok) {
+    title.textContent = data.reason || "Cannot recruit right now.";
+    atkMenuEl.appendChild(title);
+  } else {
+    title.textContent = "Recruit " + data.name + " (Lv " + data.level + ") for " + data.cost + " coins? You have " + data.coins + ".";
+    atkMenuEl.appendChild(title);
+    const yes = document.createElement("button");
+    yes.textContent = "Recruit for " + data.cost + " coins";
+    yes.disabled = data.coins < data.cost;
+    yes.addEventListener("click", () => {
+      gmSend({ type: "guild_recruit", id: data.id });
+      atkClose();
+    });
+    atkMenuEl.appendChild(yes);
+  }
+  const cancel = document.createElement("button");
+  cancel.className = "atkCancel";
+  cancel.textContent = "Close";
+  cancel.addEventListener("click", atkClose);
+  atkMenuEl.appendChild(cancel);
+  atkMenuEl.classList.remove("hidden");
+}
+
+const GPRE = { panel: null, btn: null, body: null, sel: { active: false, down: false, c0: 0, r0: 0, c1: 0, r1: 0 }, name: "", costs: {}, gfx: null, ready: false };
+
+function gpreInit() {
+  if (GPRE.ready) return;
+  GPRE.ready = true;
+  const style = document.createElement("style");
+  style.textContent = "#gpreBtn{position:fixed;left:12px;top:66px;z-index:14;padding:6px 14px;background:rgba(20,20,34,0.94);color:#ffd23f;border:1px solid #55557a;border-radius:5px;cursor:pointer;font-size:12px;font-weight:bold}"
+    + "#gprePanel{position:fixed;left:12px;top:104px;width:290px;max-height:60vh;display:flex;flex-direction:column;background:rgba(20,20,34,0.96);border:1px solid #3a3a55;border-radius:8px;color:#fff;font-size:12px;z-index:14}"
+    + "#gprePanel.hidden{display:none}"
+    + "#gpreHead{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border-bottom:1px solid #3a3a55;color:#ffd23f;font-size:13px;font-weight:bold}"
+    + "#gpreBody{overflow-y:auto;padding:6px 10px 10px 10px}"
+    + "#gpreBody h5{margin:10px 0 4px 0;color:#9be39b;font-size:12px}"
+    + "#gpreBody h5:first-child{margin-top:0}"
+    + ".gpreRow{display:flex;justify-content:space-between;align-items:center;gap:6px;margin:3px 0}"
+    + ".gpreRow input{width:70px;background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;padding:2px 5px}"
+    + "#gpreName{width:100%;box-sizing:border-box;background:#2d2d44;color:#fff;border:1px solid #55557a;border-radius:5px;padding:4px 6px;font-size:12px}";
+  document.head.appendChild(style);
+  const btn = document.createElement("button");
+  btn.id = "gpreBtn";
+  btn.type = "button";
+  btn.textContent = "Building presets";
+  const panel = document.createElement("div");
+  panel.id = "gprePanel";
+  panel.className = "hidden";
+  const head = document.createElement("div");
+  head.id = "gpreHead";
+  const title = document.createElement("span");
+  title.textContent = "Building presets";
+  const close = document.createElement("button");
+  close.className = "gldBtn";
+  close.type = "button";
+  close.textContent = "Close";
+  head.appendChild(title);
+  head.appendChild(close);
+  const body = document.createElement("div");
+  body.id = "gpreBody";
+  panel.appendChild(head);
+  panel.appendChild(body);
+  document.body.appendChild(btn);
+  document.body.appendChild(panel);
+  GPRE.btn = btn;
+  GPRE.panel = panel;
+  GPRE.body = body;
+  btn.addEventListener("click", () => {
+    panel.classList.toggle("hidden");
+    gpreRender();
+  });
+  close.addEventListener("click", () => panel.classList.add("hidden"));
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && GPRE.sel.active) gpreSelStop();
+  });
+}
+
+function gpreCostText(costs) {
+  const parts = [];
+  for (const m in costs) parts.push(m + " x" + costs[m]);
+  return parts.join(", ");
+}
+
+function gpreRender() {
+  if (!GPRE.body) return;
+  const body = GPRE.body;
+  body.innerHTML = "";
+  body.appendChild(guildHeading("Save a preset"));
+  body.appendChild(guildLine("Click Select area, drag over the finished building on the map, then Save. Tiles, art and objects inside are stored.", true));
+  const name = document.createElement("input");
+  name.id = "gpreName";
+  name.maxLength = 30;
+  name.placeholder = "Preset name";
+  name.value = GPRE.name;
+  name.addEventListener("input", () => { GPRE.name = name.value; });
+  body.appendChild(name);
+  for (const m of WG.materials || ["Log", "Stone", "Metal", "Crystal", "Plank", "Nails", "Rope"]) {
+    const row = document.createElement("div");
+    row.className = "gpreRow";
+    const label = document.createElement("span");
+    label.textContent = m;
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.max = "999";
+    input.value = GPRE.costs[m] || "";
+    input.placeholder = "0";
+    input.addEventListener("input", () => { GPRE.costs[m] = input.value; });
+    row.appendChild(label);
+    row.appendChild(input);
+    body.appendChild(row);
+  }
+  const area = GPRE.sel.c1 >= GPRE.sel.c0 && GPRE.sel.done ? GPRE.sel : null;
+  const status = guildLine(area ? "Area: " + (area.c1 - area.c0 + 1) + " by " + (area.r1 - area.r0 + 1) + " tiles on layer " + WG.layer : "No area selected.", true);
+  body.appendChild(status);
+  const actions = document.createElement("div");
+  actions.appendChild(guildButton("Select area", () => gpreSelStart()));
+  const save = guildButton("Save preset", () => {
+    if (!GPRE.sel.done) return;
+    const costs = {};
+    for (const m in GPRE.costs) costs[m] = parseInt(GPRE.costs[m], 10) || 0;
+    gmSend({ type: "gm_preset_save", name: GPRE.name, layer: GPRE.sel.layer, c0: GPRE.sel.c0, r0: GPRE.sel.r0, c1: GPRE.sel.c1, r1: GPRE.sel.r1, costs: costs });
+  });
+  save.disabled = !GPRE.sel.done;
+  actions.appendChild(save);
+  body.appendChild(actions);
+  body.appendChild(guildHeading("Saved presets (" + (WG.presets || []).length + ")"));
+  for (const p of WG.presets || []) {
+    const row = document.createElement("div");
+    row.className = "gldRow";
+    const label = document.createElement("span");
+    label.textContent = p.name + " | " + p.w + "x" + p.h + " | " + gpreCostText(p.costs);
+    row.appendChild(label);
+    row.appendChild(guildButton("Delete", () => {
+      if (window.confirm("Delete preset " + p.name + "?")) gmSend({ type: "gm_preset_del", id: p.id });
+    }, "danger"));
+    body.appendChild(row);
+  }
+}
+
+function gpreSelStart() {
+  GPRE.sel.active = true;
+  GPRE.sel.down = false;
+  GPRE.sel.done = false;
+  GPRE.panel.classList.add("hidden");
+  guildUiInit();
+  GUILD.banner.textContent = "Preset area: drag a rectangle over the building (Esc to cancel)";
+  GUILD.banner.classList.remove("hidden");
+}
+
+function gpreSelStop() {
+  GPRE.sel.active = false;
+  GPRE.sel.down = false;
+  if (GUILD.banner) GUILD.banner.classList.add("hidden");
+  if (GPRE.gfx) GPRE.gfx.clear();
+  GPRE.panel.classList.remove("hidden");
+  gpreRender();
+}
+
+function gpreSelDraw(scene) {
+  if (!GPRE.gfx) {
+    GPRE.gfx = scene.add.graphics();
+    GPRE.gfx.setDepth(160);
+  }
+  const g = GPRE.gfx;
+  g.clear();
+  const s = GPRE.sel;
+  const c0 = Math.min(s.c0, s.c1);
+  const r0 = Math.min(s.r0, s.r1);
+  const w = Math.abs(s.c1 - s.c0) + 1;
+  const h = Math.abs(s.r1 - s.r0) + 1;
+  g.fillStyle(0x66ccff, 0.2);
+  g.fillRect(c0 * TILE, r0 * TILE, w * TILE, h * TILE);
+  g.lineStyle(3, 0x66ccff, 1);
+  g.strokeRect(c0 * TILE, r0 * TILE, w * TILE, h * TILE);
+}
+
+function gpreSelPointer(scene, cell, phase) {
+  const s = GPRE.sel;
+  if (phase === "down") {
+    s.down = true;
+    s.c0 = cell.c;
+    s.r0 = cell.r;
+    s.c1 = cell.c;
+    s.r1 = cell.r;
+    gpreSelDraw(scene);
+    return;
+  }
+  if (!s.down) return;
+  s.c1 = cell.c;
+  s.r1 = cell.r;
+  if (phase === "move") {
+    gpreSelDraw(scene);
+    return;
+  }
+  s.down = false;
+  const c0 = Math.min(s.c0, s.c1);
+  const r0 = Math.min(s.r0, s.r1);
+  const c1 = Math.max(s.c0, s.c1);
+  const r1 = Math.max(s.r0, s.r1);
+  s.c0 = c0;
+  s.r0 = r0;
+  s.c1 = c1;
+  s.r1 = r1;
+  s.layer = WG.layer;
+  s.done = true;
+  s.active = false;
+  gpreSelStop();
+  gpreSelDraw(scene);
 }
 
 function atkOpen(target) {
@@ -5691,6 +6397,22 @@ function atkOpen(target) {
   title.className = "atkTitle";
   title.textContent = (target.type === "player" ? "Challenge " : target.boulder ? "Strike the " : target.breakable ? "Smash the " : target.type === "dummy" ? "Practice on " : "Attack ") + target.name + " (" + dist + " tile" + (dist === 1 ? "" : "s") + " away). Pick a move:";
   atkMenuEl.appendChild(title);
+  if (target.type === "entity" && target.kind === "npc" && GUILD.isMaster && GUILD.guild) {
+    if (guildIsMemberId(target.id)) {
+      const dismiss = document.createElement("button");
+      dismiss.textContent = "Dismiss from " + GUILD.guild.name;
+      dismiss.addEventListener("click", () => {
+        gmSend({ type: "guild_dismiss", id: target.id });
+        atkClose();
+      });
+      atkMenuEl.appendChild(dismiss);
+    } else {
+      const recruit = document.createElement("button");
+      recruit.textContent = "Recruit to " + GUILD.guild.name;
+      recruit.addEventListener("click", () => guildOpenQuote(target));
+      atkMenuEl.appendChild(recruit);
+    }
+  }
   if (infos.length === 0) {
     const none = document.createElement("div");
     none.textContent = "You have no moves to use.";
@@ -5737,6 +6459,7 @@ function atkOpen(target) {
 function atkPointer(scene, pointer) {
   if (!worldPlayerMode || worldGmMode) return;
   if (!pointer.leftButtonDown()) return;
+  if (GUILD.claim.active || GUILD.place.active) return;
   if (COMBAT.active || chatActive) return;
   if (typeof itemMenuOpenNow === "function" && itemMenuOpenNow()) return;
   if (lootState) return;
@@ -7033,6 +7756,66 @@ function gmRenderPlayerStats(el, data) {
   el.appendChild(box);
 }
 
+function gmRenderOccupation(el, data) {
+  const box = document.createElement("div");
+  box.style.cssText = "margin:6px 0;padding:6px;background:#2d2d44;border-radius:5px";
+  const label = document.createElement("div");
+  label.style.cssText = "color:#c8c8ff;font-weight:bold;margin-bottom:3px";
+  label.textContent = "Occupation";
+  box.appendChild(label);
+  const isEntity = data.target.type === "entity";
+  if (isEntity && !data.isNpc) {
+    const note = document.createElement("div");
+    note.style.color = "#99a";
+    note.textContent = "Only NPCs and players have occupations.";
+    box.appendChild(note);
+    el.appendChild(box);
+    return;
+  }
+  const row = document.createElement("div");
+  row.style.cssText = "display:flex;gap:6px";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.maxLength = 30;
+  input.value = data.occupation || "";
+  input.placeholder = "e.g. Guild Master";
+  input.style.cssText = "flex:1;background:#1c1c2e;color:#fff;border:1px solid #55557a;border-radius:5px;padding:3px 6px";
+  const set = document.createElement("button");
+  set.className = "wgBtn";
+  set.textContent = "Set";
+  row.appendChild(input);
+  row.appendChild(set);
+  box.appendChild(row);
+  let refuse = null;
+  if (isEntity) {
+    const wrap = document.createElement("label");
+    wrap.style.cssText = "display:block;margin-top:5px";
+    refuse = document.createElement("input");
+    refuse.type = "checkbox";
+    refuse.checked = !!data.noGuild;
+    wrap.appendChild(refuse);
+    wrap.appendChild(document.createTextNode(" Refuses to join any guild"));
+    box.appendChild(wrap);
+  }
+  if (data.guild) {
+    const g = document.createElement("div");
+    g.style.cssText = "margin-top:4px;color:#ffd23f";
+    g.textContent = (isEntity ? "Member of " : "Leads ") + data.guild;
+    box.appendChild(g);
+  }
+  set.addEventListener("click", () => {
+    const msg = { type: "gm_occupation", target: data.target, occupation: input.value };
+    if (refuse) msg.noGuild = refuse.checked;
+    gmSend(msg);
+  });
+  if (refuse) {
+    refuse.addEventListener("change", () => {
+      gmSend({ type: "gm_occupation", target: data.target, occupation: input.value, noGuild: refuse.checked });
+    });
+  }
+  el.appendChild(box);
+}
+
 function gmRenderInspector(data) {
   if (!WGD.inspect || !gmSameTarget(WGD.inspect, data.target)) return;
   WGD.lastInspect = data;
@@ -7051,6 +7834,8 @@ function gmRenderInspector(data) {
   head.appendChild(title);
   head.appendChild(close);
   el.appendChild(head);
+
+  gmRenderOccupation(el, data);
 
   if (data.target.type === "player" && data.stats) gmRenderPlayerStats(el, data);
 
@@ -7302,6 +8087,28 @@ window.worldHook = function (scene, data) {
       const lightSel = document.getElementById("wgLightMode");
       if (lightSel) lightSel.value = data.mode;
     }
+    return true;
+  }
+  if (data.type === "guild_state") {
+    guildApplyState(data);
+    return true;
+  }
+  if (data.type === "guild_msg") {
+    itemToast(data.text);
+    return true;
+  }
+  if (data.type === "guild_quote_result") {
+    guildQuoteResult(data);
+    return true;
+  }
+  if (data.type === "gm_presets") {
+    WG.presets = data.presets || [];
+    gpreRender();
+    return true;
+  }
+  if (data.type === "gm_guilds") {
+    WG.guilds = data.guilds || [];
+    if (worldGmMode) gmDrawMarkers();
     return true;
   }
   if (data.type === "boulder_hold") {
