@@ -5719,8 +5719,16 @@ function occupationOf(p) {
   return typeof found === "string" ? found : "";
 }
 
+function occupationKey(text) {
+  return String(text || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function isGuildMemberText(text) {
+  return occupationKey(text) === "guildmember";
+}
+
 function isGuildMasterText(text) {
-  return String(text || "").trim().toLowerCase() === "guild master";
+  return occupationKey(text) === "guildmaster";
 }
 
 function guildById(id) {
@@ -5956,7 +5964,7 @@ function handleGuildMessage(p, data) {
       if (!e) continue;
       if (e.workSite) workerUnassign(e);
       e.guildId = null;
-      if (e.occupation === "Guild Member") e.occupation = "";
+      if (isGuildMemberText(e.occupation)) e.occupation = "";
     }
     guildStore.list = guildStore.list.filter((x) => x.id !== g.id);
     scheduleEntitySave();
@@ -5974,7 +5982,7 @@ function handleGuildMessage(p, data) {
     if (e) {
       if (e.workSite) workerUnassign(e);
       e.guildId = null;
-      if (e.occupation === "Guild Member") e.occupation = "";
+      if (isGuildMemberText(e.occupation)) e.occupation = "";
       scheduleEntitySave();
     }
     guildChanged(g);
@@ -6030,7 +6038,9 @@ function handleGmOccupation(gm, data) {
     sendSocket(gm.socket, { type: "gm_notice", text: "That target is gone." });
     return;
   }
-  const text = String(data.occupation === undefined || data.occupation === null ? "" : data.occupation).trim().replace(/\s+/g, " ").slice(0, 30);
+  let text = String(data.occupation === undefined || data.occupation === null ? "" : data.occupation).trim().replace(/\s+/g, " ").slice(0, 30);
+  if (isGuildMasterText(text)) text = "Guild Master";
+  if (isGuildMemberText(text)) text = "Guild Member";
   if (t.kind === "player") {
     const key = charKeyOf(t.ref);
     if (text) occupations[key] = text;
