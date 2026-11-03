@@ -4663,7 +4663,7 @@ function enterGmWorld(scene) {
       if (e.key === "[" || e.key === "{") { gmSetBrush(WG.brush - (e.shiftKey ? 5 : 1)); gmDrawPreview(scene, null, 0); }
       if (e.key === "]" || e.key === "}") { gmSetBrush(WG.brush + (e.shiftKey ? 5 : 1)); gmDrawPreview(scene, null, 0); }
     }
-    if (e.code === "Space") { gmSpaceDown = true; e.preventDefault(); }
+    if (e.code === "Space" && tagName !== "INPUT" && tagName !== "TEXTAREA" && tagName !== "SELECT") { gmSpaceDown = true; e.preventDefault(); }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { gmUndo(); e.preventDefault(); }
     if (e.key === "Escape") {
       WG.portalSource = null;
