@@ -1,0 +1,26 @@
+:root{--box:#1c1c2e;--box-border:#3a3a55;--text:#e6e6f2;--heading:#ffd23f;--title:#ffffff;--discord:#e0434f;--contrib:#2fb457;--box-max:28vh}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%}
+body{background:#14141f;color:var(--text);font-family:"Segoe UI",Roboto,Helvetica,Arial,sans-serif;line-height:1.55}
+#siteRoot{max-width:900px;margin:0 auto;padding:20px 16px 40px 16px;display:flex;flex-direction:column;gap:18px}
+.siteBar{display:grid;grid-template-columns:1fr 1.3fr 1fr;gap:12px;align-items:stretch}
+.siteTitle{margin:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:10px 14px;background:var(--box);border:3px solid var(--box-border);border-radius:6px;color:var(--title);font-size:26px;letter-spacing:1px}
+.siteBtn{display:flex;align-items:center;justify-content:center;text-align:center;padding:10px 12px;border-radius:22px;border:3px solid;color:#fff;text-decoration:none;font-weight:600;font-size:15px;background:rgba(20,20,34,0.7);transition:background .15s}
+.siteBtn.discord{border-color:var(--discord)}
+.siteBtn.discord:hover{background:var(--discord)}
+.siteBtn.contrib{border-color:var(--contrib)}
+.siteBtn.contrib:hover{background:var(--contrib)}
+.siteBox{background:var(--box);border:3px solid var(--box-border);border-radius:6px;padding:14px 18px}
+.siteBox h2{margin:0 0 8px 0;color:var(--heading);font-size:19px}
+.siteBox p{margin:0 0 10px 0}
+.siteScroll{max-height:var(--box-max);overflow-y:auto;padding-right:8px}
+.siteScroll::-webkit-scrollbar{width:8px}
+.siteScroll::-webkit-scrollbar-thumb{background:var(--box-border);border-radius:4px}
+.siteAction{margin-top:12px;display:flex;justify-content:center}
+.siteAction .siteBtn{min-width:240px}
+.siteMuted{color:#99a}
+.sitePerson{display:flex;flex-direction:column;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.08)}
+.sitePersonName{color:#fff;font-weight:600;text-decoration:none}
+a.sitePersonName:hover{text-decoration:underline;color:var(--heading)}
+.sitePersonRole{color:#aab;font-size:14px}
+@media (max-width:640px){.siteBar{grid-template-columns:1fr 1fr}.siteTitle{grid-column:1 / -1;order:-1;font-size:22px}.siteScroll{max-height:34vh}}

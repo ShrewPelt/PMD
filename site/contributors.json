@@ -1,0 +1,15 @@
+{
+  "pageTitle": "PMD Azarus | Contributors",
+  "title": "Contributors",
+  "backButton": { "label": "Back", "url": "/" },
+  "discord": { "label": "Join Discord Server", "url": "https://discord.gg/8XxuBUB3pN" },
+  "intro": "Testpage intro, nothing to see here right now",
+  "emptyText": "To be announced.",
+  "groups": [
+    { "title": "Lead Developer", "people": [ { "name": "Test Name", "role": "Test role", "link": "" } ] },
+    { "title": "Coders", "people": [] },
+    { "title": "Artists", "people": [] },
+    { "title": "Sprites and Animations", "people": [ { "name": "PMDCollab SpriteCollab contributors", "role": "Pokemon sprites, portraits and animations used in the game", "link": "https://github.com/PMDCollab/SpriteCollab" } ] },
+    { "title": "Beta Testers", "people": [] }
+  ]
+}

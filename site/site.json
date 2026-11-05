@@ -1,0 +1,11 @@
+{
+  "pageTitle": "PMD Azarus",
+  "title": "PMD Azarus",
+  "discord": { "label": "Join Discord Server", "url": "https://discord.gg/8XxuBUB3pN" },
+  "contributorsButton": { "label": "Contributors", "url": "/contributors" },
+  "background": { "color": "#14141f", "gradient": "linear-gradient(160deg, #14141f 0%, #1d2238 55%, #2a1d3a 100%)", "image": "", "imageSize": "cover", "imagePosition": "center", "imageOverlay": 0.45 },
+  "theme": { "boxColor": "#1c1c2e", "boxBorder": "#3a3a55", "textColor": "#e6e6f2", "headingColor": "#ffd23f", "titleColor": "#ffffff", "discordColor": "#e0434f", "contributorsColor": "#2fb457", "boxMaxHeight": "28vh" },
+  "summary": { "heading": "Summary", "paragraphs": [ "PMD Azarus is a Pokemon Mystery Dungeon inspired roleplay project that lives on Discord and now in your browser too.", "Create a character on the Discord bot, then step into a persistent open world where you can explore, fight turn by turn, craft, farm, join guilds and meet NPCs that live their own lives." ] },
+  "about": { "heading": "What is this project?", "paragraphs": [ "PMD Azarus started as a Discord roleplay bot where every player keeps their own Pokemon character, badges, items and story. The open world web game grew out of it so that those same characters can walk around a shared world together instead of only talking in channels.", "The bot has been running for a while, and development of the web game began in autumn 2026. The project is built by Xelxin, with help from artists, sprite makers, animators and beta testers. Everyone involved is listed on the Contributors page.", "It is a hobby project made out of passion. There are no ads and there will never be any monetization." ] },
+  "invite": { "heading": "Come join us!", "paragraphs": [ "Whether you want to roleplay a brave explorer, run a guild, hunt for treasure in dark dungeons or just wander the world and chat, there is room for you here.", "New players are always welcome. Hop into the Discord server, make your character and we will see you in Azarus!" ], "buttonLabel": "Join the Discord Server", "buttonUrl": "https://discord.gg/8XxuBUB3pN" }
+}

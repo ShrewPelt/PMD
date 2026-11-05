@@ -103,6 +103,26 @@ const BOUND_MESSAGE = "This link is already being used by another browser. Use /
 
 app.disable("x-powered-by");
 
+const SITE_DIR = path.join(__dirname, "site");
+
+app.use("/site", (req, res, next) => {
+  res.set("Cache-Control", "no-cache");
+  next();
+}, express.static(SITE_DIR));
+
+app.get("/contributors", (req, res) => {
+  res.set("Cache-Control", "no-cache");
+  res.sendFile(path.join(SITE_DIR, "contributors.html"));
+});
+
+app.use((req, res, next) => {
+  if (req.method !== "GET" || (req.path !== "/" && req.path !== "/index.html")) return next();
+  const pass = typeof req.query.pass === "string" ? req.query.pass : "";
+  if (gatePassValid(pass)) return next();
+  res.set("Cache-Control", "no-cache");
+  res.sendFile(path.join(SITE_DIR, "info.html"));
+});
+
 app.use((req, res, next) => {
   res.set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet, noimageindex");
   res.set("Referrer-Policy", "no-referrer");
@@ -110,7 +130,7 @@ app.use((req, res, next) => {
 });
 
 app.get("/robots.txt", (req, res) => {
-  res.type("text/plain").send("User-agent: *\nDisallow: /\n");
+  res.type("text/plain").send("User-agent: *\nAllow: /$\nAllow: /contributors\nAllow: /site/\nDisallow: /\n");
 });
 
 app.use((req, res, next) => {
@@ -3133,7 +3153,7 @@ function layerHasViewers(layer) {
 }
 
 function saySpeech(e, text) {
-  const message = { type: "npc_say", id: e.id, dex: e.dex, name: e.name, text: text };
+  const message = { type: "npc_say", id: e.id, dex: e.dex, name: e.name, text: text, sz: sizeOfSpecies(e.species) };
   for (const pid in worldSession.players) {
     const q = worldSession.players[pid];
     if (cellInView(q, e.layer, e.col, e.row)) sendPlayer(q, message);

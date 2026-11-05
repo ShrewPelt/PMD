@@ -8233,7 +8233,7 @@ window.worldHook = function (scene, data) {
     }
     if (data.type === "npc_say") {
       const sprite = otherPlayers[data.id];
-      if (sprite && sprite !== "loading") showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text, data.name);
+      if (sprite && sprite !== "loading") showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text, data.name, undefined, { typewriter: true, size: data.sz });
       return true;
     }
     if (data.type === "e_fade") {
@@ -8317,7 +8317,7 @@ window.worldHook = function (scene, data) {
     }
     if (data.type === "npc_say") {
       const sprite = otherPlayers[data.id];
-      if (sprite && sprite !== "loading") showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text, data.name);
+      if (sprite && sprite !== "loading") showBubbleFor(scene, "p" + data.id, sprite, data.dex || "0004", data.text, data.name, undefined, { typewriter: true, size: data.sz });
       return true;
     }
     if (data.type === "e_fade") {
