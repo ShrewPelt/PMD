@@ -15,13 +15,14 @@ const worldEntityMeta = {};
 const worldEntityLabels = {};
 
 function entityUpsert(scene, e) {
-  worldEntityMeta[e.id] = { kind: e.kind, name: e.name, state: e.state, dex: e.dex, fainted: !!e.fainted, cy: e.cy || "" };
+  worldEntityMeta[e.id] = { kind: e.kind, name: e.name, state: e.state, dex: e.dex, fainted: !!e.fainted, cy: e.cy || "", fp: e.fp || 1 };
   const sprite = otherPlayers[e.id];
   if (!sprite) {
-    addOtherPlayer(scene, { id: e.id, dex: e.dex, col: e.col, row: e.row, direction: e.direction });
+    addOtherPlayer(scene, { id: e.id, dex: e.dex, col: e.col, row: e.row, direction: e.direction, fp: e.fp || 1 });
     return;
   }
   if (sprite === "loading") return;
+  if ((sprite.fp || 1) !== (e.fp || 1)) applyFootprint(sprite, e.fp || 1);
   sprite.direction = e.direction;
   const tx = tilePixelX(e.col);
   const ty = tilePixelY(e.row);
@@ -5729,13 +5730,14 @@ function atkFindTarget(c, r) {
     const spr = otherPlayers[id];
     if (!spr || spr === "loading") continue;
     const pos = itemSpriteCell(spr);
-    if (pos.col !== c || pos.row !== r) continue;
+    const rect = fpRectOfSprite(spr);
+    if (c < rect.c0 || c > rect.c1 || r < rect.r0 || r > rect.r1) continue;
     const meta = worldEntityMeta[id];
     if (meta) {
       if ((meta.kind !== "npc" && meta.kind !== "enemy") || meta.fainted) continue;
-      return { id: id, type: "entity", name: meta.name, col: c, row: r, kind: meta.kind };
+      return { id: id, type: "entity", name: meta.name, col: pos.col, row: pos.row, kind: meta.kind, rect: rect };
     }
-    return { id: id, type: "player", name: worldPlayerNames[id] || "Player", col: c, row: r };
+    return { id: id, type: "player", name: worldPlayerNames[id] || "Player", col: pos.col, row: pos.row, rect: rect };
   }
   return null;
 }
@@ -6391,7 +6393,9 @@ function atkOpen(target) {
   atkTarget = target;
   const sheet = typeof invSheet === "object" && invSheet ? invSheet : null;
   const infos = sheet && Array.isArray(sheet.moveInfo) ? sheet.moveInfo : [];
-  const dist = Math.max(Math.abs(player.col - target.col), Math.abs(player.row - target.row));
+  const mineRect = { c0: Math.floor(player.x / TILE) - fpLo(player.fp || 1), c1: Math.floor(player.x / TILE) + fpHi(player.fp || 1), r0: Math.floor(player.y / TILE) - fpLo(player.fp || 1), r1: Math.floor(player.y / TILE) + fpHi(player.fp || 1) };
+  const theirRect = target.rect || { c0: target.col, c1: target.col, r0: target.row, r1: target.row };
+  const dist = Math.max(Math.max(mineRect.c0 - theirRect.c1, theirRect.c0 - mineRect.c1, 0), Math.max(mineRect.r0 - theirRect.r1, theirRect.r0 - mineRect.r1, 0));
   atkMenuEl.innerHTML = "";
   const title = document.createElement("div");
   title.className = "atkTitle";
@@ -7170,18 +7174,52 @@ function freeSolid(c, r) {
   return line[cc] === "1";
 }
 
-function freeOccupied(c, r) {
+function fpLo(n) {
+  return Math.floor((n - 1) / 2);
+}
+
+function fpHi(n) {
+  return n - 1 - Math.floor((n - 1) / 2);
+}
+
+function fpRectOfSprite(sp) {
+  const n = sp.fp || 1;
+  const c = Math.floor(sp.x / TILE);
+  const r = Math.floor(sp.y / TILE);
+  return { c0: c - fpLo(n), c1: c + fpHi(n), r0: r - fpLo(n), r1: r + fpHi(n) };
+}
+
+function freeOccupied(c0, c1, r0, r1) {
   for (const id in otherPlayers) {
     const sp = otherPlayers[id];
     if (!sp || sp === "loading") continue;
     const meta = worldEntityMeta[id];
     if (meta && (meta.kind === "companion" || meta.kind === "corpse" || meta.fainted)) continue;
-    if (Math.floor(sp.x / TILE) === c && Math.floor(sp.y / TILE) === r) return true;
+    const o = fpRectOfSprite(sp);
+    if (o.c0 <= c1 && o.c1 >= c0 && o.r0 <= r1 && o.r1 >= r0) return true;
   }
   return false;
 }
 
 function freeCanStand(px, py) {
+  const n = player.fp || 1;
+  const curC = Math.floor(player.x / TILE);
+  const curR = Math.floor(player.y / TILE);
+  const nc = Math.floor(px / TILE);
+  const nr = Math.floor(py / TILE);
+  if (n > 1) {
+    const rc0 = nc - fpLo(n);
+    const rc1 = nc + fpHi(n);
+    const rr0 = nr - fpLo(n);
+    const rr1 = nr + fpHi(n);
+    for (let r = rr0; r <= rr1; r++) {
+      for (let c = rc0; c <= rc1; c++) {
+        if (freeSolid(c, r)) return false;
+      }
+    }
+    if ((nc !== curC || nr !== curR) && freeOccupied(rc0, rc1, rr0, rr1)) return false;
+    return true;
+  }
   const h = FREE.half * TILE;
   const c0 = Math.floor((px - h) / TILE);
   const c1 = Math.floor((px + h) / TILE);
@@ -7192,11 +7230,7 @@ function freeCanStand(px, py) {
       if (freeSolid(c, r)) return false;
     }
   }
-  const curC = Math.floor(player.x / TILE);
-  const curR = Math.floor(player.y / TILE);
-  const nc = Math.floor(px / TILE);
-  const nr = Math.floor(py / TILE);
-  if ((nc !== curC || nr !== curR) && freeOccupied(nc, nr)) return false;
+  if ((nc !== curC || nr !== curR) && freeOccupied(nc, nc, nr, nr)) return false;
   return true;
 }
 
@@ -7264,7 +7298,7 @@ function freeMoveFrame() {
     if (faceDir) dir = faceDir;
     backward = vx * Math.cos(VIS.look.ang) + vy * Math.sin(VIS.look.ang) < -0.3;
   }
-  let walkSpeed = FREE.speed;
+  let walkSpeed = FREE.speed * ((player.fp || 1) > 1 ? 1 + 0.4 * ((player.fp || 1) - 1) : 1);
   if (backward) walkSpeed = walkSpeed * 0.5;
   if (tuffUnderPlayer()) walkSpeed = Math.max(0.5, walkSpeed - TUFF.slow);
   if (webUnderPlayer()) walkSpeed = Math.max(0.5, walkSpeed - TUFF.webSlow);

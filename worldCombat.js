@@ -51,6 +51,21 @@ function chebyshev(aCol, aRow, bCol, bRow) {
   return Math.max(Math.abs(aCol - bCol), Math.abs(aRow - bRow));
 }
 
+function refRect(ref, col, row) {
+  if (ctx && ctx.footRect) return ctx.footRect(ref, col, row);
+  const c = col === undefined ? ref.col : col;
+  const r = row === undefined ? ref.row : row;
+  return { c0: c, c1: c, r0: r, r1: r, n: 1 };
+}
+
+function refGap(a, b, aCol, aRow) {
+  const A = refRect(a, aCol, aRow);
+  const B = refRect(b);
+  const dx = Math.max(A.c0 - B.c1, B.c0 - A.c1, 0);
+  const dy = Math.max(A.r0 - B.r1, B.r0 - A.r1, 0);
+  return Math.max(dx, dy);
+}
+
 function rangeOf(moveData) {
   if (!moveData) return MELEE_RANGE;
   if (typeof moveData.range === "number") return moveData.range;
@@ -81,7 +96,7 @@ function actorPos(A) {
 }
 
 function actorDistance(A, B) {
-  return chebyshev(A.ref.col, A.ref.row, B.ref.col, B.ref.row);
+  return refGap(A.ref, B.ref);
 }
 
 function sideOf(A) {
@@ -327,9 +342,10 @@ function findFleeSpot(f, p) {
       const row = p.row + dr;
       if (!ctx.isWalkable(p.layer, col, row)) continue;
       if (ctx.entityAt(p.layer, col, row)) continue;
-      if (ctx.playerAt(p.layer, col, row)) continue;
+      if (ctx.playerAt(p.layer, col, row, p.id)) continue;
+      if (ctx.footBlockedFor && ctx.footOf(p) > 1 && ctx.footBlockedFor(p, col, row)) continue;
       let nearest = Infinity;
-      for (const E of foes) nearest = Math.min(nearest, chebyshev(col, row, E.ref.col, E.ref.row));
+      for (const E of foes) nearest = Math.min(nearest, refGap(p, E.ref, col, row));
       if (nearest < FLEE_DISTANCE) continue;
       const score = Math.max(Math.abs(dc), Math.abs(dr)) * 100 + Math.abs(dc) + Math.abs(dr);
       if (score < bestScore) {
@@ -588,7 +604,7 @@ function startDuel(p, data) {
       return;
     }
   }
-  const dist = chebyshev(p.col, p.row, targetRef.col, targetRef.row);
+  const dist = refGap(p, targetRef);
   if (dist > rangeOf(md)) {
     notice(p, `${targetRef.name} is out of range for ${moveName} (${dist} tiles, range ${rangeOf(md)}).`);
     return;
@@ -1085,8 +1101,9 @@ function stepToward(f, A, T) {
     const nr = e.row + d.dr;
     if (!ctx.isWalkable(e.layer, nc, nr)) continue;
     if (ctx.entityAt(e.layer, nc, nr, e.id)) continue;
-    if (ctx.playerAt(e.layer, nc, nr)) continue;
-    const dist = chebyshev(nc, nr, T.ref.col, T.ref.row);
+    if (ctx.playerAt(e.layer, nc, nr, e.id)) continue;
+    if (ctx.footBlockedFor && ctx.footOf(e) > 1 && ctx.footBlockedFor(e, nc, nr)) continue;
+    const dist = refGap(e, T.ref, nc, nr);
     if (dist >= startDist) continue;
     const euclid = (nc - T.ref.col) * (nc - T.ref.col) + (nr - T.ref.row) * (nr - T.ref.row);
     const score = dist * 1000 + euclid + Math.random() * 0.5;
@@ -1729,7 +1746,7 @@ function useItemOutside(p, data) {
       itemResult(p, false, "Pick a valid target.");
       return;
     }
-    if (chebyshev(p.col, p.row, targetRef.col, targetRef.row) > worldItems.THROW_RANGE) {
+    if (refGap(p, targetRef) > worldItems.THROW_RANGE) {
       itemResult(p, false, `${targetRef.name} is too far to throw at (max ${worldItems.THROW_RANGE} tiles).`);
       return;
     }
@@ -1893,7 +1910,7 @@ function tick() {
       const p = ctx.worldSession.players[pid];
       if (p.layer !== e.layer || p._fight || p.hp <= 0) continue;
       if (p._noFightUntil && Date.now() < p._noFightUntil) continue;
-      const dist = chebyshev(p.col, p.row, e.col, e.row);
+      const dist = refGap(p, e);
       if (ctx.enemyCanSee(e, p) && dist < bestDist) {
         bestDist = dist;
         target = p;

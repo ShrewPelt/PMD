@@ -1382,7 +1382,7 @@ function countInventory(list) {
 
 function publicPlayer(p) {
   const lightInfo = playerLightInfo(p);
-  return { id: p.id, layer: p.layer, col: p.col, row: p.row, direction: p.direction, dex: p.dex, name: p.name, userId: p.userId, hp: p.hp, maxHp: p.maxHp, mp: p.mp, maxMp: p.maxMp, light: lightInfo.r, lc: lightInfo.c };
+  return { id: p.id, layer: p.layer, col: p.col, row: p.row, direction: p.direction, dex: p.dex, name: p.name, userId: p.userId, hp: p.hp, maxHp: p.maxHp, mp: p.mp, maxMp: p.maxMp, light: lightInfo.r, lc: lightInfo.c, fp: footOf(p) };
 }
 
 function sendSocket(socket, data) {
@@ -1402,11 +1402,13 @@ function sendGms(layer, data) {
 }
 
 function inView(a, b) {
-  return a.layer === b.layer && Math.abs(a.col - b.col) <= VIEW_HALF_W && Math.abs(a.row - b.row) <= VIEW_HALF_H;
+  const pad = Math.max(viewPadOf(a), viewPadOf(b));
+  return a.layer === b.layer && Math.abs(a.col - b.col) <= VIEW_HALF_W + pad && Math.abs(a.row - b.row) <= VIEW_HALF_H + pad;
 }
 
 function cellInView(p, layer, col, row) {
-  return p.layer === layer && Math.abs(p.col - col) <= VIEW_HALF_W && Math.abs(p.row - row) <= VIEW_HALF_H;
+  const pad = viewPadOf(p);
+  return p.layer === layer && Math.abs(p.col - col) <= VIEW_HALF_W + pad && Math.abs(p.row - row) <= VIEW_HALF_H + pad;
 }
 
 function updatePair(p, q) {
@@ -1642,6 +1644,113 @@ function sizeOfSpecies(species) {
     if (speciesSizeMap[words[i]]) return speciesSizeMap[words[i]];
   }
   return "medium";
+}
+
+const SPECIES_FOOT_FILE = path.join(__dirname, "StorageData", "SpeciesFootprints.json");
+const speciesFootMap = {};
+try {
+  const rawFoot = JSON.parse(fs.readFileSync(SPECIES_FOOT_FILE, "utf8"));
+  for (const name of Object.keys(rawFoot)) speciesFootMap[name.toLowerCase()] = Math.max(1, Math.min(5, parseInt(rawFoot[name], 10) || 1));
+} catch (e) {}
+const footCache = {};
+
+function footOfSpecies(species) {
+  const key = String(species || "");
+  if (footCache[key] !== undefined) return footCache[key];
+  const words = key.toLowerCase().replace(/[^a-z0-9. \-']/g, " ").split(/\s+/).filter((w) => w);
+  let found = 1;
+  const whole = words.join(" ");
+  if (speciesFootMap[whole]) found = speciesFootMap[whole];
+  else {
+    let hit = false;
+    for (let i = 0; i < words.length && !hit; i++) {
+      const tail = words.slice(i).join(" ");
+      if (speciesFootMap[tail]) { found = speciesFootMap[tail]; hit = true; }
+    }
+    for (let i = words.length - 1; i >= 0 && !hit; i--) {
+      if (speciesFootMap[words[i]]) { found = speciesFootMap[words[i]]; hit = true; }
+    }
+  }
+  footCache[key] = found;
+  return found;
+}
+
+function footOf(a) {
+  if (!a) return 1;
+  if (a._socket !== undefined || a._sheet !== undefined) return footOfSpecies(a._sheet ? a._sheet.species : "");
+  return footOfSpecies(a.species);
+}
+
+function footLo(n) {
+  return Math.floor((n - 1) / 2);
+}
+
+function footHi(n) {
+  return n - 1 - Math.floor((n - 1) / 2);
+}
+
+function footRect(a, col, row) {
+  const n = footOf(a);
+  const c = col === undefined ? a.col : col;
+  const r = row === undefined ? a.row : row;
+  return { c0: c - footLo(n), c1: c + footHi(n), r0: r - footLo(n), r1: r + footHi(n), n: n };
+}
+
+function footCoversCell(a, col, row) {
+  const n = footOf(a);
+  if (n === 1) return a.col === col && a.row === row;
+  return col >= a.col - footLo(n) && col <= a.col + footHi(n) && row >= a.row - footLo(n) && row <= a.row + footHi(n);
+}
+
+function footSpeedMult(a) {
+  const n = footOf(a);
+  return n <= 1 ? 1 : 1 + 0.4 * (n - 1);
+}
+
+function viewPadOf(a) {
+  const n = footOf(a);
+  return n <= 1 ? 0 : 3 * (n - 1);
+}
+
+function footCellsWalkable(layer, col, row, n) {
+  if (n <= 1) return isWalkable(layer, col, row);
+  const lo = footLo(n);
+  const hi = footHi(n);
+  for (let r = row - lo; r <= row + hi; r++) {
+    for (let c = col - lo; c <= col + hi; c++) {
+      if (!isWalkable(layer, c, r)) return false;
+    }
+  }
+  return true;
+}
+
+function footBlockedFor(a, nc, nr) {
+  const n = footOf(a);
+  if (!footCellsWalkable(a.layer, nc, nr, n)) return true;
+  const lo = footLo(n);
+  const hi = footHi(n);
+  for (let r = nr - lo; r <= nr + hi; r++) {
+    for (let c = nc - lo; c <= nc + hi; c++) {
+      const hit = entityAt(a.layer, c, r, a.id);
+      if (hit) {
+        const ownCompanion = hit.kind === "companion" && hit.ownerPlayerId === a.id;
+        if (!ownCompanion) return true;
+      }
+      if (playerAt(a.layer, c, r, a.id)) return true;
+    }
+  }
+  return false;
+}
+
+function footDisplaceCompanions(p) {
+  if (footOf(p) <= 1) return;
+  for (const e of companionsOf(p)) {
+    if (e._fight || e.down) continue;
+    if (!footCoversCell(p, e.col, e.row)) continue;
+    const rect = footRect(p);
+    const spot = worldFreeSpot(p.layer, rect.c1 + 1, p.row, null);
+    companionMoveTo(e, p.layer, spot.col, spot.row);
+  }
 }
 
 function boulderHoldMsFor(p) {
@@ -2242,10 +2351,11 @@ function lightCarryTick() {
 }
 
 function sendView(p) {
-  const w = VIEW_HALF_W * 2 + 1;
-  const h = VIEW_HALF_H * 2 + 1;
-  const c0 = p.col - VIEW_HALF_W;
-  const r0 = p.row - VIEW_HALF_H;
+  const vpad = viewPadOf(p);
+  const w = (VIEW_HALF_W + vpad) * 2 + 1;
+  const h = (VIEW_HALF_H + vpad) * 2 + 1;
+  const c0 = p.col - VIEW_HALF_W - vpad;
+  const r0 = p.row - VIEW_HALF_H - vpad;
   const rows = [];
   const artRows = [];
   const solRows = [];
@@ -2266,7 +2376,7 @@ function sendView(p) {
   const selfLight = playerLightInfo(p);
   p._lightSig = selfLight.r + "|" + selfLight.c;
   const layerObj = layers[p.layer];
-  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, art: artRows, sol: solRows, palette: tilePalette, objects: objectsInWindow(p.layer, c0 - VIEW_OBJ_PAD, r0 - VIEW_OBJ_PAD, w + VIEW_OBJ_PAD * 2, h + VIEW_OBJ_PAD * 2), entities: entitiesInWindow(p.layer, c0, r0, w, h), items: itemsInWindow(p.layer, c0 - VIEW_OBJ_PAD, r0 - VIEW_OBJ_PAD, w + VIEW_OBJ_PAD * 2, h + VIEW_OBJ_PAD * 2), lm: layerObj && layerObj.light ? layerObj.light : "outdoor", nv: playerNightVision(p) ? 1 : 0, sl: selfLight.r, slc: selfLight.c, hv: playerHovers(p) ? 1 : 0, gl: guildsForView(p), cs: sitesForView(p) });
+  sendPlayer(p, { type: "view", layer: p.layer, c0: c0, r0: r0, rows: rows, art: artRows, sol: solRows, palette: tilePalette, objects: objectsInWindow(p.layer, c0 - VIEW_OBJ_PAD, r0 - VIEW_OBJ_PAD, w + VIEW_OBJ_PAD * 2, h + VIEW_OBJ_PAD * 2), entities: entitiesInWindow(p.layer, c0 - 3, r0 - 3, w + 6, h + 6), vp: vpad, items: itemsInWindow(p.layer, c0 - VIEW_OBJ_PAD, r0 - VIEW_OBJ_PAD, w + VIEW_OBJ_PAD * 2, h + VIEW_OBJ_PAD * 2), lm: layerObj && layerObj.light ? layerObj.light : "outdoor", nv: playerNightVision(p) ? 1 : 0, sl: selfLight.r, slc: selfLight.c, hv: playerHovers(p) ? 1 : 0, gl: guildsForView(p), cs: sitesForView(p) });
 }
 
 function notifyItem(layer, col, row, data) {
@@ -2503,6 +2613,7 @@ function companionSnap(p) {
 }
 
 function companionStepFree(e, c, r) {
+  if (footOf(e) > 1) return !footBlockedFor(e, c, r);
   if (!isWalkable(e.layer, c, r)) return false;
   if (entityAt(e.layer, c, r, e.id)) return false;
   if (playerAt(e.layer, c, r)) return false;
@@ -3043,26 +3154,30 @@ function scheduleEntitySave() {
 
 function publicEntity(e) {
   const lightInfo = entityLightInfo(e);
-  return { id: e.id, kind: e.kind, name: e.name, dex: e.dex, layer: e.layer, col: e.col, row: e.row, direction: e.direction, state: e.state, fainted: !!e.fainted, light: lightInfo.r, lc: lightInfo.c, cy: e.carry || "" };
+  return { id: e.id, kind: e.kind, name: e.name, dex: e.dex, layer: e.layer, col: e.col, row: e.row, direction: e.direction, state: e.state, fainted: !!e.fainted, light: lightInfo.r, lc: lightInfo.c, cy: e.carry || "", fp: footOf(e) };
 }
 
 function gmEntity(e) {
-  return { id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, state: e.state, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, schedule: Array.isArray(e.schedule) ? e.schedule : [], patrol: Array.isArray(e.patrol) ? e.patrol : [], chatter: !!e.chatter, busy: !!e._busy, fainted: !!e.fainted };
+  return { id: e.id, kind: e.kind, name: e.name, species: e.species, dex: e.dex, level: e.level, layer: e.layer, col: e.col, row: e.row, homeCol: e.homeCol, homeRow: e.homeRow, direction: e.direction, wander: e.wander, sensor: e.sensor, lines: e.lines, state: e.state, boss: e.boss, ivs: e.ivs, accessories: e.accessories, loot: e.loot, moves: e.moves, respawn: e.respawn || 0, schedule: Array.isArray(e.schedule) ? e.schedule : [], patrol: Array.isArray(e.patrol) ? e.patrol : [], chatter: !!e.chatter, busy: !!e._busy, fainted: !!e.fainted, fp: footOf(e) };
 }
 
 function entityAt(layer, col, row, ignoreId) {
   for (const id in entities) {
     const e = entities[id];
     if (e.down || e.kind === "corpse" || e.fainted) continue;
-    if (e.id !== ignoreId && e.layer === layer && e.col === col && e.row === row) return e;
+    if (e.id === ignoreId || e.layer !== layer) continue;
+    if (e.col === col && e.row === row) return e;
+    if (Math.abs(e.col - col) <= 4 && Math.abs(e.row - row) <= 4 && footCoversCell(e, col, row)) return e;
   }
   return null;
 }
 
-function playerAt(layer, col, row) {
+function playerAt(layer, col, row, ignoreId) {
   for (const id in worldSession.players) {
     const q = worldSession.players[id];
-    if (q.layer === layer && q.col === col && q.row === row) return q;
+    if (q.layer !== layer || q.id === ignoreId) continue;
+    if (q.col === col && q.row === row) return q;
+    if (Math.abs(q.col - col) <= 4 && Math.abs(q.row - row) <= 4 && footCoversCell(q, col, row)) return q;
   }
   return null;
 }
@@ -3246,9 +3361,10 @@ function schedHeapPop(heap) {
   return top;
 }
 
-function schedFindPath(layer, fromC, fromR, toC, toR) {
+function schedFindPath(layer, fromC, fromR, toC, toR, fp) {
+  const fn = fp || 1;
   if (fromC === toC && fromR === toR) return [];
-  if (!isWalkable(layer, toC, toR)) return null;
+  if (!footCellsWalkable(layer, toC, toR, fn)) return null;
   const startKey = fromR * LAYER_W + fromC;
   const goalKey = toR * LAYER_W + toC;
   const cameFrom = new Map();
@@ -3281,7 +3397,7 @@ function schedFindPath(layer, fromC, fromR, toC, toR) {
       const nr = r + d[1];
       if (nc < 0 || nr < 0 || nc >= LAYER_W || nr >= LAYER_H) continue;
       const nkey = nr * LAYER_W + nc;
-      if (nkey !== goalKey && !isWalkable(layer, nc, nr)) continue;
+      if (nkey !== goalKey && !footCellsWalkable(layer, nc, nr, fn)) continue;
       const next = baseCost + 1;
       const known = cost.get(nkey);
       if (known !== undefined && known <= next) continue;
@@ -3681,7 +3797,7 @@ function patrolTick(e, now) {
       st.arrived = true;
       return true;
     }
-    const route = schedFindPath(e.layer, e.col, e.row, target[0], target[1]);
+    const route = schedFindPath(e.layer, e.col, e.row, target[0], target[1], footOf(e));
     if (route === null || route.length === 0) {
       st.fails = st.fails + 1;
       st.i = st.i + 1;
@@ -3883,6 +3999,7 @@ function entityTick() {
     if ((isPitCell(e.layer, nc, nr) || isLavaCell(e.layer, nc, nr)) && !entityHovers(e)) continue;
     if (entityAt(e.layer, nc, nr, e.id)) continue;
     if (playerAt(e.layer, nc, nr)) continue;
+    if (footOf(e) > 1 && footBlockedFor(e, nc, nr)) continue;
     const oldCol = e.col;
     const oldRow = e.row;
     e.col = nc;
@@ -6495,7 +6612,7 @@ function workerPlan(e, g, site, gw) {
     e._gwStatus = "No way to reach " + bestKw;
     return;
   }
-  const route = e.col === target[0] && e.row === target[1] ? [] : schedFindPath(e.layer, e.col, e.row, target[0], target[1]);
+  const route = e.col === target[0] && e.row === target[1] ? [] : schedFindPath(e.layer, e.col, e.row, target[0], target[1], footOf(e));
   if (route === null) {
     gw.mode = "idle";
     e._gwStatus = "No way to reach " + bestKw;
@@ -6521,7 +6638,7 @@ function workerPlanDeliver(e, site, gw) {
     e._gwStatus = "No way to reach the site";
     return;
   }
-  const route = e.col === target[0] && e.row === target[1] ? [] : schedFindPath(e.layer, e.col, e.row, target[0], target[1]);
+  const route = e.col === target[0] && e.row === target[1] ? [] : schedFindPath(e.layer, e.col, e.row, target[0], target[1], footOf(e));
   if (route === null) {
     gw.mode = "idle";
     e._gwStatus = "No way to reach the site";
@@ -6791,7 +6908,8 @@ function refreshViewsNear(layer, col, row) {
   for (const id in worldSession.players) {
     const q = worldSession.players[id];
     if (!q || q.layer !== layer) continue;
-    if (Math.abs(q.col - col) > VIEW_HALF_W + VIEW_OBJ_PAD + 1 || Math.abs(q.row - row) > VIEW_HALF_H + VIEW_OBJ_PAD + 1) continue;
+    const qpad = viewPadOf(q);
+    if (Math.abs(q.col - col) > VIEW_HALF_W + qpad + VIEW_OBJ_PAD + 1 || Math.abs(q.row - row) > VIEW_HALF_H + qpad + VIEW_OBJ_PAD + 1) continue;
     sendView(q);
   }
 }
@@ -7033,7 +7151,7 @@ function rollBoulder(p, col, row) {
   for (const id in worldSession.players) {
     const q = worldSession.players[id];
     if (!q || q.layer !== layer) continue;
-    const near = Math.abs(q.col - col) <= VIEW_HALF_W + tiles && Math.abs(q.row - row) <= VIEW_HALF_H + tiles;
+    const near = Math.abs(q.col - col) <= VIEW_HALF_W + viewPadOf(q) + tiles && Math.abs(q.row - row) <= VIEW_HALF_H + viewPadOf(q) + tiles;
     if (near) sendPlayer(q, message);
   }
 
@@ -7292,7 +7410,8 @@ function handleFreePos(p, data) {
   const elapsed = Math.min(0.5, Math.max(0, (now - (p._posAt || now - 100)) / 1000));
   p._posAt = now;
   const budgetBefore = typeof p._moveBudget === "number" ? p._moveBudget : 0.6;
-  p._moveBudget = Math.min(0.9, budgetBefore + FREE_SPEED_TPS * 1.35 * elapsed);
+  const speedMult = footSpeedMult(p);
+  p._moveBudget = Math.min(0.9 * speedMult, budgetBefore + FREE_SPEED_TPS * speedMult * 1.35 * elapsed);
   const cur = playerFreePos(p);
   const dist = Math.hypot(x - cur.x, y - cur.y);
   if (dist > p._moveBudget + 0.05) {
@@ -7313,11 +7432,9 @@ function handleFreePos(p, data) {
       if (hit && !(hit.kind === "companion" && hit.ownerPlayerId === p.id)) blocked = true;
     }
     if (!blocked) {
-      for (const id in worldSession.players) {
-        const o = worldSession.players[id];
-        if (o !== p && o.layer === p.layer && o.col === nc && o.row === nr) { blocked = true; break; }
-      }
+      if (playerAt(p.layer, nc, nr, p.id)) blocked = true;
     }
+    if (!blocked && footOf(p) > 1) blocked = footBlockedFor(p, nc, nr);
     if (blocked) {
       sendPosCorrect(p);
       return;
@@ -7337,6 +7454,7 @@ function handleFreePos(p, data) {
   p.row = nr;
   p._fx = x;
   p._fy = y;
+  if (tileChanged) footDisplaceCompanions(p);
   if (tileChanged && hazardOnEnter(p, prevCol, prevRow)) return;
   const moved = { type: "moved", id: p.id, col: nc, row: nr, fx: x, fy: y, direction: p.direction };
   if (tileChanged) {
@@ -7366,16 +7484,14 @@ function handleWorldMove(p, dir) {
   if (!blocked) {
     const hit = entityAt(p.layer, nc, nr);
     if (hit) {
-      if (hit.kind === "companion" && hit.ownerPlayerId === p.id && !hit._fight) swapWith = hit;
-      else blocked = true;
+      if (hit.kind === "companion" && hit.ownerPlayerId === p.id && !hit._fight && footOf(p) === 1) swapWith = hit;
+      else if (!(hit.kind === "companion" && hit.ownerPlayerId === p.id && footOf(p) > 1)) blocked = true;
     }
   }
   if (!blocked) {
-    for (const id in worldSession.players) {
-      const o = worldSession.players[id];
-      if (o !== p && o.layer === p.layer && o.col === nc && o.row === nr) { blocked = true; break; }
-    }
+    if (playerAt(p.layer, nc, nr, p.id)) blocked = true;
   }
+  if (!blocked && footOf(p) > 1) blocked = footBlockedFor(p, nc, nr);
   if (blocked) {
     for (const id in p._seen) {
       const q = worldSession.players[id];
@@ -7410,6 +7526,7 @@ function handleWorldMove(p, dir) {
     swapWith.row = prevRow;
     broadcastEntity(swapWith, swapWith.layer, oc, or);
   }
+  footDisplaceCompanions(p);
   refreshVisibility(p);
   const moved = { type: "moved", id: p.id, col: nc, row: nr, direction: p.direction };
   sendPlayer(p, moved);
@@ -8154,15 +8271,16 @@ function startWorldPlayer(socket, pass, info, spawn) {
   worldSession.players[id] = p;
   refreshVisibility(p);
 
-  const w = VIEW_HALF_W * 2 + 1;
-  const h = VIEW_HALF_H * 2 + 1;
+  const initPad = viewPadOf(p);
+  const w = (VIEW_HALF_W + initPad) * 2 + 1;
+  const h = (VIEW_HALF_H + initPad) * 2 + 1;
   const players = {};
   for (const seenId in p._seen) {
     const q = worldSession.players[seenId];
     if (q) players[seenId] = publicPlayer(q);
   }
   players[id] = publicPlayer(p);
-  sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W, p.row - VIEW_HALF_H, w, h), inventory: inventory, sheet: clientSheet(p._sheet), itemFx: ITEM_FX, vision: VISION, chatRange: CHAT_RANGE, cxm: exprMap(p) });
+  sendPlayer(p, { type: "init", id: id, role: "player", world: true, layer: p.layer, turn: 1, players: players, floorItems: itemsInWindow(p.layer, p.col - VIEW_HALF_W - initPad, p.row - VIEW_HALF_H - initPad, w, h), inventory: inventory, sheet: clientSheet(p._sheet), itemFx: ITEM_FX, vision: VISION, chatRange: CHAT_RANGE, cxm: exprMap(p) });
   sendGuildState(p);
   sendPlayer(p, timeMessage());
   for (const notice of joinNotices) sendPlayer(p, { type: "item_result", ok: !combatLogged, text: notice });
@@ -9141,6 +9259,9 @@ worldCombat.init({
   isWalkable: isWalkable,
   entityAt: entityAt,
   playerAt: playerAt,
+  footRect: footRect,
+  footOf: footOf,
+  footBlockedFor: footBlockedFor,
   sendPlayer: sendPlayer,
   sendGms: sendGms,
   broadcastEntity: broadcastEntity,

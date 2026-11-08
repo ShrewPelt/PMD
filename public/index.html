@@ -575,6 +575,7 @@ function create() {
   player.y = tilePixelY(player.row);
   player.play(DEX + "_idle_down");
   player.setDepth(10);
+  player.fp = 1;
 
   this.cameras.main.setBounds(0, 0, MAP[0].length * TILE, MAP.length * TILE);
   this.cameras.main.startFollow(player, true, 0.12, 0.12);
@@ -707,15 +708,14 @@ function updateViewRotation() {
   sceneRef.cameras.main.setRotation(viewRot);
   const counter = -viewRot;
   if (player) {
-    player.feetOff = (TILE / 2 - 2) - (hasFloorItemAt(player.col, player.row) ? ITEM_LIFT : 0);
-    player.setOrigin(0.5, player.atkAnim ? 0.5 + (24 - player.feetOff) / (player.height * player.scaleY) : 1 - player.feetOff / (player.height * player.scaleY));
+    fpOriginFor(player, (TILE / 2 - 2) - (hasFloorItemAt(player.col, player.row) ? ITEM_LIFT : 0));
     player.setRotation(counter);
+    fpCameraFrame();
   }
   for (const id in otherPlayers) {
     const sp = otherPlayers[id];
     if (sp && sp !== "loading") {
-      sp.feetOff = TILE / 2 - 2;
-      sp.setOrigin(0.5, sp.atkAnim ? 0.5 + (24 - sp.feetOff) / (sp.height * sp.scaleY) : 1 - sp.feetOff / (sp.height * sp.scaleY));
+      fpOriginFor(sp, TILE / 2 - 2);
       sp.setRotation(counter);
     }
   }
@@ -1712,6 +1712,7 @@ function connectMultiplayer(scene) {
           playerMaxHp = me.maxHp;
           player.x = tilePixelX(player.col);
           player.y = playerRestingY(player.col, player.row);
+          applyFootprint(player, me.fp || 1);
           loadSpecies(scene, me.dex, (okDex) => {
             DEX = okDex;
             player.setTexture(okDex + "_idle");
@@ -1840,6 +1841,108 @@ function connectMultiplayer(scene) {
   });
 }
 
+const fpMeasureCache = {};
+
+function fpMeasure(dex) {
+  if (fpMeasureCache[dex]) return fpMeasureCache[dex];
+  if (!sceneRef || !dex || !sceneRef.textures.exists(dex + "_idle")) return null;
+  const tex = sceneRef.textures.get(dex + "_idle");
+  const names = tex.getFrameNames();
+  const fr = tex.get(names[0] !== undefined ? names[0] : 0);
+  const img = tex.getSourceImage();
+  if (!img || !fr) return null;
+  const cv = document.createElement("canvas");
+  cv.width = img.width;
+  cv.height = img.height;
+  const cx = cv.getContext("2d");
+  cx.drawImage(img, 0, 0);
+  const data = cx.getImageData(fr.cutX, fr.cutY, fr.width, fr.height).data;
+  let minX = 1e9;
+  let maxX = -1;
+  let minY = 1e9;
+  let maxY = -1;
+  for (let y = 0; y < fr.height; y++) {
+    for (let x = 0; x < fr.width; x++) {
+      if (data[(y * fr.width + x) * 4 + 3] > 20) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0) return null;
+  const m = { bw: maxX - minX + 1, bh: maxY - minY + 1, cx: (minX + maxX + 1) / 2 / fr.width, f: (maxY + 1) / fr.height };
+  fpMeasureCache[dex] = m;
+  return m;
+}
+
+function fpDexOf(sp) {
+  return sp === player ? DEX : sp.dex;
+}
+
+function fpRescale(sp) {
+  const n = sp.fp || 1;
+  if (n <= 1) return null;
+  const dex = fpDexOf(sp);
+  const m = fpMeasure(dex);
+  if (!m) return null;
+  if (sp.fpDex !== dex) {
+    sp.fpDex = dex;
+    sp.setScale(n * TILE * 0.9 / Math.max(m.bw, m.bh));
+  }
+  return m;
+}
+
+function applyFootprint(sp, n) {
+  const count = n && n > 1 ? n : 1;
+  sp.fp = count;
+  sp.fpDex = "";
+  if (count <= 1) {
+    sp.setScale(1.5);
+    return;
+  }
+  sp.setScale(Math.max(1.5, count * 1.2));
+}
+
+function fpZoomFor(n) {
+  return n <= 1 ? 1 : 1 / (1 + 0.3 * (n - 1));
+}
+
+function fpCameraFrame() {
+  if (!sceneRef || !player || isGM || window.worldGmActive) return;
+  const cam = sceneRef.cameras.main;
+  const want = fpZoomFor(player.fp || 1);
+  if (Math.abs(cam.zoom - want) < 0.004) {
+    if (cam.zoom !== want) cam.setZoom(want);
+    return;
+  }
+  cam.setZoom(cam.zoom + (want - cam.zoom) * 0.08);
+}
+
+function fpOriginFor(sp, baseFeet) {
+  const n = sp.fp || 1;
+  const m = n > 1 ? fpRescale(sp) : null;
+  if (!m) {
+    sp.feetOff = baseFeet;
+    const w0 = sp.height * sp.scaleY;
+    sp.setOrigin(0.5, sp.atkAnim ? 0.5 + (24 - baseFeet) / w0 : 1 - baseFeet / w0);
+    return;
+  }
+  const feet = n * TILE / 2 - 4;
+  let ox = 0;
+  let oy = 0;
+  if (n % 2 === 0) {
+    const half = TILE / 2;
+    ox = half * Math.cos(viewRot) - half * Math.sin(viewRot);
+    oy = half * Math.sin(viewRot) + half * Math.cos(viewRot);
+  }
+  sp.feetOff = feet;
+  const w = sp.width * sp.scaleX;
+  const h = sp.height * sp.scaleY;
+  sp.setOrigin(m.cx - ox / w, m.f - (feet + oy) / h);
+}
+
 function addOtherPlayer(scene, p) {
   if (otherPlayers[p.id]) return;
   otherPlayers[p.id] = "loading";
@@ -1848,6 +1951,7 @@ function addOtherPlayer(scene, p) {
     const sprite = scene.add.sprite(tilePixelX(p.col), tilePixelY(p.row), okDex + "_idle");
     sprite.setOrigin(0.5, 1);
     sprite.setScale(1.5);
+    applyFootprint(sprite, p.fp || 1);
     sprite.setDepth(10);
     sprite.dex = okDex;
     sprite.direction = p.direction;
