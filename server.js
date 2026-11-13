@@ -115,6 +115,117 @@ app.get("/contributors", (req, res) => {
   res.sendFile(path.join(SITE_DIR, "contributors.html"));
 });
 
+const GUEST_MAX_PASSES = 60;
+const GUEST_PASS_TTL_MS = 6 * 60 * 60 * 1000;
+const GUEST_IP_LIMIT = 8;
+const GUEST_IP_WINDOW_MS = 60 * 60 * 1000;
+const guestIpLog = {};
+
+function isGuestUser(userId) {
+  return String(userId).indexOf("guest_") === 0;
+}
+
+function guestSheet() {
+  return {
+    species: "Charmander",
+    level: 5,
+    exp: 0,
+    types: ["Fire"],
+    attack: 11,
+    defense: 9,
+    spAtk: 12,
+    spDef: 10,
+    speed: 12,
+    moves: [
+      { name: "Scratch", data: { type: "Normal", category: "physical", power: 40, accuracy: 100, mpCost: 2, target: "enemy" } },
+      { name: "Ember", data: { type: "Fire", category: "special", power: 40, accuracy: 100, mpCost: 2, target: "enemy", effect: { status: "burn", chance: 10 } } },
+      { name: "Growl", data: { type: "Normal", category: "status", power: 0, accuracy: 100, mpCost: 2, target: "enemy", effect: { target: "enemy", stat: "attack", stages: -1, chance: 100 } } }
+    ],
+    coins: 0,
+    capacity: 10
+  };
+}
+
+function guestIsOnline(pass) {
+  for (const id of Object.keys(worldSession.players)) {
+    if (worldSession.players[id]._pass === pass) return true;
+  }
+  return false;
+}
+
+function pruneGuestPasses() {
+  const now = Date.now();
+  let changed = false;
+  for (const pass of Object.keys(worldPasses)) {
+    const info = worldPasses[pass];
+    if (!info || !info.guest) continue;
+    if (now - (info.guestAt || 0) < GUEST_PASS_TTL_MS) continue;
+    if (guestIsOnline(pass)) continue;
+    delete worldPasses[pass];
+    if (worldByUser[info.userId] === pass) delete worldByUser[info.userId];
+    changed = true;
+  }
+  for (const ip of Object.keys(guestIpLog)) {
+    guestIpLog[ip] = guestIpLog[ip].filter((t) => now - t < GUEST_IP_WINDOW_MS);
+    if (guestIpLog[ip].length === 0) delete guestIpLog[ip];
+  }
+  if (changed) writeJsonFile(PASSES_FILE, worldPasses);
+}
+
+setInterval(pruneGuestPasses, 10 * 60 * 1000);
+
+function guestMessagePage(res, text) {
+  res.status(429);
+  res.set("Cache-Control", "no-store");
+  res.type("html").send("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='robots' content='noindex,nofollow'><title>PMD Azarus</title></head><body style='margin:0;background:#1b1b22;color:#eee;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center;padding:24px'><div><h2>" + text + "</h2><p><a style='color:#8ab4ff' href='/'>Back to PMD Azarus</a></p></div></body></html>");
+}
+
+app.get("/guest", (req, res) => {
+  pruneGuestPasses();
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  const ip = forwarded || req.ip || "unknown";
+  const now = Date.now();
+  const log = (guestIpLog[ip] || []).filter((t) => now - t < GUEST_IP_WINDOW_MS);
+  if (log.length >= GUEST_IP_LIMIT) {
+    guestMessagePage(res, "Too many guest sessions from your connection. Please try again in a while.");
+    return;
+  }
+  let guestCount = 0;
+  for (const pass of Object.keys(worldPasses)) {
+    if (worldPasses[pass] && worldPasses[pass].guest) guestCount++;
+  }
+  if (guestCount >= GUEST_MAX_PASSES) {
+    guestMessagePage(res, "The guest area is full right now. Please try again in a few minutes.");
+    return;
+  }
+  log.push(now);
+  guestIpLog[ip] = log;
+  const userId = "guest_" + crypto.randomBytes(8).toString("hex");
+  const pass = makeToken();
+  const sheet = guestSheet();
+  worldPasses[pass] = {
+    userId: userId,
+    role: "player",
+    name: "Guest",
+    slot: 1,
+    dex: "0004",
+    hp: 30,
+    maxHp: 30,
+    mp: 10,
+    maxMp: 10,
+    inventory: [],
+    sheet: cleanSheet(sheet),
+    npcName: null,
+    companions: [],
+    guest: true,
+    guestAt: now
+  };
+  worldByUser[userId] = pass;
+  writeJsonFile(PASSES_FILE, worldPasses);
+  res.set("Cache-Control", "no-store");
+  res.redirect(302, "/?session=" + WORLD_SESSION + "&pass=" + pass);
+});
+
 app.use((req, res, next) => {
   if (req.method !== "GET" || (req.path !== "/" && req.path !== "/index.html")) return next();
   const pass = typeof req.query.pass === "string" ? req.query.pass : "";
@@ -2469,6 +2580,7 @@ function saveCombatLogs() {
 }
 
 function queueWorldSave(p, final) {
+  if (isGuestUser(p.userId)) return;
   const current = countInventory(p._inv);
   const delta = {};
   const names = {};
